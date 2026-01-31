@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.vscode/
+
+.cache/
+.env
+llm/
+*.log
+.pipeline_state.json
