@@ -12,7 +12,7 @@ from config import (
 )
 from console import console
 from rag import build_retriever
-from state import load_pipeline_state, save_pipeline_state
+from state import load_pipeline_state, save_pipeline_state, PipelineState
 from ui import ask_before_step, run_agent_step
 
 
@@ -31,16 +31,11 @@ def run_pipeline():
     config: RunnableConfig = {"configurable": {"thread_id": "session_001"}}
     protocol = protocol_name.lower()
 
-    state: dict = {
+    state: PipelineState = {
         "packet_types": [],
         "constraints": "",
         **load_pipeline_state(),
     }
-
-    if not isinstance(state.get("packet_types"), list):
-        state["packet_types"] = []
-    if not isinstance(state.get("constraints"), str):
-        state["constraints"] = ""
 
     def step_1_fetch_packet_types():
         step1_prompt = f"""
@@ -552,7 +547,7 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
             f"[dim]Generating fixer registry by running: {' '.join(cmd)}[/dim]"
         )
 
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             stderr=subprocess.STDOUT,
             stdout=subprocess.PIPE,

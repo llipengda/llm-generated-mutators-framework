@@ -6,7 +6,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import FAISS
@@ -50,7 +50,7 @@ def _cache_key_for_file(
     except Exception:
         model_name = None
 
-    payload = {
+    payload: dict[str, object] = {
         "v": _RAG_CACHE_VERSION,
         "rfc_abspath": str(Path(rfc_path).resolve()),
         "rfc_sha256": _sha256_file(rfc_path),
@@ -146,5 +146,5 @@ def build_retriever(rfc_path: str):
 
             return vectorstore.as_retriever(search_kwargs={"k": 4})
         except Exception as e:
-            console.print(f"[yellow]Skipping RAG setup due to error: {e}[/yellow]")
-            return None
+            console.log(f"[bold red]RAG setup failed:[/bold red] {e}")
+            raise

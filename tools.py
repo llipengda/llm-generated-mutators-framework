@@ -2,6 +2,7 @@ import os
 import subprocess
 
 from langchain_core.tools import tool
+from langchain_core.retrievers import BaseRetriever
 
 from console import console, file_logger
 
@@ -108,7 +109,7 @@ def append_and_verify_code(filepath: str, content_to_append: str) -> str:
         return f"ERROR: Could not append to file {filepath}. {str(e)}"
 
 
-def make_rfc_search(retriever):
+def make_rfc_search(retriever: BaseRetriever):
     @tool("RFC_Search")
     def rfc_search(query: str) -> str:
         """Search RFC documents for protocol definitions, fields, and constraints."""

@@ -1,8 +1,13 @@
 import json
 import os
+from typing import TypedDict
 
 from console import console
 
+
+class PipelineState(TypedDict):
+    packet_types: list[str]
+    constraints: str
 
 def _pipeline_state_path() -> str:
     # Store next to repo root to make it easy to find/reuse across runs.
@@ -10,25 +15,25 @@ def _pipeline_state_path() -> str:
     return os.path.join(repo_root, ".pipeline_state.json")
 
 
-def load_pipeline_state() -> dict:
+def load_pipeline_state() -> PipelineState:
     path = _pipeline_state_path()
     if not os.path.exists(path):
-        return {}
+        return {"packet_types": [], "constraints": ""}
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            return data
+        if isinstance(data, dict) and "packet_types" in data and "constraints" in data:
+            return data # type: ignore
     except Exception as e:
         console.print(
             f"[yellow]Warning: failed to load pipeline state from {path}: {e}[/yellow]"
         )
 
-    return {}
+    return {"packet_types": [], "constraints": ""}
 
 
-def save_pipeline_state(state: dict) -> None:
+def save_pipeline_state(state: PipelineState) -> None:
     path = _pipeline_state_path()
     tmp_path = f"{path}.tmp"
 

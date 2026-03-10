@@ -1,10 +1,11 @@
 import asyncio
-
 import questionary
+
 from rich.markdown import Markdown
 from rich.panel import Panel
-
 from console import console
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
 
 
 def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> str:
@@ -18,7 +19,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
         f"[blue italic]About to start: {step_name} (auto-continue in {timeout_s:.0f}s)[/blue italic]"
     )
 
-    choices = [
+    choices: list[str | questionary.Choice] = [
         "Continue",
         questionary.Choice(
             "Retry previous step", disabled=None if has_previous else "No previous step"
@@ -66,7 +67,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     return "exit"
 
 
-def run_agent_step(*, agent_graph, prompt_text: str, config, step_title: str):
+def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config: RunnableConfig, step_title: str):
     """Run the agent with a loading spinner and formatted output."""
 
     console.rule(f"[bold blue]{step_title}[/bold blue]")
