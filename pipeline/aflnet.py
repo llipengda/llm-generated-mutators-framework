@@ -1,45 +1,13 @@
 import subprocess
+from typing import override
 
-from langchain_core.runnables import RunnableConfig
-
-from agent import build_agent_graph
-from config import (
-    get_protocol_name,
-    get_rfc_path,
-    get_seed_dir,
-    load_env,
-    warn_if_rfc_missing,
-)
+from pipeline.base import BasePipeline
 from console import console
-from rag import build_retriever
-from state import load_pipeline_state, save_pipeline_state, PipelineState
-from ui import ask_before_step, run_agent_step
 
-
-def run_pipeline():
-    load_env()
-
-    protocol_name = get_protocol_name()
-    rfc_path = get_rfc_path()
-    seed_dir = get_seed_dir()
-
-    warn_if_rfc_missing(rfc_path)
-    retriever = build_retriever(rfc_path)
-
-    agent_graph = build_agent_graph(retriever=retriever)
-
-    config: RunnableConfig = {"configurable": {"thread_id": "session_001"}}
-    protocol = protocol_name.lower()
-
-    state: PipelineState = {
-        "packet_types": [],
-        "constraints": "",
-        **load_pipeline_state(),
-    }
-
-    def step_1_fetch_packet_types():
+class AFLNetPipeline(BasePipeline):
+    def step_1_fetch_packet_types(self):
         step1_prompt = f"""
-        For {protocol_name} protocol, list all the request packet types according to the RFC document.
+        For {self.protocol_name} protocol, list all the request packet types according to the RFC document.
         Use the "RFC_Search" tool to look up the relevant sections in the RFC.
         Return the list as a comma-separated string.
         ONLY output the types, nothing else.
@@ -49,29 +17,24 @@ def run_pipeline():
         - "MQTT packet types"
         """
 
-        response = run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=step1_prompt,
-            config=config,
-            step_title="Step 1: Fetch Packet Types",
-        )
+        response = self.call_agent(step1_prompt, "Step 1: Fetch Packet Types")
 
         packet_types_raw = response["messages"][-1].content
         packet_types = [t.strip()
                         for t in packet_types_raw.split(",") if t.strip()]
-        state["packet_types"] = packet_types
-        save_pipeline_state(state)
+        self.state["packet_types"] = packet_types
+        self.save_state()
         console.print(f"[bold]Parsed Types:[/bold] {packet_types}")
 
-    def step_2_generate_c_structures():
-        packet_types = state.get("packet_types") or []
+    def step_2_generate_c_structures(self):
+        packet_types = self.state.get("packet_types") or []
         if not packet_types:
             console.print(
                 "[yellow]Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run.[/yellow]"
             )
 
         step2_prompt = f"""
-        Using the packet types we just identified ({packet_types}), output the precise structure of each packet in C language for {protocol_name}.
+        Using the packet types we just identified ({packet_types}), output the precise structure of each packet in C language for {self.protocol_name}.
 
         Assign tags to each field using the labels below if matches, field with no tag is allowed:
         - /* Fixed */ : the field has a constant value and must not be mutated.
@@ -80,7 +43,7 @@ def run_pipeline():
 
         You can add flags to identify whether a optional field is present or not.
 
-        Additionally, write a function `print_{protocol}_packets` to print out the details of each packet, including EVERY field and a function `generate_{protocol}_packets` to generate a list of empty packets.
+        Additionally, write a function `print_{self.protocol}_packets` to print out the details of each packet, including EVERY field and a function `generate_{self.protocol}_packets` to generate a list of empty packets.
 
         Reference structure (Shot 1):
         ```c
@@ -167,117 +130,102 @@ def run_pipeline():
         ```
 
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{protocol}/{protocol}_packets.h' and './llm/{protocol}/{protocol}_packets.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_packets.h' and './llm/{self.protocol}/{self.protocol}_packets.c'.
         """
 
-        run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=step2_prompt,
-            config=config,
-            step_title="Step 2: Generate C Structures",
-        )
+        self.call_agent(step2_prompt, "Step 2: Generate C Structures")
 
-    def step_3_generate_parser():
+    def step_3_generate_parser(self):
         step3_prompt = f"""
         Write a production-ready parser in C language.
 
-        size_t parse_{protocol}_msg(const u8 *buf, u32 buf_len, {protocol}_packet_t *out_packets, u32 max_count);
+        size_t parse_{self.protocol_name}_msg(const u8 *buf, u32 buf_len, {self.protocol_name}_packet_t *out_packets, u32 max_count);
 
         Input: A buffer of a message sequence.
-        Output: A list of {protocol}_packet_t.
+        Output: A list of {self.protocol}_packet_t.
         Return: Number of packets parsed, or 0 on failure.
 
         Do not use comments like /* implementation here */ or // handle headers. Every byte of the protocol must be accounted for. Use the "RFC_Search" tool to look up protocol details in the RFC.
 
-        Write parse_<packet_type> functions for EACH packet type identified earlier, and call them in parse_{protocol}_msg.
+        Write parse_<packet_type> functions for EACH packet type identified earlier, and call them in parse_{self.protocol}_msg.
 
-        The {protocol}_packet_t structure is defined in './llm/{protocol}/{protocol}_packets.h'. You can use the "Read_File" tool to read it.
+        The {self.protocol}_packet_t structure is defined in './llm/{self.protocol}/{self.protocol}_packets.h'. You can use the "Read_File" tool to read it.
 
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{protocol}/{protocol}_parser.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_parser.c'.
         """
 
-        run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=step3_prompt,
-            config=config,
-            step_title="Step 3: Generate Parser",
-        )
+        self.call_agent(step3_prompt, "Step 3: Generate Parser")
 
-    def step_4_generate_reassembler():
+    def step_4_generate_reassembler(self):
         step4_prompt = f"""
         Write a production-ready reassembler in C language.
 
-        int reassemble_{protocol}_msgs(const {protocol}_packet_t *packets, u32 num_packets, u8 *output_buf, u32 *out_len);
+        int reassemble_{self.protocol_name}_msgs(const {self.protocol_name}_packet_t *packets, u32 num_packets, u8 *output_buf, u32 *out_len);
 
-        Input: A list of {protocol}_packet_t.
+        Input: A list of {self.protocol_name}_packet_t.
         Output: A buffer containing the reassembled message sequence.
         Return 0 on success, non-zero on failure.
 
         Do not use comments like /* implementation here */ or // handle headers. Every byte of the protocol must be accounted for. Use the "RFC_Search" tool to look up protocol details in the RFC.
 
-        Write reassemble_<packet_type> functions for EACH packet type identified earlier, and call them in reassemble_{protocol}_msgs.
+        Write reassemble_<packet_type> functions for EACH packet type identified earlier, and call them in reassemble_{self.protocol_name}_msgs.
 
-        The {protocol}_packet_t structure is defined in './llm/{protocol}/{protocol}_packets.h'. You can use the "Read_File" tool to read it.
+        The {self.protocol_name}_packet_t structure is defined in './llm/{self.protocol_name}/{self.protocol_name}_packets.h'. You can use the "Read_File" tool to read it.
 
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{protocol}/{protocol}_reassembler.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol_name}/{self.protocol_name}_reassembler.c'.
         """
 
-        run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=step4_prompt,
-            config=config,
-            step_title="Step 4: Generate Reassembler",
-        )
+        self.call_agent(step4_prompt, "Step 4: Generate Reassembler")
 
-    def generate_h_file():
+    def generate_h_file(self):
         template = f"""
-#ifndef {protocol.upper()}_H
-#define {protocol.upper()}_H
+    #ifndef {self.protocol.upper()}_H
+    #define {self.protocol.upper()}_H
 
-#include "{protocol}_packets.h"
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+    #include "{self.protocol}_packets.h"
+    #include <stdbool.h>
+    #include <stddef.h>
+    #include <stdint.h>
 
-typedef uint32_t u32;
-typedef uint8_t u8;
+    typedef uint32_t u32;
+    typedef uint8_t u8;
 
-#ifdef __cplusplus
-extern "C" {{
-#endif
+    #ifdef __cplusplus
+    extern "C" {{
+    #endif
 
-{protocol}_packet_t *generate_{protocol}_packets(int count);
+    {self.protocol}_packet_t *generate_{self.protocol}_packets(int count);
 
-size_t parse_{protocol}_msg(const uint8_t *buf, u32 buf_len,
-                    {protocol}_packet_t *out_packets, u32 max_count);
+    size_t parse_{self.protocol}_msg(const uint8_t *buf, u32 buf_len,
+                    {self.protocol}_packet_t *out_packets, u32 max_count);
 
-void fix_{protocol}({protocol}_packet_t *pkt, int num_packets);
+    void fix_{self.protocol}({self.protocol}_packet_t *pkt, int num_packets);
 
-int reassemble_{protocol}_msgs(const {protocol}_packet_t *packets, u32 num_packets,
+    int reassemble_{self.protocol}_msgs(const {self.protocol}_packet_t *packets, u32 num_packets,
                         u8 *output_buf, u32 *out_len);
 
-void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
+    void print_{self.protocol}_packets(const {self.protocol}_packet_t *packets, int count);
 
-#ifdef __cplusplus
-}}
-#endif
+    #ifdef __cplusplus
+    }}
+    #endif
 
-#endif /* {protocol.upper()}_H */
-"""
+    #endif /* {self.protocol.upper()}_H */
+    """
 
-        filepath = f"./llm/{protocol}/{protocol}.h"
+        filepath = f"./llm/{self.protocol}/{self.protocol}.h"
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(template)
 
-    def verify_pr():
-        generate_h_file()
+    def verify_pr(self):
+        self.generate_h_file()
 
         console.log(
-            f"[dim]Running verification script: ./tests/PR_mr/mr_test.sh {protocol} ...[/dim]"
+            f"[dim]Running verification script: ./tests/PR_mr/mr_test.sh {self.protocol} ...[/dim]"
         )
 
         with console.status("[bold cyan]Running Metamorphic Tests...[/bold cyan]"):
-            cmd = ["./tests/PR_mr/mr_test.sh", protocol, seed_dir]
+            cmd = ["./tests/PR_mr/mr_test.sh", self.protocol, self.seed_dir]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -305,17 +253,17 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
 
         return False, "Verification script did not complete as expected.\n" + result.stdout
 
-    def step_5_verification_and_fix():
+    def step_5_verification_and_fix(self):
         console.rule("[bold blue]Step 5: Verification[/bold blue]")
 
-        success, output = verify_pr()
+        success, output = self.verify_pr()
 
         if not success:
             console.print(
                 "[bold red]Tests Failed. Initiating Fixer Agent...[/bold red]")
 
             step5_prompt = f"""
-            The parser and reassembler for {protocol_name} failed the metamorphic tests. Here is the output from the test script:
+            The parser and reassembler for {self.protocol_name} failed the metamorphic tests. Here is the output from the test script:
             {output}
 
             1. Analyze the test output and read the relevant files to identify the root cause of EACH failure. Output the analysis clearly.
@@ -327,16 +275,11 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
             Use the "Save_And_Verify_Code" tool to save the corrected code to the respective files.
             """
 
-            run_agent_step(
-                agent_graph=agent_graph,
-                prompt_text=step5_prompt,
-                config=config,
-                step_title="Step 5: Autofix Parser & Reassembler",
-            )
+            self.call_agent(step5_prompt, "Step 5: Autofix Parser & Reassembler")
 
-            console.rule(
+            console.print(
                 "[bold yellow]Re-running Verification After Fixes[/bold yellow]")
-            success, output = verify_pr()
+            success, output = self.verify_pr()
             if success:
                 console.print(
                     "[bold green]All tests passed after fixes![/bold green]")
@@ -348,10 +291,10 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
             console.print(
                 "[bold green]All tests passed on the first try![/bold green]")
 
-    def step_6_mutator_generation():
+    def step_6_mutator_generation(self):
         console.rule("[bold blue]Step 6: Mutator Generation[/bold blue]")
 
-        packet_types = state.get("packet_types") or []
+        packet_types = self.state.get("packet_types") or []
         if not packet_types:
             console.print(
                 "[yellow]Warning: packet_types is empty. Step 6 will not generate any mutators.[/yellow]"
@@ -360,16 +303,16 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
 
         for pkt_type in packet_types:
             mutator_prompt = f"""
-            List ALL fields for the {protocol} {pkt_type} packet.
+            List ALL fields for the {self.protocol} {pkt_type} packet.
 
-            For EACH field <field_name> in the {protocol} {pkt_type} packet:
+            For EACH field <field_name> in the {self.protocol} {pkt_type} packet:
             1. Fixed value? If the field is fixed per the spec, output exactly: not mutable and stop. Do not generate any mutator functions.
             2. Otherwise (the field is mutable):
             a. If the field is optional, implement:
-            void add_<field_name>({protocol}_packet_t *pkts, size_t n);
-            void delete_<field_name>({protocol}_packet_t *pkts, size_t n);
+            void add_<field_name>({self.protocol}_packet_t *pkts, size_t n);
+            void delete_<field_name>({self.protocol}_packet_t *pkts, size_t n);
             b. If the field may appear multiple times, also implement:
-            void repeat_<field_name>({protocol}_packet_t *pkts, size_t n);
+            void repeat_<field_name>({self.protocol}_packet_t *pkts, size_t n);
             c. Mutate pkts in place. Design semantic-aware mutators for this field by covering the following field-local semantic categories:
                 A. Canonical form
                 B. Boundaries
@@ -380,28 +323,23 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
                 G. prefix/suffix
                 H. Random valid mix
             Add randomized perturbations mixing shallow and deep changes to preserve long-term diversity and avoid collapse into a single pattern.
-            void mutate_<field_name>({protocol}_packet_t *pkts, size_t n);
+            void mutate_<field_name>({self.protocol}_packet_t *pkts, size_t n);
 
             Write in C (minimal helpers allowed).
 
             Use the "Read_File" tool to read the existing code files.
-            Append the generated mutator functions to './llm/{protocol}/{protocol}_mutators.c' using the "Append_And_Verify_Code" tool.
+            Append the generated mutator functions to './llm/{self.protocol}/{self.protocol}_mutators.c' using the "Append_And_Verify_Code" tool.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
             """
 
-            run_agent_step(
-                agent_graph=agent_graph,
-                prompt_text=mutator_prompt,
-                config=config,
-                step_title=f"Mutators for {pkt_type}",
-            )
+            self.call_agent(mutator_prompt, f"Mutators for {pkt_type}")
 
-    def mutator_sanity_check():
+    def mutator_sanity_check(self):
         with console.status(
             "[bold cyan]Running Mutator Sanity Check... May take a long time[/bold cyan]"
         ):
             cmd = ["./tests/mutator_sanity/run_mutator_sanity.sh",
-                   protocol, seed_dir]
+                    self.protocol, self.seed_dir]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -436,11 +374,11 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
         )
         return False, result.stdout
 
-    def step_7_mutator_sanity_check_and_fix():
+    def step_7_mutator_sanity_check_and_fix(self):
         console.rule(
             "[bold blue]Step 7: Mutator Sanity Check & Fix[/bold blue]")
 
-        success, output = mutator_sanity_check()
+        success, output = self.mutator_sanity_check()
 
         if not success:
             console.print(
@@ -448,29 +386,24 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
             )
 
             step7_prompt = f"""
-            The mutators for {protocol_name} failed the mutator sanity check. Here is the output from the test script:
+            The mutators for {self.protocol_name} failed the mutator sanity check. Here is the output from the test script:
             {output}
 
             1. Analyze the test output and read the relevant files to identify the root cause of EACH failure. Output the analysis clearly.
             2. For EACH identified issue, provide the corrected code snippets for the mutator functions that need to be fixed.
-            3. Finally, generate the corrected COMPLETE C code to './llm/{protocol}/{protocol}_mutators.c', and save it using the "Save_And_Verify_Code" tool.
+            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol}/{self.protocol}_mutators.c', and save it using the "Save_And_Verify_Code" tool.
 
             Use the "Read_File" tool to read the existing code and test files.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
-            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{protocol}/{protocol}_mutators.c'.
+            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol}/{self.protocol}_mutators.c'.
             """
 
-            run_agent_step(
-                agent_graph=agent_graph,
-                prompt_text=step7_prompt,
-                config=config,
-                step_title="Step 7: Autofix Mutators",
-            )
+            self.call_agent(step7_prompt, "Step 7: Autofix Mutators")
 
             console.rule(
                 "[bold yellow]Re-running Mutator Sanity Check After Fixes[/bold yellow]"
             )
-            success, output = mutator_sanity_check()
+            success, output = self.mutator_sanity_check()
             if success:
                 console.print(
                     "[bold green]Mutator sanity check passed after fixes![/bold green]"
@@ -484,11 +417,11 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
                 "[bold green]All mutator sanity checks passed on the first try![/bold green]"
             )
 
-    def step_8_fixer_generation():
+    def step_8_fixer_generation(self):
         console.rule("[bold blue]Step 8: Fixer Generation[/bold blue]")
 
         fixer_prompt_1 = f"""
-        Extract all constraints related to request (client to server) message format from the {protocol_name} RFC.
+        Extract all constraints related to request (client to server) message format from the {self.protocol_name} RFC.
         For example, in MQTT there are the following constraints:
         SHOT-1:
             - [MQTT-2.2.1-2] A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set to 0.
@@ -498,50 +431,40 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
         Output the constraints ONLY, nothing else.
         """
 
-        response = run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=fixer_prompt_1,
-            config=config,
-            step_title="Extract Constraints",
-        )
+        response = self.call_agent(fixer_prompt_1, "Extract Constraints")
         constraints = response["messages"][-1].content
-        state["constraints"] = constraints
-        save_pipeline_state(state)
+        self.state["constraints"] = constraints
+        self.save_state()
 
         fixer_prompt_2 = f"""
-        For {protocol}, write fixer functions for EACH constraint below. 
+        For {self.protocol}, write fixer functions for EACH constraint below. 
         
-        void fix_<constraint_name>({protocol}_packet_t *pkt, int num_packets);
-        The input is {protocol}_packet_t array. Fix in place.
+        void fix_<constraint_name>({self.protocol}_packet_t *pkt, int num_packets);
+        The input is {self.protocol}_packet_t array. Fix in place.
 
         Write a function
-        void fix_{protocol}({protocol}_packet_t *pkt, int num_packets);
+        void fix_{self.protocol}({self.protocol}_packet_t *pkt, int num_packets);
         that applies ALL fixers to the input packets.
         
         Write in C language.
 
         Use the "Read_File" tool to read the existing code files.
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{protocol}/{protocol}_fixers.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_fixers.c'.
         
         Constraints:
         {constraints}
         """
 
-        run_agent_step(
-            agent_graph=agent_graph,
-            prompt_text=fixer_prompt_2,
-            config=config,
-            step_title="Generate Fixers",
-        )
+        self.call_agent(fixer_prompt_2, "Generate Fixers")
 
-    def fixer_test_generation():
+    def fixer_test_generation(self):
         cmd = ["python3",
-               "./tests/fixer_sanity/gen_fixer_registry.py",
-               "--fixers", f"./llm/{protocol}/{protocol}_fixers.c",
-               "--out", f"./tests/fixer_sanity/{protocol}_fixer_registry.c",
-               "--pkt-type", f"{protocol}_packet_t",
-               "--exclude", f"fix_{protocol}"
-               ]
+                "./tests/fixer_sanity/gen_fixer_registry.py",
+                "--fixers", f"./llm/{self.protocol}/{self.protocol}_fixers.c",
+                "--out", f"./tests/fixer_sanity/{self.protocol}_fixer_registry.c",
+                "--pkt-type", f"{self.protocol}_packet_t",
+                "--exclude", f"fix_{self.protocol}"
+                ]
 
         console.log(
             f"[dim]Generating fixer registry by running: {' '.join(cmd)}[/dim]"
@@ -559,16 +482,16 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
 
         Task:
         Generate a single C source file:
-        {protocol}_fixer_sanity_tests.c
+        {self.protocol}_fixer_sanity_tests.c
 
         Inputs:
         1) protocol constraints in natural language.
-        2) ./tests/fixer_sanity/{protocol}_fixer_registry.c: a list of all implemented fixers.
+        2) ./tests/fixer_sanity/{self.protocol}_fixer_registry.c: a list of all implemented fixers.
 
         Requirements:
-        1. Iterate over all fixers defined in {protocol}_fixer_registry.c.
+        1. Iterate over all fixers defined in {self.protocol}_fixer_registry.c.
         2. For each fixer:
-            1) Construct a valid {protocol} packet/state.
+            1) Construct a valid {self.protocol} packet/state.
             2) Intentionally violate one or more constraints from the constraint file.
             3) Invoke the fixer.
             4) Check whether constraints are restored.
@@ -579,29 +502,24 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
         The code must be self-contained, written in C (C11), and compilable.
 
         You can use the "Read_File" tool to read the existing code files, especially 
-            ./tests/fixer_sanity/{protocol}_fixer_registry.c and ./llm/{protocol}/{protocol}_packets.h.
+            ./tests/fixer_sanity/{self.protocol}_fixer_registry.c and ./llm/{self.protocol}/{self.protocol}_packets.h.
         Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to
-            ./tests/fixer_sanity/{protocol}_fixer_sanity_tests.c.
+            ./tests/fixer_sanity/{self.protocol}_fixer_sanity_tests.c.
             
         Constraints:
-        {state['constraints']}
+        {self.state['constraints']}
         """
 
-        new_agent_graph = build_agent_graph(retriever=retriever)
-        run_agent_step(
-            agent_graph=new_agent_graph,
-            prompt_text=fixer_test_prompt,
-            config=config,
-            step_title="Generate Fixer Tests",
-        )
+        new_agent_graph = self.new_agent()
+        self.call_agent(fixer_test_prompt, "Generate Fixer Tests", agent_graph=new_agent_graph)
 
-    def fixer_sanity_check():
-        fixer_test_generation()
+    def fixer_sanity_check(self):
+        self.fixer_test_generation()
 
         with console.status(
             "[bold cyan]Running Fixer Sanity Check... May take a long time[/bold cyan]"
         ):
-            cmd = ["./tests/fixer_sanity/run_fixer_sanity.sh", protocol]
+            cmd = ["./tests/fixer_sanity/run_fixer_sanity.sh", self.protocol]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -636,37 +554,32 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
         )
         return False, result.stdout
 
-    def step_9_fixer_sanity_check_and_fix():
+    def step_9_fixer_sanity_check_and_fix(self):
         console.rule("[bold blue]Step 9: Fixer Sanity Check & Fix[/bold blue]")
 
-        passed, result = fixer_sanity_check()
+        passed, result = self.fixer_sanity_check()
 
         if not passed:
             fix_fixer_prompt = f"""
-            The fixers for {protocol_name} failed the fixer sanity check. Here is the output from the test script:
+            The fixers for {self.protocol_name} failed the fixer sanity check. Here is the output from the test script:
             {result}
 
             1. Analyze the test output and read the relevant files to identify the root cause of EACH failure. Output the analysis clearly.
             2. For EACH identified issue, provide the corrected code snippets for the fixer functions that need to be fixed.
-            3. Finally, generate the corrected COMPLETE C code to './llm/{protocol}/{protocol}_fixers.c', and save it using the "Save_And_Verify_Code" tool.
+            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol}/{self.protocol}_fixers.c', and save it using the "Save_And_Verify_Code" tool.
 
             Use the "Read_File" tool to read the existing code and test files.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
-            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{protocol}/{protocol}_fixers.c'.
+            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol}/{self.protocol}_fixers.c'.
             """
 
-            run_agent_step(
-                agent_graph=agent_graph,
-                prompt_text=fix_fixer_prompt,
-                config=config,
-                step_title="Autofix Fixers",
-            )
+            self.call_agent(fix_fixer_prompt, "Autofix Fixers")
 
             console.rule(
                 "[bold yellow]Re-running Fixer Sanity Check After Fixes[/bold yellow]"
             )
 
-            passed, result = fixer_sanity_check()
+            passed, result = self.fixer_sanity_check()
 
             if passed:
                 console.print(
@@ -681,54 +594,20 @@ void print_{protocol}_packets(const {protocol}_packet_t *packets, int count);
                 "[bold green]All fixer sanity checks passed on the first try![/bold green]"
             )
 
-    steps = [
-        ("Step 1: Fetch Packet Types", step_1_fetch_packet_types),
-        ("Step 2: Generate C Structures", step_2_generate_c_structures),
-        ("Step 3: Generate Parser", step_3_generate_parser),
-        ("Step 4: Generate Reassembler", step_4_generate_reassembler),
-        ("Step 5: Parser & Reassembler Verification & Fix",
-         step_5_verification_and_fix),
-        ("Step 6: Mutator Generation", step_6_mutator_generation),
-        ("Step 7: Mutator Sanity Check & Fix",
-         step_7_mutator_sanity_check_and_fix),
-        ("Step 8: Fixer Generation", step_8_fixer_generation),
-        ("Step 9: Fixer Sanity Check & Fix", step_9_fixer_sanity_check_and_fix),
-    ]
+    @override
+    def steps(self):
+        steps = [
+            ("Step 1: Fetch Packet Types", self.step_1_fetch_packet_types),
+            ("Step 2: Generate C Structures", self.step_2_generate_c_structures),
+            ("Step 3: Generate Parser", self.step_3_generate_parser),
+            ("Step 4: Generate Reassembler", self.step_4_generate_reassembler),
+            ("Step 5: Parser & Reassembler Verification & Fix",
+                self.step_5_verification_and_fix),
+            ("Step 6: Mutator Generation", self.step_6_mutator_generation),
+            ("Step 7: Mutator Sanity Check & Fix",
+                self.step_7_mutator_sanity_check_and_fix),
+            ("Step 8: Fixer Generation", self.step_8_fixer_generation),
+            ("Step 9: Fixer Sanity Check & Fix", self.step_9_fixer_sanity_check_and_fix),
+        ]
 
-    i = 0
-    while i < len(steps):
-        step_title, step_fn = steps[i]
-        action = ask_before_step(step_title, has_previous=i > 0)
-
-        if action == "exit":
-            console.print("[bold red]Exiting pipeline.[/bold red]")
-            return
-        if action == "retry_prev":
-            if i == 0:
-                console.print(
-                    "[yellow]This is the first step; there is no previous step to retry.[/yellow]"
-                )
-            else:
-                console.rule(
-                    f"[yellow]Going back to previous step: {steps[i-1][0]}[/yellow]",
-                    style="yellow",
-                )
-                i -= 1
-            continue
-        if action == "skip":
-            console.rule(
-                f"[yellow]Skipping: {step_title}[/yellow]", style="yellow")
-            i += 1
-            continue
-
-        step_fn()
-        i += 1
-
-    from rich.panel import Panel
-
-    console.print(
-        Panel(
-            f"Generation pipeline execution for {protocol_name} completed successfully.",
-            style="bold green",
-        )
-    )
+        return steps

@@ -11,7 +11,7 @@ class PipelineState(TypedDict):
 
 def _pipeline_state_path() -> str:
     # Store next to repo root to make it easy to find/reuse across runs.
-    repo_root = os.path.join(os.path.dirname(__file__), "..")
+    repo_root = os.path.dirname(__file__)
     return os.path.join(repo_root, ".pipeline_state.json")
 
 
@@ -36,6 +36,8 @@ def load_pipeline_state() -> PipelineState:
 def save_pipeline_state(state: PipelineState) -> None:
     path = _pipeline_state_path()
     tmp_path = f"{path}.tmp"
+
+    console.log(f"[dim]Saving pipeline state to {path}...[/dim]")
 
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
