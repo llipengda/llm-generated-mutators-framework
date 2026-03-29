@@ -7,3 +7,16 @@ __pycache__/
 llm/
 *.log
 .pipeline_state.json
+
+tests/fixer_sanity/build*
+tests/fixer_sanity/out*
+tests/fixer_sanity/*_fixer_registry.c
+tests/fixer_sanity/*_fixer_sanity_tests.c
+
+tests/mutator_sanity/build*
+tests/mutator_sanity/out*
+
+tests/PR_mr/*.gcno
+tests/PR_mr/*.gcda
+tests/PR_mr/*.dSYM
+tests/PR_mr/mr_test

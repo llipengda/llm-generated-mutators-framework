@@ -1,6 +1,6 @@
 from typing import Callable
 
-from state import PipelineState, save_pipeline_state
+from state import PipelineState, add_step_usage, save_pipeline_state
 from agent import build_agent_graph
 from config import (
     get_protocol_name,
@@ -16,6 +16,7 @@ from ui import ask_before_step, run_agent_step
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.retrievers import BaseRetriever
+from usage_tracking import TokenUsageTracker
 
 class BasePipeline:
     protocol: str
@@ -25,6 +26,7 @@ class BasePipeline:
     state: PipelineState 
     seed_dir: str
     retriever: BaseRetriever
+    usage_tracker: TokenUsageTracker
 
     def __init__(
         self,
@@ -37,8 +39,12 @@ class BasePipeline:
         retriever = build_retriever(rfc_path)
 
         agent_graph = build_agent_graph(retriever=retriever)
+        usage_tracker = TokenUsageTracker()
 
-        config: RunnableConfig = {"configurable": {"thread_id": "session_001"}}
+        config: RunnableConfig = {
+            "configurable": {"thread_id": "session_001"},
+            "callbacks": [usage_tracker],
+        }
 
         state: PipelineState = {
             "packet_types": [],
@@ -53,6 +59,7 @@ class BasePipeline:
         self.retriever = retriever
         self.config = config
         self.state = state
+        self.usage_tracker = usage_tracker
 
 
     def __call__(self):
@@ -94,20 +101,52 @@ class BasePipeline:
                 style="bold green",
             )
         )
+        self.print_token_usage_summary()
 
     def steps(self) -> list[tuple[str, Callable[[], None]]]:
         raise NotImplementedError("Subclasses must implement the steps method.")
     
     def call_agent(self, prompt_text: str, step_title: str, *, agent_graph: CompiledStateGraph | None = None):
-        return run_agent_step(
+        self.usage_tracker.start_step(step_title)
+        response = run_agent_step(
             agent_graph=agent_graph or self.agent_graph,
             prompt_text=prompt_text,
             config=self.config,
             step_title=step_title,
         )
+        step_usage = self.usage_tracker.end_step()
+        add_step_usage(self.state, step_title=step_title, usage=step_usage)
+        self.save_state()
+        return response
     
     def new_agent(self):
         return build_agent_graph(retriever=self.retriever)
     
     def save_state(self):
         save_pipeline_state(self.state)
+
+    def print_token_usage_summary(self) -> None:
+        total = self.state.get("token_usage_total", {})
+        by_step = self.state.get("token_usage_by_step", {})
+
+        console.rule("[bold green]Token Usage Summary[/bold green]")
+        console.print(
+            "[bold]Total:[/bold] "
+            f"prompt={total.get('prompt_tokens', 0)}, "
+            f"completion={total.get('completion_tokens', 0)}, "
+            f"total={total.get('total_tokens', 0)}, "
+            f"calls={total.get('calls', 0)}"
+        )
+
+        if not by_step:
+            console.print("[dim]No per-step usage recorded.[/dim]")
+            return
+
+        for step, usage in by_step.items():
+            console.print(
+                f"- [bold]{step}[/bold]: "
+                f"prompt={usage.get('prompt_tokens', 0)}, "
+                f"completion={usage.get('completion_tokens', 0)}, "
+                f"total={usage.get('total_tokens', 0)}, "
+                f"calls={usage.get('calls', 0)}"
+            )
