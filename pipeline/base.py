@@ -1,3 +1,5 @@
+import os
+
 from typing import Callable
 
 from state import PipelineState, add_step_usage, save_pipeline_state
@@ -8,10 +10,9 @@ from config import (
     get_seed_dir,
     warn_if_rfc_missing,
 )
-from console import console
 from rag import build_retriever
 from state import load_pipeline_state, PipelineState
-from ui import ask_before_step, run_agent_step
+from ui import ask_before_step, run_agent_step, UI
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -54,7 +55,7 @@ class BasePipeline:
 
         self.protocol_name = protocol_name
         self.protocol = protocol_name.lower()
-        self.seed_dir = seed_dir
+        self.seed_dir = os.path.abspath(seed_dir)
         self.agent_graph = agent_graph
         self.retriever = retriever
         self.config = config
@@ -70,36 +71,26 @@ class BasePipeline:
             action = ask_before_step(step_title, has_previous=i > 0)
 
             if action == "exit":
-                console.print("[bold red]Exiting pipeline.[/bold red]")
+                UI.error("Exiting pipeline.")
                 return
             if action == "retry_prev":
                 if i == 0:
-                    console.print(
-                        "[yellow]This is the first step; there is no previous step to retry.[/yellow]"
-                    )
+                    UI.warn("This is the first step; there is no previous step to retry.")
                 else:
-                    console.rule(
-                        f"[yellow]Going back to previous step: {steps[i-1][0]}[/yellow]",
-                        style="yellow",
-                    )
+                    UI.warning_rule(f"Going back to previous step: {steps[i-1][0]}")
                     i -= 1
                 continue
             if action == "skip":
-                console.rule(
-                    f"[yellow]Skipping: {step_title}[/yellow]", style="yellow")
+                UI.warning_rule(f"Skipping: {step_title}")
                 i += 1
                 continue
 
             step_fn()
             i += 1
 
-        from rich.panel import Panel
-
-        console.print(
-            Panel(
-                f"Generation pipeline execution for {self.protocol_name} completed successfully.",
-                style="bold green",
-            )
+        UI.panel(
+            f"Generation pipeline execution for {self.protocol_name} completed successfully.",
+            style="bold green",
         )
         self.print_token_usage_summary()
 

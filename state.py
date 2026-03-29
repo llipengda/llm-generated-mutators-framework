@@ -2,7 +2,7 @@ import json
 import os
 from typing import TypedDict
 
-from console import console
+from ui import UI
 
 
 class PipelineState(TypedDict):
@@ -69,8 +69,8 @@ def load_pipeline_state() -> PipelineState:
             data.setdefault("token_usage_by_step", {})
             return data # type: ignore
     except Exception as e:
-        console.print(
-            f"[yellow]Warning: failed to load pipeline state from {path}: {e}[/yellow]"
+        UI.warn(
+            f"Warning: failed to load pipeline state from {path}: {e}"
         )
 
     return {
@@ -85,7 +85,7 @@ def save_pipeline_state(state: PipelineState) -> None:
     path = _pipeline_state_path()
     tmp_path = f"{path}.tmp"
 
-    console.log(f"[dim]Saving pipeline state to {path}...[/dim]")
+    UI.dim(f"Saving pipeline state to {path}...")
 
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -93,8 +93,8 @@ def save_pipeline_state(state: PipelineState) -> None:
             f.write("\n")
         os.replace(tmp_path, path)
     except Exception as e:
-        console.print(
-            f"[yellow]Warning: failed to save pipeline state to {path}: {e}[/yellow]"
+        UI.warn(
+            f"Warning: failed to save pipeline state to {path}: {e}"
         )
         try:
             if os.path.exists(tmp_path):

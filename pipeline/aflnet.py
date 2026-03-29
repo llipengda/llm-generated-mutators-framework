@@ -2,7 +2,7 @@ import subprocess
 from typing import override
 
 from pipeline.base import BasePipeline
-from console import console
+from ui import UI
 
 class AFLNetPipeline(BasePipeline):
     def step_1_fetch_packet_types(self):
@@ -24,14 +24,12 @@ class AFLNetPipeline(BasePipeline):
                         for t in packet_types_raw.split(",") if t.strip()]
         self.state["packet_types"] = packet_types
         self.save_state()
-        console.print(f"[bold]Parsed Types:[/bold] {packet_types}")
+        UI.success(f"Parsed Types: {packet_types}")
 
     def step_2_generate_c_structures(self):
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
-            console.print(
-                "[yellow]Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run.[/yellow]"
-            )
+            UI.warn("Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run.")
 
         step2_prompt = f"""
         Using the packet types we just identified ({packet_types}), output the precise structure of each packet in C language for {self.protocol_name}.
@@ -220,11 +218,9 @@ class AFLNetPipeline(BasePipeline):
     def verify_pr(self):
         self.generate_h_file()
 
-        console.log(
-            f"[dim]Running verification script: ./tests/PR_mr/mr_test.sh {self.protocol} ...[/dim]"
-        )
+        UI.dim(f"Running verification script: ./tests/PR_mr/mr_test.sh {self.protocol} ...")
 
-        with console.status("[bold cyan]Running Metamorphic Tests...[/bold cyan]"):
+        with UI.status("Running Metamorphic Tests..."):
             cmd = ["./tests/PR_mr/mr_test.sh", self.protocol, self.seed_dir]
             result = subprocess.run(
                 cmd,
@@ -235,16 +231,12 @@ class AFLNetPipeline(BasePipeline):
 
         last_line = result.stdout.strip().split("\n")[-1]
 
-        from rich.panel import Panel
-
-        console.print(
-            Panel(
-                result.stdout[-2000:],
-                title="Test Output (Last 2000 chars)",
-                border_style="grey50",
-            )
+        UI.panel(
+            result.stdout[-2000:],
+            title="Test Output (Last 2000 chars)",
+            border_style="grey50",
         )
-        console.print(f"Result Line: [bold]{last_line}[/bold]")
+        UI.dim(f"Result Line: [bold]{last_line}[/bold]")
 
         if "[FAIL]" in last_line:
             return False, result.stdout
@@ -254,13 +246,12 @@ class AFLNetPipeline(BasePipeline):
         return False, "Verification script did not complete as expected.\n" + result.stdout
 
     def step_5_verification_and_fix(self):
-        console.rule("[bold blue]Step 5: Verification[/bold blue]")
+        UI.title("Step 5: Verification")
 
         success, output = self.verify_pr()
 
         if not success:
-            console.print(
-                "[bold red]Tests Failed. Initiating Fixer Agent...[/bold red]")
+            UI.error("Tests Failed. Initiating Fixer Agent...")
 
             step5_prompt = f"""
             The parser and reassembler for {self.protocol_name} failed the metamorphic tests. Here is the output from the test script:
@@ -277,28 +268,21 @@ class AFLNetPipeline(BasePipeline):
 
             self.call_agent(step5_prompt, "Step 5: Autofix Parser & Reassembler")
 
-            console.print(
-                "[bold yellow]Re-running Verification After Fixes[/bold yellow]")
+            UI.warn("Re-running Verification After Fixes")
             success, output = self.verify_pr()
             if success:
-                console.print(
-                    "[bold green]All tests passed after fixes![/bold green]")
+                UI.success("All tests passed after fixes!")
             else:
-                console.print(
-                    "[bold red]Some tests are still failing. Please review the output above.[/bold red]"
-                )
+                UI.error("Some tests are still failing. Please review the output above.")
         else:
-            console.print(
-                "[bold green]All tests passed on the first try![/bold green]")
+            UI.success("All tests passed on the first try!")
 
     def step_6_mutator_generation(self):
-        console.rule("[bold blue]Step 6: Mutator Generation[/bold blue]")
+        UI.title("Step 6: Mutator Generation")
 
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
-            console.print(
-                "[yellow]Warning: packet_types is empty. Step 6 will not generate any mutators.[/yellow]"
-            )
+            UI.warn("Warning: packet_types is empty. Step 6 will not generate any mutators.")
             return
 
         for pkt_type in packet_types:
@@ -335,9 +319,7 @@ class AFLNetPipeline(BasePipeline):
             self.call_agent(mutator_prompt, f"Mutators for {pkt_type}")
 
     def mutator_sanity_check(self):
-        with console.status(
-            "[bold cyan]Running Mutator Sanity Check... May take a long time[/bold cyan]"
-        ):
+        with UI.status("Running Mutator Sanity Check... May take a long time"):
             cmd = ["./tests/mutator_sanity/run_mutator_sanity.sh",
                     self.protocol, self.seed_dir]
             result = subprocess.run(
@@ -349,41 +331,29 @@ class AFLNetPipeline(BasePipeline):
 
         last_line = result.stdout.strip().split("\n")[-1]
 
-        from rich.panel import Panel
-
-        console.print(
-            Panel(
-                last_line,
-                title="Mutator Sanity Check Output",
-                border_style="grey50",
-            )
+        UI.panel(
+            last_line,
+            title="Mutator Sanity Check Output",
+            border_style="grey50",
         )
 
         if "[PASS]" in last_line:
-            console.print(
-                "[bold green]Mutator Sanity Check Passed![/bold green]")
+            UI.success("Mutator Sanity Check Passed!")
             return True, result.stdout
         if "[FAIL]" in last_line:
-            console.print(
-                "[bold red]Mutator Sanity Check Failed! Please review the output above.[/bold red]"
-            )
+            UI.error("Mutator Sanity Check Failed! Please review the output above.")
             return False, result.stdout
 
-        console.print(
-            "[bold yellow]Mutator Sanity Check did not complete as expected. Please review the output above.[/bold yellow]"
-        )
+        UI.warn("Mutator Sanity Check did not complete as expected. Please review the output above.")
         return False, result.stdout
 
     def step_7_mutator_sanity_check_and_fix(self):
-        console.rule(
-            "[bold blue]Step 7: Mutator Sanity Check & Fix[/bold blue]")
+        UI.title("Step 7: Mutator Sanity Check & Fix")
 
         success, output = self.mutator_sanity_check()
 
         if not success:
-            console.print(
-                "[bold red]Mutator Sanity Check Failed. Initiating Mutator Fixer Agent...[/bold red]"
-            )
+            UI.error("Mutator Sanity Check Failed. Initiating Mutator Fixer Agent...")
 
             step7_prompt = f"""
             The mutators for {self.protocol_name} failed the mutator sanity check. Here is the output from the test script:
@@ -400,25 +370,17 @@ class AFLNetPipeline(BasePipeline):
 
             self.call_agent(step7_prompt, "Step 7: Autofix Mutators")
 
-            console.rule(
-                "[bold yellow]Re-running Mutator Sanity Check After Fixes[/bold yellow]"
-            )
+            UI.warning_rule("Re-running Mutator Sanity Check After Fixes")
             success, output = self.mutator_sanity_check()
             if success:
-                console.print(
-                    "[bold green]Mutator sanity check passed after fixes![/bold green]"
-                )
+                UI.success("Mutator sanity check passed after fixes!")
             else:
-                console.print(
-                    "[bold red]Some mutator sanity checks are still failing. Please review the output above.[/bold red]"
-                )
+                UI.error("Some mutator sanity checks are still failing. Please review the output above.")
         else:
-            console.print(
-                "[bold green]All mutator sanity checks passed on the first try![/bold green]"
-            )
+            UI.success("All mutator sanity checks passed on the first try!")
 
     def step_8_fixer_generation(self):
-        console.rule("[bold blue]Step 8: Fixer Generation[/bold blue]")
+        UI.title("Step 8: Fixer Generation")
 
         fixer_prompt_1 = f"""
         Extract all constraints related to request (client to server) message format from the {self.protocol_name} RFC.
@@ -466,8 +428,8 @@ class AFLNetPipeline(BasePipeline):
                 "--exclude", f"fix_{self.protocol}"
                 ]
 
-        console.log(
-            f"[dim]Generating fixer registry by running: {' '.join(cmd)}[/dim]"
+        UI.dim(
+            f"Generating fixer registry by running: {' '.join(cmd)}"
         )
 
         subprocess.run(
@@ -516,9 +478,7 @@ class AFLNetPipeline(BasePipeline):
     def fixer_sanity_check(self):
         self.fixer_test_generation()
 
-        with console.status(
-            "[bold cyan]Running Fixer Sanity Check... May take a long time[/bold cyan]"
-        ):
+        with UI.status("Running Fixer Sanity Check... May take a long time"):
             cmd = ["./tests/fixer_sanity/run_fixer_sanity.sh", self.protocol]
             result = subprocess.run(
                 cmd,
@@ -529,33 +489,24 @@ class AFLNetPipeline(BasePipeline):
 
         last_line = result.stdout.strip().split("\n")[-1]
 
-        from rich.panel import Panel
-
-        console.print(
-            Panel(
-                last_line,
-                title="Fixer Sanity Check Output",
-                border_style="grey50",
-            )
+        UI.panel(
+            last_line,
+            title="Fixer Sanity Check Output",
+            border_style="grey50",
         )
 
         if "[PASS]" in last_line:
-            console.print(
-                "[bold green]Fixer Sanity Check Passed![/bold green]")
+            UI.success("Fixer Sanity Check Passed!")
             return True, result.stdout
         if "[FAIL]" in last_line:
-            console.print(
-                "[bold red]Fixer Sanity Check Failed! Please review the output above.[/bold red]"
-            )
+            UI.error("Fixer Sanity Check Failed! Please review the output above.")
             return False, result.stdout
 
-        console.print(
-            "[bold yellow]Fixer Sanity Check did not complete as expected. Please review the output above.[/bold yellow]"
-        )
+        UI.warn("Fixer Sanity Check did not complete as expected. Please review the output above.")
         return False, result.stdout
 
     def step_9_fixer_sanity_check_and_fix(self):
-        console.rule("[bold blue]Step 9: Fixer Sanity Check & Fix[/bold blue]")
+        UI.title("Step 9: Fixer Sanity Check & Fix")
 
         passed, result = self.fixer_sanity_check()
 
@@ -575,24 +526,16 @@ class AFLNetPipeline(BasePipeline):
 
             self.call_agent(fix_fixer_prompt, "Autofix Fixers")
 
-            console.rule(
-                "[bold yellow]Re-running Fixer Sanity Check After Fixes[/bold yellow]"
-            )
+            UI.warning_rule("Re-running Fixer Sanity Check After Fixes")
 
             passed, result = self.fixer_sanity_check()
 
             if passed:
-                console.print(
-                    "[bold green]Fixer sanity check passed after fixes![/bold green]"
-                )
+                UI.success("Fixer sanity check passed after fixes!")
             else:
-                console.print(
-                    "[bold red]Some fixer sanity checks are still failing. Please review the output above.[/bold red]"
-                )
+                UI.error("Some fixer sanity checks are still failing. Please review the output above.")
         else:
-            console.print(
-                "[bold green]All fixer sanity checks passed on the first try![/bold green]"
-            )
+            UI.success("All fixer sanity checks passed on the first try!")
 
     @override
     def steps(self):

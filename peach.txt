@@ -1,0 +1,388 @@
+-----Analyzer------------------------------------------------------------------
+
+  Binary BinaryAnalyzer
+    - AnalyzeStrings           (String)       Call the StringToken analyzer on string elements. default="true"
+    - Tokens                   (String)       List of character tokens to pass to the StringToken analyzer. default="\r\n"'[]{}<>` 	.,~!@#$%^?&*_=+-|\:;/"
+
+  Regex
+    Break up a string using a regex. Each group will become strings. The group name will be used as the element name.
+    * Regex                    (String)       The regex to use.
+
+  StringToken stringtoken.StringTokenAnalyzer StringTokenAnalyzer
+    Generate a data model by tokenizing a text document.
+    - Tokens                   (String)       List of character tokens. default="\r\n"'[]{}<>` 	.,~!@#$%^?&*_=+-|\:;/"
+
+  Xml xml.XmlAnalyzer XmlAnalyzer
+    Generate a data model based on an XML document.
+
+  Zip
+    Converts Zip data in Blobs into the appropriate streams.
+    - Map                      (String)       List of file suffix to data model mappings. default=""
+
+
+-----Data Element--------------------------------------------------------------
+
+  Blob
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - token                    (Boolean)      Is element a token. default="false"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  Block
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - ref                      (String)       Element to reference. default=""
+
+  Bool
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Name of element. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - value                    (String)       Default value. default=""
+
+  Choice
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurrences. default="1"
+    - minOccurs                (Int32)        Minimum occurrences. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurrences. default="1"
+
+  DataModel
+    - fieldId                  (String)       Field ID. default=""
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Model name. default=""
+    - ref                      (String)       Model to reference. default=""
+
+  Double
+    * size                     (UInt32)       Size in bits.
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - endian                   (EndianType)   Byte order of number. default="little"
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Name of element. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  Flag
+    * position                 (Int32)        Bit position of flag.
+    * size                     (Int32)        size in bits.
+    - fieldId                  (String)       Element field ID. default=""
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - token                    (Boolean)      Is element a token. default="false"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  Flags
+    * size                     (UInt32)       size in bits.  Typically [8, 16, 24, 32, 64].
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - endian                   (String)       Byte order of number (default 'little'). default="little"
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - token                    (Boolean)      Is element a token. default="false"
+
+  Frag (beta)
+    Fragmentation element
+    - class                    (String)       Fragment extension class. default="ByLength"
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - fragLength               (Int32)        Fragment size in bytes. default=""
+    - fragmentIndexField       (String)       Name of fragment index field in template model.. default=""
+    - fragmentLengthField      (String)       Name of fragment length field in template model.. default=""
+    - fragmentOffsetField      (String)       Name of fragment offset field in template model.. default=""
+    - name                     (String)       Element name. default=""
+    - payloadOptional          (Boolean)      Protocol allows for null payload. default="false"
+    - reassembleDataSet        (Boolean)      Should data set files be reassembled.. default="false"
+    - totalLengthField         (String)       Name of total length field in template model.. default=""
+
+  Number
+    * size                     (UInt32)       Size in bits.
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - endian                   (EndianType)   Byte order of number. default="little"
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - signed                   (Boolean)      Is number signed. default="false"
+    - token                    (Boolean)      Is element a token. default="false"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  Padding
+    - alignedTo                (DataElement)  Name of element to base our padding on. default=""
+    - alignment                (Int32)        Align to this byte boundry (e.g. 8, 16, etc.). default="8"
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - minSize                  (Int32)        Minimum size to pad to. default="0"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+
+  Placement
+    - after                    (String)       Place after this element. default=""
+    - before                   (String)       Place before this element. default=""
+
+  Sequence
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - ref                      (String)       Element to reference. default=""
+
+  Stream
+    * streamName               (String)       Stream name.
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - ref                      (String)       Element to reference. default=""
+    - streamAttribute          (Int32)        Stream attributes. default="0"
+
+  String
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - nullTerminated           (Boolean)      Is string null terminated?. default="false"
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - padCharacter             (Char)         Character to pad length with.. default=""
+    - token                    (Boolean)      Is element a token. default="false"
+    - type                     (StringType)   Type of string (encoding). default="utf8"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  MqttVarInt
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - token                    (Boolean)      Is element a token. default="false"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  VarNumber
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - token                    (Boolean)      Is element a token. default="false"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+  XmlAttribute
+    * attributeName            (String)       Name of XML attribute.
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Name of element. default=""
+    - ns                       (String)       XML Namespace. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+
+  XmlCharacterData
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Name of element. default=""
+
+  XmlElement
+    * elementName              (String)       Name of XML element.
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - length                   (UInt32?)      Length in data element. default=""
+    - lengthType               (LengthType)   Units of the length attribute. default="bytes"
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Name of element. default=""
+    - ns                       (String)       XML Namespace. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+
+  XmlFragment
+    - constraint               (String)       Scripting expression that evaluates to true or false. default=""
+    - fieldId                  (String)       Element field ID. default=""
+    - maxOccurs                (Int32)        Maximum occurances. default="1"
+    - minOccurs                (Int32)        Minimum occurances. default="1"
+    - mutable                  (Boolean)      Is element mutable. default="true"
+    - name                     (String)       Element name. default=""
+    - occurs                   (Int32)        Actual occurances. default="1"
+    - token                    (Boolean)      Is element a token. default="false"
+    - type                     (StringType)   Type of string (encoding). default="utf8"
+    - value                    (String)       Default value. default=""
+    - valueType                (ValueType)    Format of value attribute. default="string"
+
+
+-----Relation------------------------------------------------------------------
+
+  count
+    Array count relation
+    - expressionGet            (String)       Scripting expression that is run when getting the value. default=""
+    - expressionSet            (String)       Scripting expression that is run when setting the value. default=""
+    - of                       (String)       Element used to generate relation value. default=""
+
+  offset
+    Byte offset relation
+    - expressionGet            (String)       Scripting expression that is run when getting the value. default=""
+    - expressionSet            (String)       Scripting expression that is run when setting the value. default=""
+    - of                       (String)       Element used to generate relation value. default=""
+    - relative                 (Boolean)      Is the offset relative. default="false"
+    - relativeTo               (String)       Element to compute value relative to. default=""
+
+  size
+    Byte size relation
+    - expressionGet            (String)       Scripting expression that is run when getting the value. default=""
+    - expressionSet            (String)       Scripting expression that is run when setting the value. default=""
+    - lengthType               (LengthType)   Units to compute the size in. default="bytes"
+    - of                       (String)       Element used to generate relation value. default=""
+
+
+-----Transformer---------------------------------------------------------------
+
+  Aes128 crypto.Aes128
+    Aes128 transform (hex & binary).
+    * IV                       (HexString)    Initialization Vector.
+    * Key                      (HexString)    Secret Key.
+    - CipherMode               (CipherMode)   Cipher Mode: CBC, ECB, CFB, CTS, OFB. default="CBC"
+    - PaddingMode              (PaddingMode)  Padding Mode: Zeros, None, PKCS7, ANSIX923, ISO101026. default="Zeros"
+
+  Base64Decode encode.Base64Decode
+    Decode on output from Base64.
+
+  Base64Encode encode.Base64Encode
+    Encode on output as Base64.
+
+  Bz2Compress compress.Bz2Compress
+    Compress on output using bz2.
+
+  Bz2Decompress compress.Bz2Decompress
+    Decompress on output using bz2.
+
+  Des
+    Des transform (hex & binary).
+    * IV                       (HexString)    Initialization Vector.
+    * Key                      (HexString)    Secret Key.
+    - CipherMode               (CipherMode)   Cipher Mode, CBC, ECB, CFB, CTS, OFB. default="CBC"
+    - PaddingMode              (PaddingMode)  Padding Mode: Zeros, None, PKCS7, ANSIX923, ISO101026. default="Zeros"
+
+  Eval misc.Eval
+    Evaluate a statement.
+    * eval                     (String)       Formatter for data..
+
+  GzipCompress compress.GzipCompress
+    Compress on output using gzip.
+
+  GzipDecompress compress.GzipDecompress
+    Decompress on output using gzip.
+
+  Hex encode.Hex
+    Encode on output as a hex string.
+    - lowercase                (Boolean)      Use lowercase for hex digits. default="true"
+
+  Hmac crypto.Hmac
+    HMAC as described in RFC 2104.
+
+  HtmlDecode encode.HtmlDecode
+    Decode on output from HTML encoding.
+
+  HtmlEncode encode.HtmlEncode
+    Encode on output as HTML (encoding < > & and ").
+
+  IntToHex type.IntToHex
+    Transforms an integer into hex.
+    - FormatString             (String)       .NET style format string. Defaults to 'X'. default="X"
+
+  Ipv4StringToOctet encode.Ipv4StringToOctet
+    Encode on output from a dot notation string to a 4 byte octet representaiton.
+
+  Ipv6StringToOctet encode.Ipv6StringToOctet
+    Encode on output from a colon notation ipv6 address into a 16 byte octect representation.
+
+  JsEncode encode.JsEncode
+    Encode on output as Javascript string.
+
+  Md5 crypto.Md5
+    MD5 transform (hex & binary).
+
+  NetBiosDecode encode.NetBiosDecode
+    Deocode on output from binary representation of a NetBios name to a string.
+    - pad                      (Boolean)      Should the NetBios names be padded/trimmed to 32 bytes?. default="false"
+
+  NetBiosEncode encode.NetBiosEncode
+    Encode on output from a string to a binary NetBios representation.
+    - pad                      (Boolean)      Should the NetBios names be padded/trimmed to 32 bytes?. default="false"
+
+  Sha1 crypto.Sha1
+    SHA-1 transform (hex & binary).
+
+  Sha256 crypto.Sha256
+    SHA-256 transform (hex & binary).
+
+  SidStringToBytes encode.SidStringToBytes
+    Encode on output from a string representation of a SID to bytes. (Format: S-1-5-21-2127521184-1604012920-1887927527-1712781)
+
+  TripleDes crypto.TripleDes
+    TripleDes transform (hex & binary).
+    * IV                       (HexString)    Initialization Vector.
+    * Key                      (HexString)    Secret Key.
+    - CipherMode               (CipherMode)   Cipher Mode, CBC, ECB, CFB, CTS, OFB. default="CBC"
+    - PaddingMode              (PaddingMode)  Padding Mode: Zeros, None, PKCS7, ANSIX923, ISO101026. default="Zeros"
+
+  Truncate
+    Truncates a Value
+    * Length                   (Int32)        Length to truncate in bytes.
+    - Offset                   (Int32)        Starting offset. default="0"
+
+  UrlEncode encode.UrlEncode encode.UrlEncodePlus UrlEncodePlus
+    Encode on output as a URL with spaces turned to pluses.

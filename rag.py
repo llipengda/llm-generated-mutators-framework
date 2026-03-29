@@ -13,7 +13,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from console import console
+from ui import UI
 
 
 _RAG_CACHE_VERSION = 1
@@ -96,9 +96,7 @@ def build_retriever(rfc_path: str):
 
     Returns None if setup fails (e.g., missing file or dependencies).
     """
-    with console.status(
-        "[bold green]Setting up RAG components...[/bold green]", spinner="dots"
-    ):
+    with UI.status("Setting up RAG components...", spinner="dots"):
         try:
             if os.environ.get("RAG_DISABLE_CACHE") in {"1", "true", "TRUE", "yes", "YES"}:
                 cache_root: Optional[Path] = None
@@ -118,7 +116,7 @@ def build_retriever(rfc_path: str):
                 cache_dir = cache_root / cache_key
                 cached = _load_faiss_cache(cache_dir, embeddings)
                 if cached is not None:
-                    console.log(f"[dim]RAG cache hit: {cache_dir}[/dim]")
+                    UI.dim(f"RAG cache hit: {cache_dir}")
                     return cached.as_retriever(search_kwargs={"k": 4})
 
             # Cache miss -> build index.
@@ -140,11 +138,11 @@ def build_retriever(rfc_path: str):
                     )
                     cache_dir = cache_root / cache_key
                     _save_faiss_cache(vectorstore, cache_dir)
-                    console.log(f"[dim]RAG cache saved: {cache_dir}[/dim]")
+                    UI.dim(f"RAG cache saved: {cache_dir}")
                 except Exception as e:
-                    console.log(f"[dim]RAG cache save skipped: {e}[/dim]")
+                    UI.dim(f"RAG cache save skipped: {e}")
 
             return vectorstore.as_retriever(search_kwargs={"k": 4})
         except Exception as e:
-            console.log(f"[bold red]RAG setup failed:[/bold red] {e}")
+            UI.error(f"RAG setup failed: {e}")
             raise

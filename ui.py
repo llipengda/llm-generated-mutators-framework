@@ -3,9 +3,81 @@ import questionary
 
 from rich.markdown import Markdown
 from rich.panel import Panel
-from console import console
+from log import console
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
+
+
+QUESTIONARY_BASE_STYLE = questionary.Style(
+    [
+        ("qmark", "fg:#673ab7 bold"),
+        ("question", "bold"),
+        ("answer", "fg:#f44336 bold"),
+        ("pointer", "fg:#673ab7 bold"),
+        ("highlighted", "fg:#673ab7 bold"),
+        ("selected", "fg:#cc5454"),
+        ("separator", "fg:#cc5454"),
+        ("instruction", ""),
+        ("text", ""),
+        ("disabled", "fg:#858585 italic"),
+    ]
+)
+
+
+class UI:
+    @staticmethod
+    def title(text: str):
+        console.rule(f"[bold blue]{text}[/bold blue]")
+
+    @staticmethod
+    def warning_rule(text: str):
+        console.rule(f"[yellow]{text}[/yellow]", style="yellow")
+
+    @staticmethod
+    def status(text: str, *, spinner: str = "dots"):
+        return console.status(f"[bold cyan]{text}[/bold cyan]", spinner=spinner)
+
+    @staticmethod
+    def panel(content: str | Markdown, *, title: str | None = None, border_style: str = "blue", expand: bool = False, style: str | None = None):
+        panel_kwargs = {
+            "title": title,
+            "border_style": border_style,
+            "expand": expand,
+        }
+        if style is not None:
+            panel_kwargs["style"] = style
+
+        console.print(
+            Panel(
+                content,
+                **panel_kwargs,
+            )
+        )
+
+    @staticmethod
+    def result_markdown(step_title: str, content: str):
+        UI.panel(
+            Markdown(content),
+            title=f"Result: {step_title}",
+            border_style="blue",
+            expand=False,
+        )
+
+    @staticmethod
+    def warn(message: str):
+        console.print(f"[bold yellow]{message}[/bold yellow]")
+
+    @staticmethod
+    def error(message: str):
+        console.print(f"[bold red]{message}[/bold red]")
+
+    @staticmethod
+    def success(message: str):
+        console.print(f"[bold green]{message}[/bold green]")
+
+    @staticmethod
+    def dim(message: str):
+        console.print(f"[dim]{message}[/dim]")
 
 
 def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> str:
@@ -31,20 +103,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     question = questionary.select(
         "Choose an action:",
         choices=choices,
-        style=questionary.Style(
-            [
-                ("qmark", "fg:#673ab7 bold"),
-                ("question", "bold"),
-                ("answer", "fg:#f44336 bold"),
-                ("pointer", "fg:#673ab7 bold"),
-                ("highlighted", "fg:#673ab7 bold"),
-                ("selected", "fg:#cc5454"),
-                ("separator", "fg:#cc5454"),
-                ("instruction", ""),
-                ("text", ""),
-                ("disabled", "fg:#858585 italic"),
-            ]
-        ),
+        style=QUESTIONARY_BASE_STYLE,
     )
 
     async def get_input_with_timeout():
@@ -55,7 +114,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
 
     choice = asyncio.run(get_input_with_timeout())
     if choice == "TIMEOUT" or choice is None:
-        console.print("[dim]Timeout reached. Defaulting to: Continue[/dim]")
+        UI.dim("Timeout reached. Defaulting to: Continue")
         choice = "Continue"
 
     if choice == "Continue":
@@ -70,25 +129,16 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
 def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config: RunnableConfig, step_title: str):
     """Run the agent with a loading spinner and formatted output."""
 
-    console.rule(f"[bold blue]{step_title}[/bold blue]")
+    UI.title(step_title)
 
-    with console.status(
-        f"[bold green]LLM is thinking & coding for {step_title}...[/bold green]",
-        spinner="dots",
-    ):
+    with UI.status(f"LLM is thinking & coding for {step_title}...", spinner="dots"):
         response = agent_graph.invoke(
             {"messages": [{"role": "user", "content": prompt_text}]},
             config=config,
         )
         final_response = response["messages"][-1].content
 
-    console.print(
-        Panel(
-            Markdown(final_response),
-            title=f"Result: {step_title}",
-            border_style="blue",
-            expand=False,
-        )
-    )
+    UI.result_markdown(step_title, final_response)
 
     return response
+    
