@@ -82,6 +82,12 @@ extern int reassemble_${PROTO}_msgs(const proto_packet_t *packets, uint32_t num_
  */
 extern void free_${PROTO}_packets(proto_packet_t *packets, uint32_t num_packets) __attribute__((weak));
 
+/* Default no-op implementation for Apple clang */
+void free_${PROTO}_packets(proto_packet_t *packets, uint32_t num_packets) {
+  (void)packets;
+  (void)num_packets;
+}
+
 static inline size_t proto_parse(const uint8_t *buf, uint32_t len,
                                  proto_packet_t *out_packets, uint32_t max_count) {
   return parse_${PROTO}_msg(buf, len, out_packets, max_count);
