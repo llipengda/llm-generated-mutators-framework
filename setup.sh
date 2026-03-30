@@ -27,6 +27,11 @@ case "$TARGET" in
             echo "Docker could not be found, please install it first."
             exit 1
         fi
+        if ! command -v mono &> /dev/null
+        then
+            echo "Mono could not be found, please install it first."
+            exit 1
+        fi
         if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
             if ! command -v colima &> /dev/null
             then
