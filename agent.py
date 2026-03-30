@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
@@ -16,7 +17,7 @@ class AgentConfig:
 You are a helpful assistant expert in C programming and protocol fuzzing.
 """
 
-def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = None):
+def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = None, target: Literal["aflnet", "peach"] = "aflnet"):
     if config is None:
         config = AgentConfig()
 
@@ -27,7 +28,7 @@ def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = 
 
     return create_agent(
         model=llm,
-        tools=[rfc_search] + tools,
+        tools=[rfc_search] + tools[target],
         checkpointer=memory,
         system_prompt=config.system_prompt
     )

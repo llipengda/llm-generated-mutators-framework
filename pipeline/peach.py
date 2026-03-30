@@ -8,7 +8,7 @@ from ui import UI
 class PeachPipeline(BasePipeline):
     def __init__(self):
         super().__init__()
-        self.agent_graph = build_agent_graph(retriever=self.retriever, config=AgentConfig(
+        self.agent_graph = build_agent_graph(retriever=self.retriever, target="peach", config=AgentConfig(
             temperature=0.7,
             model="gpt-5.2",
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer."
@@ -149,7 +149,7 @@ class PeachPipeline(BasePipeline):
         </Peach>
         ```
 
-        Use the tool "Read_File" to read the useage of each XML element in "./peach.txt" to understand how to define the structure for each packet type.
+        Use the tool "Read_File" to read the usage of each XML element in "./peach.txt" to understand how to define the structure for each packet type.
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
         Use the tool "Write_File" to save the generated Peach Pit file to "./llm/peach/{self.protocol}/datamodel.xml".
         """

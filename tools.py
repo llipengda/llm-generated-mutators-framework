@@ -174,4 +174,18 @@ TOOL RESPONSE:
 
     return rfc_search
 
-tools = [save_and_verify_code, read_file, append_and_verify_code, write_file]
+
+from dotnet_tools import search_class
+
+tools = {
+    "aflnet": [
+        save_and_verify_code,
+        read_file,
+        append_and_verify_code,
+    ],
+    "peach": [
+        read_file,
+        write_file,
+        search_class
+    ]
+}
