@@ -29,7 +29,6 @@ class MultiAssemblyInspector:
             
             exported_types = assembly.GetExportedTypes()
             self.all_types.extend(exported_types)
-            print(f"Successfully loaded: {os.path.basename(dll_path)} ({len(exported_types)} types)")
         except Exception as e:
             print(f"Skipped {os.path.basename(dll_path)}: {str(e)[:80]}...")
 
@@ -133,7 +132,15 @@ from log import console, file_logger
 
 @tool("Search_Class")
 def search_class(query: str) -> str:
-    """Search for a class and its members in the loaded assemblies."""
+    """
+    Search for a class and its members in the loaded assemblies.
+
+    Args:
+        query (str): A partial or full class name to search for.
+    
+    Returns:
+        str: A formatted string with class details and member signatures.
+    """
     console.log(f"[dim]Tool: Searching for class matching '{query}'...[/dim]")
     file_logger.log(
 f"""TOOL CALL: search_class
@@ -145,3 +152,38 @@ f"""TOOL RESPONSE:
 {response}
 """)
     return response
+
+@tool("Build_DotNet_DLL")
+def build_dotnet_dll(source_dir: str, output_dll: str) -> str:
+    """
+    Compiles C# source files in the given directory into a DLL
+    
+    Args:
+        source_dir (str): Path to the directory containing C# source files.
+        output_dll (str): Desired path and name for the output DLL.
+    
+    Returns:
+        str: Path to the compiled DLL or an error message if compilation fails.
+    """
+    import subprocess
+    csharp_files = [os.path.join(source_dir, f) for f in os.listdir(source_dir) if f.endswith(".cs")]
+    
+    if not csharp_files:
+        return "Error: No C# source files found in the specified directory."
+    
+    cmd = [
+        "mcs",
+        "-sdk:4",
+        "-target:library",
+        "-warnaserror",
+        "-out:" + output_dll
+    ] + csharp_files
+
+    os.remove(output_dll) if os.path.exists(output_dll) else None
+    
+    res = subprocess.run(cmd, text=True, capture_output=True)
+    if res.returncode == 0:
+        if not os.path.exists(output_dll):
+            return "Error: Compilation succeeded but output DLL not found."
+        return output_dll
+    return f"Compilation failed:\n{(res.stderr) if res else 'Unknown error'}"
