@@ -20,3 +20,5 @@ tests/PR_mr/*.gcno
 tests/PR_mr/*.gcda
 tests/PR_mr/*.dSYM
 tests/PR_mr/mr_test
+
+peach/sdk
