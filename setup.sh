@@ -60,9 +60,13 @@ case "$TARGET" in
             vtortola.WebSockets.dll
         )
         mkdir -p peach/sdk
+        chmod 777 peach
         chmod 777 peach/sdk
-        docker run --rm -v "$(pwd)/peach/sdk:/sdk" pdli/llm-peach:sdk \
-            sh -c "cp /peach/output/linux_x86_64_release/bin/${ESSENTIAL_DLLS[*]} /sdk/"
+        docker run --rm -v "$(pwd)/peach:/p" pdli/llm-peach:sdk \
+            sh -c "cp /peach/output/linux_x86_64_release/bin/${ESSENTIAL_DLLS[*]} /p/sdk/ \
+                   && /peach/output/linux_x86_64_release/bin/peach --showenv > /p/peach.txt \
+                   && cp /peach/llm/Core/README.md /p/README.md"
+        python3 process_peach_txt.py
         ;;
     *)
         echo "Unknown target: $TARGET"
