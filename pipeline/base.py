@@ -20,7 +20,8 @@ from langchain_core.retrievers import BaseRetriever
 from usage_tracking import TokenUsageTracker
 
 class BasePipeline:
-    protocol: str
+    protocol_lower: str
+    protocol_upper: str
     protocol_name: str
     agent_graph: CompiledStateGraph
     config: RunnableConfig
@@ -54,7 +55,8 @@ class BasePipeline:
         }
 
         self.protocol_name = protocol_name
-        self.protocol = protocol_name.lower()
+        self.protocol_lower = protocol_name.lower()
+        self.protocol_upper = protocol_name.upper()
         self.seed_dir = os.path.abspath(seed_dir)
         self.agent_graph = agent_graph
         self.retriever = retriever
@@ -120,8 +122,8 @@ class BasePipeline:
         total = self.state.get("token_usage_total", {})
         by_step = self.state.get("token_usage_by_step", {})
 
-        console.rule("[bold green]Token Usage Summary[/bold green]")
-        console.print(
+        UI.title("[bold green]Token Usage Summary[/bold green]")
+        UI.print(
             "[bold]Total:[/bold] "
             f"prompt={total.get('prompt_tokens', 0)}, "
             f"completion={total.get('completion_tokens', 0)}, "
@@ -130,11 +132,11 @@ class BasePipeline:
         )
 
         if not by_step:
-            console.print("[dim]No per-step usage recorded.[/dim]")
+            UI.dim("No per-step usage recorded.")
             return
 
         for step, usage in by_step.items():
-            console.print(
+            UI.print(
                 f"- [bold]{step}[/bold]: "
                 f"prompt={usage.get('prompt_tokens', 0)}, "
                 f"completion={usage.get('completion_tokens', 0)}, "

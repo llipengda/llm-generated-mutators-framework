@@ -61,7 +61,7 @@ class MultiAssemblyInspector:
         interfaces = target_type.GetInterfaces()
         if interfaces:
             if len(interfaces) > 5:
-                iface_names = [i.Name for i in interfaces[:5]] + ["..."]
+                iface_names = [i.Name for i in list(interfaces)[:5]] + ["..."]
             else:
                 iface_names = [i.Name for i in interfaces]
             info.append(f"**Implements**: {', '.join(iface_names)}")

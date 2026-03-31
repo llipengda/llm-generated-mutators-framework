@@ -41,7 +41,7 @@ class AFLNetPipeline(BasePipeline):
 
         You can add flags to identify whether a optional field is present or not.
 
-        Additionally, write a function `print_{self.protocol}_packets` to print out the details of each packet, including EVERY field and a function `generate_{self.protocol}_packets` to generate a list of empty packets.
+        Additionally, write a function `print_{self.protocol_lower}_packets` to print out the details of each packet, including EVERY field and a function `generate_{self.protocol_lower}_packets` to generate a list of empty packets.
 
         Reference structure (Shot 1):
         ```c
@@ -128,7 +128,7 @@ class AFLNetPipeline(BasePipeline):
         ```
 
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_packets.h' and './llm/{self.protocol}/{self.protocol}_packets.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol_lower}/{self.protocol_lower}_packets.h' and './llm/{self.protocol_lower}/{self.protocol_lower}_packets.c'.
         """
 
         self.call_agent(step2_prompt, "Step 2: Generate C Structures")
@@ -140,16 +140,16 @@ class AFLNetPipeline(BasePipeline):
         size_t parse_{self.protocol_name}_msg(const u8 *buf, u32 buf_len, {self.protocol_name}_packet_t *out_packets, u32 max_count);
 
         Input: A buffer of a message sequence.
-        Output: A list of {self.protocol}_packet_t.
+        Output: A list of {self.protocol_lower}_packet_t.
         Return: Number of packets parsed, or 0 on failure.
 
         Do not use comments like /* implementation here */ or // handle headers. Every byte of the protocol must be accounted for. Use the "RFC_Search" tool to look up protocol details in the RFC.
 
-        Write parse_<packet_type> functions for EACH packet type identified earlier, and call them in parse_{self.protocol}_msg.
+        Write parse_<packet_type> functions for EACH packet type identified earlier, and call them in parse_{self.protocol_lower}_msg.
 
-        The {self.protocol}_packet_t structure is defined in './llm/{self.protocol}/{self.protocol}_packets.h'. You can use the "Read_File" tool to read it.
+        The {self.protocol_lower}_packet_t structure is defined in './llm/{self.protocol_lower}/{self.protocol_lower}_packets.h'. You can use the "Read_File" tool to read it.
 
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_parser.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol_lower}/{self.protocol_lower}_parser.c'.
         """
 
         self.call_agent(step3_prompt, "Step 3: Generate Parser")
@@ -177,10 +177,10 @@ class AFLNetPipeline(BasePipeline):
 
     def generate_h_file(self):
         template = f"""
-    #ifndef {self.protocol.upper()}_H
-    #define {self.protocol.upper()}_H
+    #ifndef {self.protocol_lower.upper()}_H
+    #define {self.protocol_lower.upper()}_H
 
-    #include "{self.protocol}_packets.h"
+    #include "{self.protocol_lower}_packets.h"
     #include <stdbool.h>
     #include <stddef.h>
     #include <stdint.h>
@@ -192,36 +192,36 @@ class AFLNetPipeline(BasePipeline):
     extern "C" {{
     #endif
 
-    {self.protocol}_packet_t *generate_{self.protocol}_packets(int count);
+    {self.protocol_lower}_packet_t *generate_{self.protocol_lower}_packets(int count);
 
-    size_t parse_{self.protocol}_msg(const uint8_t *buf, u32 buf_len,
-                    {self.protocol}_packet_t *out_packets, u32 max_count);
+    size_t parse_{self.protocol_lower}_msg(const uint8_t *buf, u32 buf_len,
+                    {self.protocol_lower}_packet_t *out_packets, u32 max_count);
 
-    void fix_{self.protocol}({self.protocol}_packet_t *pkt, int num_packets);
+    void fix_{self.protocol_lower}({self.protocol_lower}_packet_t *pkt, int num_packets);
 
-    int reassemble_{self.protocol}_msgs(const {self.protocol}_packet_t *packets, u32 num_packets,
+    int reassemble_{self.protocol_lower}_msgs(const {self.protocol_lower}_packet_t *packets, u32 num_packets,
                         u8 *output_buf, u32 *out_len);
 
-    void print_{self.protocol}_packets(const {self.protocol}_packet_t *packets, int count);
+    void print_{self.protocol_lower}_packets(const {self.protocol_lower}_packet_t *packets, int count);
 
     #ifdef __cplusplus
     }}
     #endif
 
-    #endif /* {self.protocol.upper()}_H */
+    #endif /* {self.protocol_lower.upper()}_H */
     """
 
-        filepath = f"./llm/{self.protocol}/{self.protocol}.h"
+        filepath = f"./llm/{self.protocol_lower}/{self.protocol_lower}.h"
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(template)
 
     def verify_pr(self):
         self.generate_h_file()
 
-        UI.dim(f"Running verification script: ./tests/PR_mr/mr_test.sh {self.protocol} ...")
+        UI.dim(f"Running verification script: ./tests/PR_mr/mr_test.sh {self.protocol_lower} ...")
 
         with UI.status("Running Metamorphic Tests..."):
-            cmd = ["./tests/PR_mr/mr_test.sh", self.protocol, self.seed_dir]
+            cmd = ["./tests/PR_mr/mr_test.sh", self.protocol_lower, self.seed_dir]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -287,16 +287,16 @@ class AFLNetPipeline(BasePipeline):
 
         for pkt_type in packet_types:
             mutator_prompt = f"""
-            List ALL fields for the {self.protocol} {pkt_type} packet.
+            List ALL fields for the {self.protocol_lower} {pkt_type} packet.
 
-            For EACH field <field_name> in the {self.protocol} {pkt_type} packet:
+            For EACH field <field_name> in the {self.protocol_lower} {pkt_type} packet:
             1. Fixed value? If the field is fixed per the spec, output exactly: not mutable and stop. Do not generate any mutator functions.
             2. Otherwise (the field is mutable):
             a. If the field is optional, implement:
-            void add_<field_name>({self.protocol}_packet_t *pkts, size_t n);
-            void delete_<field_name>({self.protocol}_packet_t *pkts, size_t n);
+            void add_<field_name>({self.protocol_lower}_packet_t *pkts, size_t n);
+            void delete_<field_name>({self.protocol_lower}_packet_t *pkts, size_t n);
             b. If the field may appear multiple times, also implement:
-            void repeat_<field_name>({self.protocol}_packet_t *pkts, size_t n);
+            void repeat_<field_name>({self.protocol_lower}_packet_t *pkts, size_t n);
             c. Mutate pkts in place. Design semantic-aware mutators for this field by covering the following field-local semantic categories:
                 A. Canonical form
                 B. Boundaries
@@ -307,12 +307,12 @@ class AFLNetPipeline(BasePipeline):
                 G. prefix/suffix
                 H. Random valid mix
             Add randomized perturbations mixing shallow and deep changes to preserve long-term diversity and avoid collapse into a single pattern.
-            void mutate_<field_name>({self.protocol}_packet_t *pkts, size_t n);
+            void mutate_<field_name>({self.protocol_lower}_packet_t *pkts, size_t n);
 
             Write in C (minimal helpers allowed).
 
             Use the "Read_File" tool to read the existing code files.
-            Append the generated mutator functions to './llm/{self.protocol}/{self.protocol}_mutators.c' using the "Append_And_Verify_Code" tool.
+            Append the generated mutator functions to './llm/{self.protocol_lower}/{self.protocol_lower}_mutators.c' using the "Append_And_Verify_Code" tool.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
             """
 
@@ -321,7 +321,7 @@ class AFLNetPipeline(BasePipeline):
     def mutator_sanity_check(self):
         with UI.status("Running Mutator Sanity Check... May take a long time"):
             cmd = ["./tests/mutator_sanity/run_mutator_sanity.sh",
-                    self.protocol, self.seed_dir]
+                    self.protocol_lower, self.seed_dir]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -361,11 +361,11 @@ class AFLNetPipeline(BasePipeline):
 
             1. Analyze the test output and read the relevant files to identify the root cause of EACH failure. Output the analysis clearly.
             2. For EACH identified issue, provide the corrected code snippets for the mutator functions that need to be fixed.
-            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol}/{self.protocol}_mutators.c', and save it using the "Save_And_Verify_Code" tool.
+            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol_lower}/{self.protocol_lower}_mutators.c', and save it using the "Save_And_Verify_Code" tool.
 
             Use the "Read_File" tool to read the existing code and test files.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
-            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol}/{self.protocol}_mutators.c'.
+            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol_lower}/{self.protocol_lower}_mutators.c'.
             """
 
             self.call_agent(step7_prompt, "Step 7: Autofix Mutators")
@@ -399,19 +399,19 @@ class AFLNetPipeline(BasePipeline):
         self.save_state()
 
         fixer_prompt_2 = f"""
-        For {self.protocol}, write fixer functions for EACH constraint below. 
+        For {self.protocol_lower}, write fixer functions for EACH constraint below. 
         
-        void fix_<constraint_name>({self.protocol}_packet_t *pkt, int num_packets);
-        The input is {self.protocol}_packet_t array. Fix in place.
+        void fix_<constraint_name>({self.protocol_lower}_packet_t *pkt, int num_packets);
+        The input is {self.protocol_lower}_packet_t array. Fix in place.
 
         Write a function
-        void fix_{self.protocol}({self.protocol}_packet_t *pkt, int num_packets);
+        void fix_{self.protocol_lower}({self.protocol_lower}_packet_t *pkt, int num_packets);
         that applies ALL fixers to the input packets.
         
         Write in C language.
 
         Use the "Read_File" tool to read the existing code files.
-        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol}/{self.protocol}_fixers.c'.
+        Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to './llm/{self.protocol_lower}/{self.protocol_lower}_fixers.c'.
         
         Constraints:
         {constraints}
@@ -422,10 +422,10 @@ class AFLNetPipeline(BasePipeline):
     def fixer_test_generation(self):
         cmd = ["python3",
                 "./tests/fixer_sanity/gen_fixer_registry.py",
-                "--fixers", f"./llm/{self.protocol}/{self.protocol}_fixers.c",
-                "--out", f"./tests/fixer_sanity/{self.protocol}_fixer_registry.c",
-                "--pkt-type", f"{self.protocol}_packet_t",
-                "--exclude", f"fix_{self.protocol}"
+                "--fixers", f"./llm/{self.protocol_lower}/{self.protocol_lower}_fixers.c",
+                "--out", f"./tests/fixer_sanity/{self.protocol_lower}_fixer_registry.c",
+                "--pkt-type", f"{self.protocol_lower}_packet_t",
+                "--exclude", f"fix_{self.protocol_lower}"
                 ]
 
         UI.dim(
@@ -444,16 +444,16 @@ class AFLNetPipeline(BasePipeline):
 
         Task:
         Generate a single C source file:
-        {self.protocol}_fixer_sanity_tests.c
+        {self.protocol_lower}_fixer_sanity_tests.c
 
         Inputs:
         1) protocol constraints in natural language.
-        2) ./tests/fixer_sanity/{self.protocol}_fixer_registry.c: a list of all implemented fixers.
+        2) ./tests/fixer_sanity/{self.protocol_lower}_fixer_registry.c: a list of all implemented fixers.
 
         Requirements:
-        1. Iterate over all fixers defined in {self.protocol}_fixer_registry.c.
+        1. Iterate over all fixers defined in {self.protocol_lower}_fixer_registry.c.
         2. For each fixer:
-            1) Construct a valid {self.protocol} packet/state.
+            1) Construct a valid {self.protocol_lower} packet/state.
             2) Intentionally violate one or more constraints from the constraint file.
             3) Invoke the fixer.
             4) Check whether constraints are restored.
@@ -464,9 +464,9 @@ class AFLNetPipeline(BasePipeline):
         The code must be self-contained, written in C (C11), and compilable.
 
         You can use the "Read_File" tool to read the existing code files, especially 
-            ./tests/fixer_sanity/{self.protocol}_fixer_registry.c and ./llm/{self.protocol}/{self.protocol}_packets.h.
+            ./tests/fixer_sanity/{self.protocol_lower}_fixer_registry.c and ./llm/{self.protocol_lower}/{self.protocol_lower}_packets.h.
         Use the "Save_And_Verify_Code" tool to save the COMPLETE C code to
-            ./tests/fixer_sanity/{self.protocol}_fixer_sanity_tests.c.
+            ./tests/fixer_sanity/{self.protocol_lower}_fixer_sanity_tests.c.
             
         Constraints:
         {self.state['constraints']}
@@ -479,7 +479,7 @@ class AFLNetPipeline(BasePipeline):
         self.fixer_test_generation()
 
         with UI.status("Running Fixer Sanity Check... May take a long time"):
-            cmd = ["./tests/fixer_sanity/run_fixer_sanity.sh", self.protocol]
+            cmd = ["./tests/fixer_sanity/run_fixer_sanity.sh", self.protocol_lower]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -517,11 +517,11 @@ class AFLNetPipeline(BasePipeline):
 
             1. Analyze the test output and read the relevant files to identify the root cause of EACH failure. Output the analysis clearly.
             2. For EACH identified issue, provide the corrected code snippets for the fixer functions that need to be fixed.
-            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol}/{self.protocol}_fixers.c', and save it using the "Save_And_Verify_Code" tool.
+            3. Finally, generate the corrected COMPLETE C code to './llm/{self.protocol_lower}/{self.protocol_lower}_fixers.c', and save it using the "Save_And_Verify_Code" tool.
 
             Use the "Read_File" tool to read the existing code and test files.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
-            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol}/{self.protocol}_fixers.c'.
+            Use the "Save_And_Verify_Code" tool to save the corrected code to './llm/{self.protocol_lower}/{self.protocol_lower}_fixers.c'.
             """
 
             self.call_agent(fix_fixer_prompt, "Autofix Fixers")

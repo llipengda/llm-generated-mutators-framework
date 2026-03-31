@@ -14,8 +14,8 @@ class PeachPipeline(BasePipeline):
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer."
         ))
     
-    def step_1_fetch_packet_types(self):
-        UI.title("Step 1: Fetch Packet Types")
+    def step_1_packet_types_extraction(self):
+        UI.title("Step 1: Packet Types Extraction")
 
         step1_prompt = f"""
         For {self.protocol_name} protocol, list all the request packet types according to the RFC document.
@@ -28,7 +28,7 @@ class PeachPipeline(BasePipeline):
         - "MQTT packet types"
         """
 
-        response = self.call_agent(step1_prompt, "Step 1: Fetch Packet Types")
+        response = self.call_agent(step1_prompt, "Step 1: Packet Types Extraction")
 
         packet_types_raw = response["messages"][-1].content
         packet_types = [t.strip()
@@ -37,8 +37,8 @@ class PeachPipeline(BasePipeline):
         self.save_state()
         UI.success(f"[bold]Parsed Types:[/bold] {packet_types}")
 
-    def step_2_generate_datamodel(self):
-        UI.title("Step 2: Generate Peach Pit Datamodel")    
+    def step_2_datamodel_generation(self):
+        UI.title("Step 2: Datamodel Generation")
 
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
@@ -151,14 +151,14 @@ class PeachPipeline(BasePipeline):
 
         Use the tool "Read_File" to read the usage of each XML element in "./peach.txt" to understand how to define the structure for each packet type.
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
-        Use the tool "Write_File" to save the generated Peach Pit file to "./llm/peach/{self.protocol}/datamodel.xml".
+        Use the tool "Write_File" to save the generated Peach Pit file to "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
 
-        self.call_agent(step2_prompt, "Step 2: Generate Peach Pit Datamodel")
+        self.call_agent(step2_prompt, "Step 2: Datamodel Generation")
 
     def verify_datamodel(self):
         with UI.status("Running Datamodel Tests..."):
-            cmd = ["./tests/datamodel/run_datamodel_test.sh", self.protocol, self.seed_dir]
+            cmd = ["./tests/datamodel/run_datamodel_test.sh", self.protocol_lower, self.seed_dir]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -182,8 +182,8 @@ class PeachPipeline(BasePipeline):
 
         return False, "Verification script did not complete as expected.\n" + result.stdout
 
-    def step_3_datamodel_test_and_fix(self):
-        UI.title("Step 3: Test and Fix Datamodel")
+    def step_3_datamodel_validation_and_fix(self):
+        UI.title("Step 3: Datamodel Validation & Fix")
 
         success, test_output = self.verify_datamodel()
         if success:
@@ -200,24 +200,88 @@ class PeachPipeline(BasePipeline):
         ```
         {test_output}
         ```
-        The test logs were written to "./llm/peach/{self.protocol}/dm_test_logs/<test_file_with_extension>.log". You can read these logs to get more details on what went wrong.
+        The test logs were written to "./llm/peach/{self.protocol_lower}/dm_test_logs/<test_file_with_extension>.log". You can read these logs to get more details on what went wrong.
 
         You need to:
-        1. Read EACH test log file in "./llm/peach/{self.protocol}/dm_test_logs/" to identify the specific issues with the datamodel. Look for parsing errors, mismatched fields, or any indications of what part of the datamodel is incorrect.
+        1. Read EACH test log file in "./llm/peach/{self.protocol_lower}/dm_test_logs/" to identify the specific issues with the datamodel. Look for parsing errors, mismatched fields, or any indications of what part of the datamodel is incorrect.
         2. For each identified issue, output a clear explanation of what the problem is and which part of the datamodel it relates to.
         3. Modify the Peach Pit file to fix the identified issues.
         
-        Use the "Read_File" tool to read the current datamodel from "./llm/peach/{self.protocol}/datamodel.xml" and the test logs from "./llm/peach/{self.protocol}/dm_test_logs/".
+        Use the "Read_File" tool to read the current datamodel from "./llm/peach/{self.protocol_lower}/datamodel.xml" and the test logs from "./llm/peach/{self.protocol_lower}/dm_test_logs/".
         Use the "RFC_Search" tool to look up any specific protocol details needed to fix the datamodel.
-        Use the "Write_File" tool to save the updated Peach Pit file back to "./llm/peach/{self.protocol}/datamodel.xml".
+        Use the "Write_File" tool to save the updated Peach Pit file back to "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
 
-        self.call_agent(step3_prompt, "Step 3: Test and Fix Datamodel")
+        self.call_agent(step3_prompt, "Step 3: Datamodel Validation & Fix")
+
+    def step_4_mutator_generation(self):
+        UI.title("Step 4: Mutator Generation")
+        packet_types = self.state.get("packet_types") or []
+        if not packet_types:
+            UI.warn("Warning: packet_types is empty. Step 4 will not generate any mutators.")
+            return
+
+        for (i, pkt_type) in enumerate(packet_types):
+            mutator_prompt = f"""
+            List ALL fields for the {self.protocol_lower} {pkt_type} packet.
+
+            For EACH field <field_name> in the {self.protocol_lower} {pkt_type} packet:
+            1. Fixed value? If the field is fixed per the spec, output exactly: not mutable and stop. Do not generate any mutator functions.
+            2. Otherwise (the field is mutable):
+            a. If the field is optional, implement:
+            class {self.protocol_upper}{pkt_type.capitalize()}Add<field_name.capitalize()>
+            class {self.protocol_upper}{pkt_type.capitalize()}Remove<field_name.capitalize()>
+            b. If the field may appear multiple times, also implement:
+            class {self.protocol_upper}{pkt_type.capitalize()}Repeat<field_name.capitalize()>
+            c. Mutate. Design semantic-aware mutators for this field by covering the following field-local semantic categories:
+                A. Canonical form
+                B. Boundaries
+                C. Equivalence-class alternatives
+                D. Allowed bitfield/enum/range
+                E. Encoding-shape variant
+                F. Padding/alignment
+                G. prefix/suffix
+                H. Random valid mix
+            Add randomized perturbations mixing shallow and deep changes to preserve long-term diversity and avoid collapse into a single pattern.
+            class {self.protocol_upper}{pkt_type.capitalize()}Mutate<field_name.capitalize()>
+
+            Write in C# using the llm-peach sdk:
+            ```csharp
+            class <mutator_class_name> : LLMMutator
+            {{
+                public <mutator_class_name>(DataElement obj) : base(obj) {{ }}
+                public new static bool supportedDataElement(DataElement obj) 
+                {{
+                    // Return true if this mutator supports the given DataElement based on its name, type, or other characteristics. This is used to determine which mutators can be applied to which fields.
+                    // Hint: A data element with maxOccurs and/or minOccurs is type `Array`.
+                    // Hint: obj.IsIn(...) can be used to check if the DataElement is part of a specific packet type or field.
+                }}
+
+                public override void PerformMutation(DataElement obj)
+                {{
+                    // Implement the mutation logic here
+                    // Hint: obj.Bytes() gives you the raw bytes of the field.
+                    // Hint: obj.MutatedValue = new Variant(...) can be used to set the mutated value.
+                    // Hint: obj.parent.Remove(obj) can be used to remove the field.
+                }}
+            }}
+            ```
+
+            Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            Use the "Read_File" tool to read the README of llm-peach SDK in "./peach/README.md".
+            Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the mutators.
+            Use the "Write_File" tool to save the generated mutator code to "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.cs".
+            Use the "Build_DotNet_DLL" tool to compile the generated mutators into a DLL "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll" and verify there are no syntax errors.
+            Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
+            """
+
+            self.call_agent(mutator_prompt, f"Step 4.{i + 1}: Mutator Generation for {pkt_type}")
 
     @override
     def steps(self):
         return [
-            ("Step 1: Fetch Packet Types", self.step_1_fetch_packet_types),
-            ("Step 2: Generate Peach Pit Datamodel", self.step_2_generate_datamodel),
-            ("Step 3: Test and Fix Datamodel", self.step_3_datamodel_test_and_fix),
+            ("Step 1: Packet Types Extraction", self.step_1_packet_types_extraction),
+            ("Step 2: Datamodel Generation", self.step_2_datamodel_generation),
+            ("Step 3: Datamodel Validation & Fix", self.step_3_datamodel_validation_and_fix),
+            ("Step 4: Mutator Generation", self.step_4_mutator_generation),
         ]

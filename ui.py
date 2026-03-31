@@ -79,6 +79,8 @@ class UI:
     def dim(message: str):
         console.print(f"[dim]{message}[/dim]")
 
+    print = staticmethod(console.print)
+
 
 def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> str:
     """Ask what to do BEFORE starting a step.

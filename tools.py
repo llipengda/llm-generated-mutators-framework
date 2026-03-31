@@ -175,17 +175,18 @@ TOOL RESPONSE:
     return rfc_search
 
 
-from dotnet_tools import search_class
+from dotnet_tools import search_class, build_dotnet_dll
 
 tools = {
     "aflnet": [
         save_and_verify_code,
         read_file,
-        append_and_verify_code,
+        append_and_verify_code
     ],
     "peach": [
         read_file,
         write_file,
-        search_class
+        search_class,
+        build_dotnet_dll
     ]
 }
