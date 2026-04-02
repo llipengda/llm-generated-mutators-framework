@@ -1,5 +1,6 @@
 import os
-
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from state import PipelineState, add_step_usage, save_pipeline_state
@@ -66,12 +67,30 @@ class BasePipeline:
 
 
     def __call__(self):
+        """
+        执行 pipeline 步骤，支持单个步骤和并行步骤组。
+        
+        步骤格式支持：
+        - 单个步骤：("Step Name", step_function)
+        - 并行步骤组：[("Step A", func_a), ("Step B", func_b), ...]
+        """
         i = 0
         steps = self.steps()
+        
         while i < len(steps):
-            step_title, step_fn = steps[i]
-            action = ask_before_step(step_title, has_previous=i > 0)
-
+            current_step = steps[i]
+            is_parallel_group = isinstance(current_step, list)
+            
+            # 生成显示标题
+            if is_parallel_group:
+                step_titles = [step[0] for step in current_step]
+                display_title = f"[PARALLEL] {', '.join(step_titles)}"
+            else:
+                display_title = current_step[0]
+            
+            # 询问用户是否继续
+            action = ask_before_step(display_title, has_previous=i > 0)
+            
             if action == "exit":
                 UI.error("Exiting pipeline.")
                 return
@@ -79,22 +98,63 @@ class BasePipeline:
                 if i == 0:
                     UI.warn("This is the first step; there is no previous step to retry.")
                 else:
-                    UI.warning_rule(f"Going back to previous step: {steps[i-1][0]}")
+                    prev_step = steps[i-1]
+                    if isinstance(prev_step, list):
+                        prev_title = f"[PARALLEL] {', '.join([s[0] for s in prev_step])}"
+                    else:
+                        prev_title = prev_step[0]
+                    UI.warning_rule(f"Going back to previous step: {prev_title}")
                     i -= 1
                 continue
             if action == "skip":
-                UI.warning_rule(f"Skipping: {step_title}")
+                UI.warning_rule(f"Skipping: {display_title}")
                 i += 1
                 continue
-
-            step_fn()
+            
+            # 执行步骤：单个或并行
+            if is_parallel_group:
+                self._execute_parallel_steps(current_step)
+            else:
+                step_title, step_fn = current_step
+                step_fn()
+            
             i += 1
-
+        
         UI.panel(
             f"Generation pipeline execution for {self.protocol_name} completed successfully.",
             style="bold green",
         )
         self.print_token_usage_summary()
+    
+    def _execute_parallel_steps(self, steps_group):
+        """
+        并行执行一组步骤。
+        
+        Args:
+            steps_group: 列表，每个元素是 (step_title, step_function) 元组
+        """
+        UI.dim(f"🚀 Starting parallel execution of {len(steps_group)} steps...")
+        
+        with ThreadPoolExecutor(max_workers=len(steps_group)) as executor:
+            # 提交所有任务
+            future_to_step = {}
+            for step_title, step_fn in steps_group:
+                future = executor.submit(step_fn)
+                future_to_step[future] = step_title
+            
+            # 等待所有任务完成并收集结果
+            completed = 0
+            for future in as_completed(future_to_step):
+                step_title = future_to_step[future]
+                try:
+                    future.result()
+                    completed += 1
+                    UI.success(f"✓ {step_title} completed")
+                except Exception as e:
+                    UI.error(f"✗ {step_title} failed with error: {e}")
+                    raise
+        
+        UI.dim(f"✅ All {len(steps_group)} parallel steps completed")
 
     def steps(self) -> list[tuple[str, Callable[[], None]]]:
         raise NotImplementedError("Subclasses must implement the steps method.")

@@ -541,16 +541,27 @@ class AFLNetPipeline(BasePipeline):
     def steps(self):
         steps = [
             ("Step 1: Fetch Packet Types", self.step_1_fetch_packet_types),
+            
             ("Step 2: Generate C Structures", self.step_2_generate_c_structures),
-            ("Step 3: Generate Parser", self.step_3_generate_parser),
-            ("Step 4: Generate Reassembler", self.step_4_generate_reassembler),
+            
+            [
+                ("Step 3: Generate Parser", self.step_3_generate_parser),
+                ("Step 4: Generate Reassembler", self.step_4_generate_reassembler),
+            ],
+            
             ("Step 5: Parser & Reassembler Verification & Fix",
                 self.step_5_verification_and_fix),
-            ("Step 6: Mutator Generation", self.step_6_mutator_generation),
-            ("Step 7: Mutator Sanity Check & Fix",
-                self.step_7_mutator_sanity_check_and_fix),
-            ("Step 8: Fixer Generation", self.step_8_fixer_generation),
-            ("Step 9: Fixer Sanity Check & Fix", self.step_9_fixer_sanity_check_and_fix),
+            
+            [
+                ("Step 6: Mutator Generation", self.step_6_mutator_generation),
+                ("Step 8: Fixer Generation", self.step_8_fixer_generation),
+            ],
+            
+            [
+                ("Step 7: Mutator Sanity Check & Fix",
+                    self.step_7_mutator_sanity_check_and_fix),
+                ("Step 9: Fixer Sanity Check & Fix", self.step_9_fixer_sanity_check_and_fix),
+            ],
         ]
 
         return steps
