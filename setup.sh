@@ -38,7 +38,7 @@ case "$TARGET" in
                 echo "Colima could not be found, please install it first."
                 exit 1
             fi
-            colima start --arch x86_64
+            colima start --arch x86_64 --cpu 6 --memory 8
         fi
         if [[ "$OS" == "Linux" && "$ARCH" == "aarch64" ]]; then
             echo "Linux arm64 is not supported."

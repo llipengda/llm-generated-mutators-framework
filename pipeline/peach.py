@@ -5,20 +5,24 @@ from agent import AgentConfig, build_agent_graph
 from pipeline.base import BasePipeline
 from ui import UI
 
+
 class PeachPipeline(BasePipeline):
     def __init__(self):
         super().__init__()
-        self.agent_graph = build_agent_graph(retriever=self.retriever, target="peach", config=AgentConfig(
+        self.agent_config = AgentConfig(
             temperature=0.7,
-            model="gpt-5.2",
-            system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer."
-        ))
-    
+            model="gpt-5.4",
+            system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
+        )
+        self.agent_graph = build_agent_graph(
+            retriever=self.retriever, target="peach", config=self.agent_config
+        )
+
     def step_1_packet_types_extraction(self):
         UI.title("Step 1: Packet Types Extraction")
 
         step1_prompt = f"""
-        For {self.protocol_name} protocol, list all the request packet types according to the RFC document.
+        For {self.protocol_name} protocol, list ALL the packet types according to the RFC document.
         Use the "RFC_Search" tool to look up the relevant sections in the RFC.
         Return the list as a comma-separated string.
         ONLY output the types, nothing else.
@@ -31,8 +35,7 @@ class PeachPipeline(BasePipeline):
         response = self.call_agent(step1_prompt, "Step 1: Packet Types Extraction")
 
         packet_types_raw = response["messages"][-1].content
-        packet_types = [t.strip()
-                        for t in packet_types_raw.split(",") if t.strip()]
+        packet_types = [t.strip() for t in packet_types_raw.split(",") if t.strip()]
         self.state["packet_types"] = packet_types
         self.save_state()
         UI.success(f"[bold]Parsed Types:[/bold] {packet_types}")
@@ -42,7 +45,9 @@ class PeachPipeline(BasePipeline):
 
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
-            UI.warn("Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run.")
+            UI.warn(
+                "Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run."
+            )
 
         step2_prompt = f"""
         Using the packet types we just identified ({packet_types}), generate a Peach Pit file defining the precise structure of each packet for {self.protocol_name}.
@@ -88,24 +93,30 @@ class PeachPipeline(BasePipeline):
         <DataModel name="mqtt_connect_payload_t">
             <Block name="client_id" ref="MQTT_String"/>
             <!-- Will Properties (optional, if Will Flag is set) -->
-            <MqttVarInt name="will_property_length" minOccurs="0" maxOccurs="1">
-                <Relation type="size" of="will_properties"/>
-            </MqttVarInt>
-            <Blob name="will_properties" minOccurs="0" maxOccurs="1"/>
-            <!-- Will Topic (optional, if Will Flag is set) -->
-            <Block name="will_topic" ref="MQTT_String" minOccurs="0" maxOccurs="1"/>
-            <!-- Will Payload (optional, if Will Flag is set) -->
-            <Number name="will_payload_length" size="16" minOccurs="0" maxOccurs="1">
-                <Relation type="size" of="will_payload"/>
-            </Number>
-            <Blob name="will_payload" minOccurs="0" maxOccurs="1"/>
+            <Optional name="will_optional" src="variable_header.connect_flags" expression="(value & 0x04) != 0">
+                <MqttVarInt name="will_property_length">
+                    <Relation type="size" of="will_properties"/>
+                </MqttVarInt>
+                <Blob name="will_properties"/>
+                <!-- Will Topic (optional, if Will Flag is set) -->
+                <Block name="will_topic" ref="MQTT_String"/>
+                <!-- Will Payload (optional, if Will Flag is set) -->
+                <Number name="will_payload_length" size="16">
+                    <Relation type="size" of="will_payload"/>
+                </Number>
+                <Blob name="will_payload"/>
+            </Optional>
             <!-- User Name (optional, if Username Flag is set) -->
-            <Block name="user_name" ref="MQTT_String" minOccurs="0" maxOccurs="1"/>
+            <Optional name="username_optional" src="variable_header.connect_flags" expression="(value & 0x80) != 0">
+                <Block name="user_name" ref="MQTT_String"/>
+            </Optional>
             <!-- Password (optional, if Password Flag is set) -->
-            <Number name="password_length" size="16" minOccurs="0" maxOccurs="1">
-                <Relation type="size" of="password"/>
-            </Number>
-            <Blob name="password" minOccurs="0" maxOccurs="1"/>
+            <Optional name="password_optional" src="variable_header.connect_flags" expression="(value & 0x40) != 0">
+                <Number name="password_length" size="16">
+                    <Relation type="size" of="password"/>
+                </Number>
+                <Blob name="password"/>
+            </Optional>
         </DataModel>
 
         <!-- Connect Packet -->
@@ -149,7 +160,9 @@ class PeachPipeline(BasePipeline):
         </Peach>
         ```
 
-        Use the tool "Read_File" to read the usage of each XML element in "./peach.txt" to understand how to define the structure for each packet type.
+        Hint: Usage of size `Relation`: Put a relation with type "size" on the length field. Set the "of" attribute to point to the field whose size it defines. 
+
+        Use the tool "Read_File" to read the usage of each XML element in "./peach/peach.txt" to understand how to define the structure for each packet type.
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
         Use the tool "Write_File" to save the generated Peach Pit file to "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
@@ -158,7 +171,11 @@ class PeachPipeline(BasePipeline):
 
     def verify_datamodel(self):
         with UI.status("Running Datamodel Tests..."):
-            cmd = ["./tests/datamodel/run_datamodel_test.sh", self.protocol_lower, self.seed_dir]
+            cmd = [
+                "./tests/datamodel/run_datamodel_test.sh",
+                self.protocol_lower,
+                self.seed_dir,
+            ]
             result = subprocess.run(
                 cmd,
                 stderr=subprocess.STDOUT,
@@ -180,7 +197,10 @@ class PeachPipeline(BasePipeline):
         if "[PASS]" in last_line:
             return True, result.stdout
 
-        return False, "Verification script did not complete as expected.\n" + result.stdout
+        return (
+            False,
+            "Verification script did not complete as expected.\n" + result.stdout,
+        )
 
     def step_3_datamodel_validation_and_fix(self):
         UI.title("Step 3: Datamodel Validation & Fix")
@@ -218,10 +238,12 @@ class PeachPipeline(BasePipeline):
         UI.title("Step 4: Mutator Generation")
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
-            UI.warn("Warning: packet_types is empty. Step 4 will not generate any mutators.")
+            UI.warn(
+                "Warning: packet_types is empty. Step 4 will not generate any mutators."
+            )
             return
 
-        for (i, pkt_type) in enumerate(packet_types):
+        def run_one(pkt_type: str, index: int):
             mutator_prompt = f"""
             List ALL fields for the {self.protocol_lower} {pkt_type} packet.
 
@@ -245,9 +267,18 @@ class PeachPipeline(BasePipeline):
             Add randomized perturbations mixing shallow and deep changes to preserve long-term diversity and avoid collapse into a single pattern.
             class {self.protocol_upper}{pkt_type.capitalize()}Mutate<field_name.capitalize()>
 
-            Write in C# using the llm-peach sdk:
+            Write in C# using the llm-peach sdk in namespace Peach.LLM.Generated.Mutators.{self.protocol_upper}.{pkt_type.capitalize()}. Use C# 5.0.
             ```csharp
-            class <mutator_class_name> : LLMMutator
+            using System;
+            using System.ComponentModel;
+            using Peach.Core;
+            using Peach.Core.Dom;
+            using Peach.LLM.Core;
+            using Peach.LLM.Core.Mutators;
+            
+            [Mutator("<mutator_class_name>")]
+            [Description("Description of the mutator")]
+            public class <mutator_class_name> : LLMMutator
             {{
                 public <mutator_class_name>(DataElement obj) : base(obj) {{ }}
                 public new static bool supportedDataElement(DataElement obj) 
@@ -257,7 +288,7 @@ class PeachPipeline(BasePipeline):
                     // Hint: obj.IsIn(...) can be used to check if the DataElement is part of a specific packet type or field.
                 }}
 
-                public override void PerformMutation(DataElement obj)
+                protected override void PerformMutation(DataElement obj)
                 {{
                     // Implement the mutation logic here
                     // Hint: obj.Bytes() gives you the raw bytes of the field.
@@ -267,21 +298,41 @@ class PeachPipeline(BasePipeline):
             }}
             ```
 
+            **You must not stop until you have generated mutators for ALL fields of the {self.protocol_lower} {pkt_type} packet, and built the DLL successfully without syntax errors.**
+
             Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
             Use the "Read_File" tool to read the README of llm-peach SDK in "./peach/README.md".
             Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the mutators.
             Use the "Write_File" tool to save the generated mutator code to "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.cs".
-            Use the "Build_DotNet_DLL" tool to compile the generated mutators into a DLL "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll" and verify there are no syntax errors.
+            Use the "Build_DotNet_DLL" tool to compile the generated mutators into a DLL "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll" and verify there are no syntax errors.
             Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
             """
 
-            self.call_agent(mutator_prompt, f"Step 4.{i + 1}: Mutator Generation for {pkt_type}")
+            agent = build_agent_graph(
+                retriever=self.retriever, target="peach", config=self.agent_config
+            )
+
+            self.call_agent(
+                mutator_prompt,
+                f"Step 4.{index + 1}: Mutator Generation for {pkt_type}",
+                agent_graph=agent,
+            )
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(run_one, pkt_type, idx) for idx, pkt_type in enumerate(packet_types)]
+            for future in as_completed(futures):
+                future.result()
 
     @override
     def steps(self):
         return [
             ("Step 1: Packet Types Extraction", self.step_1_packet_types_extraction),
             ("Step 2: Datamodel Generation", self.step_2_datamodel_generation),
-            ("Step 3: Datamodel Validation & Fix", self.step_3_datamodel_validation_and_fix),
+            (
+                "Step 3: Datamodel Validation & Fix",
+                self.step_3_datamodel_validation_and_fix,
+            ),
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
         ]

@@ -22,3 +22,7 @@ tests/PR_mr/*.dSYM
 tests/PR_mr/mr_test
 
 peach/sdk
+peach/
+
+.DS_Store
+__MACOSX/

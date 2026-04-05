@@ -19,6 +19,7 @@ if [ $# -ge 2 ]; then
   SEED_DIR=$2
 fi
 
+mkdir -p "$ROOT/llm/peach/$PROTO/dm_test_logs"
 chmod u+rwx "$ROOT/llm/peach/$PROTO/dm_test_logs"
 
 docker run --rm --name datamodel_test -v "$ROOT/llm/peach/$PROTO:/test" -v "$SEED_DIR:/seeds" -v "$ROOT/llm/peach/$PROTO/dm_test_logs:/logs" pdli/llm-peach:sdk \
