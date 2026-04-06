@@ -11,7 +11,7 @@ PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 PROTO_UPPER=$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')
 
 PWD="$(pwd)"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LLM_GEN_PATH="$ROOT/llm/peach/${PROTO}"
 
 cd "$LLM_GEN_PATH"

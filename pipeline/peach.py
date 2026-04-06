@@ -325,6 +325,69 @@ class PeachPipeline(BasePipeline):
             for future in as_completed(futures):
                 future.result()
 
+    def step_5_mutator_validation_and_fix(self):
+        UI.title("Step 5: Mutator Validation & Fix")
+
+        with UI.status("Running Mutator Tests..."):
+            cmd = [
+                "./tests/peach_mutator/run_peach_mutator_test.sh",
+                self.protocol_lower,
+                self.seed_dir,
+            ]
+            result = subprocess.run(
+                cmd,
+                stderr=subprocess.STDOUT,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+
+        UI.panel(
+            result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
+            title="Mutator Test Output (Last 2000 chars)",
+            border_style="grey50",
+        )
+
+        import os
+        import glob
+
+        error_log_dir = f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
+        error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+
+        if not error_logs:
+            UI.success("No mutator ERRORs found. Mutator validation passed successfully!")
+            return
+
+        UI.warn(f"Found {len(error_logs)} mutators with ERRORs. Attempting to fix...")
+
+        for log_file in error_logs:
+            with open(log_file, "r", encoding="utf-8") as f:
+                test_output = f.read()
+
+            mutator_name = os.path.basename(log_file).replace(".log", "")
+
+            step5_prompt = f"""
+            We ran a verification test against the generated mutators. The test failed with an ERROR for the mutator `{mutator_name}`.
+            Here is the test error output for this mutator:
+
+            ```
+            {test_output}
+            ```
+
+            The test logs indicate there are issues with the generated C# code for `{mutator_name}`. 
+            
+            You need to:
+            1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
+            2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
+            3. Use the "Read_File" tool to read the corresponding mutator file.
+            4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur during `PerformMutation`.
+            5. Use the "Write_File" tool to update the file with the fix.
+            6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
+
+            Be thorough and ensure the C# code will successfully compile.
+            """
+
+            self.call_agent(step5_prompt, f"Step 5: Fix Mutator {mutator_name}")
+
     @override
     def steps(self):
         return [
@@ -335,4 +398,5 @@ class PeachPipeline(BasePipeline):
                 self.step_3_datamodel_validation_and_fix,
             ),
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
+            ("Step 5: Mutator Validation & Fix", self.step_5_mutator_validation_and_fix),
         ]
