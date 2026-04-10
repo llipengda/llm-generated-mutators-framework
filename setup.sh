@@ -32,19 +32,11 @@ case "$TARGET" in
             echo "Mono could not be found, please install it first."
             exit 1
         fi
-        if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
-            if ! command -v colima &> /dev/null
-            then
-                echo "Colima could not be found, please install it first."
-                exit 1
-            fi
-            colima start --arch x86_64 --cpu 6 --memory 8
-        fi
         if [[ "$OS" == "Linux" && "$ARCH" == "aarch64" ]]; then
             echo "Linux arm64 is not supported."
             exit 1
         fi
-        docker pull pdli/llm-peach:sdk
+        docker pull pdli/llm-peach:sdk --platform=linux/amd64
         ESSENTIAL_DLLS=(
             BouncyCastle.Crypto.dll
             Dapper.dll
@@ -56,8 +48,10 @@ case "$TARGET" in
             Peach.Core.dll
             Peach.LLM.dll
             Peach.Pro.dll
+            Peach.LLM.Validations.Common.dll
             SocketHttpListener.dll
             vtortola.WebSockets.dll
+            nunit.framework.dll
         )
         mkdir -p peach/sdk
         chmod 777 peach

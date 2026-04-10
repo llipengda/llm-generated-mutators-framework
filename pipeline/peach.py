@@ -388,6 +388,390 @@ class PeachPipeline(BasePipeline):
 
             self.call_agent(step5_prompt, f"Step 5: Fix Mutator {mutator_name}")
 
+    def step_6_constraint_extraction(self):
+        UI.title("Step 6: Constraint Extraction")
+
+        prompt = f"""
+        Extract all constraints related to request (client to server) message format from the {self.protocol_name} RFC.
+        For example, in MQTT there are the following constraints:
+            - [MQTT-2.2.1-2] A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set to 0.
+            - [MQTT-3.1.2-11] If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00).
+            - ...
+        Use the "RFC_Search" tool to look up the relevant sections in the RFC.
+        Output the constraints ONLY, nothing else.
+        """
+
+        response = self.call_agent(prompt, "Step 6: Constraint Extraction")
+        constraints = response["messages"][-1].content
+        self.state["constraints"] = constraints
+        self.save_state()
+        UI.success("Constraints extracted successfully.")
+
+    def step_7_fixer_generation(self):
+        UI.title("Step 7: Fixer Generation")
+
+        constraints = self.state.get("constraints") or ""
+        if not constraints:
+            UI.warn(
+                "Warning: constraints is empty. Step 7 will not generate any fixers."
+            )
+            return
+
+        constraint_blocks = [c.strip() for c in constraints.split("\n\n") if c.strip()]
+        
+        # Group constraints into chunks of 2
+        chunk_size = 3
+        chunks = [constraint_blocks[i:i + chunk_size] for i in range(0, len(constraint_blocks), chunk_size)]
+
+        def run_fixer_chunk(chunk: list[str], index: int):
+            chunk_content = "\n\n".join(chunk)
+            prompt = f"""
+            For {self.protocol_lower}, write fixer functions for EACH constraint below.
+            
+            **CRITICAL:** 
+            - You MUST implement a fixer function for EVERY SINGLE constraint provided here.
+            - DO NOT leave placeholders like "// more constraints". 
+            - DO NOT abbreviate or truncate the code. Output the complete implementation for all items.
+            - When writing helper functions, add Part{index} to the function name. This is important to avoid naming conflicts across chunks.
+            
+            Write in C# 5.0.
+            File: ./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixers_part_{index}.cs
+            ```csharp
+            using System;
+            using Peach.Core;
+            using Peach.Core.Dom;
+            using Peach.LLM.Core;
+            using Encoding = System.Text.Encoding;
+            
+            namespace Peach.LLM.Generated.Fixups.{self.protocol_upper} 
+            {{
+                public partial class {self.protocol_upper}Fixers 
+                {{
+                    // Add the constraint content as a comment above each fixer function for clarity.
+                    public static void Fix<ConstraintName>(DataElement obj) 
+                    {{
+                        // The input is a single {self.protocol_lower}_<pkt_type>_packet_t. Fix in place.
+                        /*** HINTS
+                        - Change a field value: obj.SetValue(new Variant(...));
+                        - Remove a field: obj.parent.Remove(obj);
+                        - Make `Optional` field appear: obj.SetValue(new Variant(...)) on its child field(s) with valid value(s).
+                        ***/
+                    }}
+                }}
+            }}
+            ```
+
+            Constraints for this task:
+            {chunk_content}
+
+            You must ensure there are NO syntax errors and the code compiles successfully.
+
+            Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            Use the "Read_File" tool to read the README of llm-peach SDK in "./peach/README.md".
+            Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the fixers.
+            Use the "Write_File" tool to save the generated fixer code to "./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixers_part_{index}.cs".
+            Use the "Build_DotNet_DLL" tool to compile the generated fixers into a DLL "./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers_part_{index}.dll" and verify there are no syntax errors.
+            Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
+            """
+
+            agent = build_agent_graph(
+                retriever=self.retriever, target="peach", config=self.agent_config
+            )
+
+            self.call_agent(
+                prompt,
+                f"Step 7.1.{index}: Fixer Generation Part {index}",
+                agent_graph=agent,
+            )
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(run_fixer_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
+            for future in as_completed(futures):
+                future.result()
+
+        UI.title("Step 7.2: Fixup Class Generation")
+
+        fixup_prompt = f"""
+        Now that we have generated the individual fixer functions in partial classes, we need to generate the main Fixup class that calls them.
+
+        Write the main Fixup class in C# 5.0.
+        File: ./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixup.cs
+        ```csharp
+        using System;
+        using System.Collections.Generic;
+        using System.ComponentModel;
+        using NLog;
+        using Peach.Core;
+        using Peach.Core.Dom;
+        using Peach.LLM.Core;
+        using Peach.LLM.Core.Fixups;
+
+        namespace Peach.LLM.Generated.Fixups.{self.protocol_upper} 
+        {{
+            [Description("{self.protocol_upper} Fixup.")]
+            [Fixup("{self.protocol_upper}Fixup", true)]
+            [Parameter("ref", typeof(DataElement), "Reference to data element")]
+            [Serializable]
+            public class {self.protocol_upper}Fixup : LLMFixup
+            {{
+                public DataElement _ref {{ get; protected set; }}
+                [NonSerialized]
+                private static readonly NLog.Logger _logger = LogManager.GetCurrentClassLogger();
+                public {self.protocol_upper}Fixup(DataElement parent, Dictionary<string, Variant> args) : base(parent, args, "ref") {{ ParameterParser.Parse(this, args); }}
+
+                protected override Variant fixupImpl()
+                {{
+                    if (!ShouldFixup)
+                        return elements["ref"].InternalValue;
+                    var elem = elements["ref"].Clone();
+                    var packets = elem.find("packets") as Peach.Core.Dom.Array;
+                    var before = elem.Bytes();
+                    try
+                    {{
+                        for (int i = 0; i < packets.Count; i++)
+                        {{
+                            var p = (packets[i].find("packet_union") as Choice).SelectedElement;
+                            // For each constraint, call the corresponding fixer function on the packet. 
+                            // You can identify the packet type by checking which field in the choice is populated. For example, if p.Name == "connect", then it's a <proto>_connect_packet_t.
+                        }}
+                    }}
+                    catch (NullReferenceException ex)
+                    {{
+                        _logger.Error(ex, "{self.protocol_upper} Fixup failed due to missing expected elements. Skipping fixup.");
+                        return new Variant(before);
+                    }}
+                    catch (Exception ex)
+                    {{
+                        _logger.Error(ex, "{self.protocol_upper} Fixup failed. Skipping fixup.");
+                        return new Variant(before);
+                    }}
+                    return elem.InternalValue;
+                }}
+            }}
+        }}
+
+        YOU MUST ensure there are NO syntax errors and the code compiles successfully. Fix syntax errors by reading the error messages, fixing the code, and rebuilding until there are no syntax errors.
+        This class should call ALL the fixer functions generated.
+        
+        Use the "Read_File" tool to read the generated partial classes in "./llm/peach/{self.protocol_lower}/Fixers/" to see the exact names of the static Fix methods to call.
+        Use the "Write_File" tool to save the generated fixer code to "./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixup.cs".
+        Use the "Build_DotNet_DLL" tool to compile ALL the generated fixers (.cs files in "./llm/peach/{self.protocol_lower}/Fixers/") into a DLL "./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers.dll" and verify there are no syntax errors.
+        """
+
+        self.call_agent(fixup_prompt, "Step 7.2: Fixup Class Generation")
+
+    def step_7_5_fixer_constraint_mapping(self):
+        UI.title("Step 7.5: Fixer-Constraint Mapping")
+
+        mapping_prompt = f"""
+        Create a mapping document that clearly maps each constraint to the corresponding fixer function that address it.
+
+        The mapping should be in a txt format and saved to "./llm/peach/{self.protocol_lower}/Fixers/fixer_constraint_mapping.txt".
+
+        For each constraint, list:
+        - The exact text of the constraint (copy-paste from the original constraints).
+        - The name of the fixer function that are designed to fix this constraint.
+
+        Format:
+Constraint: [Exact constraint text]
+Fixer Function: [C# static method name, e.g., FixMQTT2212]
+\\n\\n
+
+        This mapping is critical for traceability and future maintenance, so be thorough and accurate.
+
+        Use the "Read_File" tool to read the generated fixers in "./llm/peach/{self.protocol_lower}/Fixers/" to identify which functions correspond to which constraints.
+        Use the "Write_File" tool to save the generated mapping document to "./llm/peach/{self.protocol_lower}/Fixers/fixer_constraint_mapping.txt".
+        """
+
+        self.call_agent(mapping_prompt, "Step 7.5: Fixer-Constraint Mapping")
+
+    def step_8_fixer_test_generation(self):
+        UI.title("Step 8: Fixer Test Generation")
+
+        import os
+        dll_source = f"./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers.dll"
+        dll_destination = f"./peach/sdk/{self.protocol_upper}Fixers.dll"
+        if os.path.exists(dll_source):
+            import shutil
+            shutil.copy(dll_source, dll_destination)
+            UI.success(f"Copied {dll_source} to {dll_destination} for test compilation.")
+        else:
+            UI.warn(f"Expected DLL not found at {dll_source}. Make sure Step 7 completed successfully. Step 8 may fail to compile tests without the fixers DLL.")
+
+        # constraints = self.state.get("constraints") or ""
+        constraints = ''
+        with open(f"./llm/peach/{self.protocol_lower}/Fixers/fixer_constraint_mapping.txt", "r", encoding="utf-8") as f:
+            constraints = f.read()
+        if not constraints:
+            UI.warn("Warning: constraints is empty. Step 8 will not generate any tests.")
+            return
+
+        constraint_blocks = [c.strip() for c in constraints.split("\n\n") if c.strip()]
+        
+        # Group constraints into chunks of 2
+        chunk_size = 2
+        chunks = [constraint_blocks[i:i + chunk_size] for i in range(0, len(constraint_blocks), chunk_size)]
+
+        def run_test_chunk(chunk: list[str], index: int):
+            chunk_content = "\n\n".join(chunk)
+            prompt = f"""
+            For {self.protocol_lower}, write NUnit test functions for validating EACH fixer constraint below.
+
+            **CRITICAL:**
+            - You MUST implement a test function for EVERY SINGLE constraint provided here.
+            - DO NOT leave placeholders.
+
+            Write in C# 5.0.
+            File: ./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs
+            
+            ```csharp
+            using System;
+            using System.Text;
+            using System.Linq;
+            using NUnit.Framework;
+            using Peach.Core;
+            using Peach.Core.Dom;
+            using Peach.LLM.Core;
+            using Peach.LLM.Validations.Common;
+            using Peach.LLM.Generated.Fixups.{self.protocol_upper};
+            using Encoding = System.Text.Encoding;
+
+            namespace Peach.LLM.Generated.Validations.Fixer.{self.protocol_upper}
+            {{
+                public partial class {self.protocol_upper}FixerTest
+                {{
+                    // Example test structure:
+                    [FixerTest("<constraint_name>")]
+                    public static void Test_<fixer_name>()
+                    {{
+                        var parser = new DataParser("./datamodel.xml", "{self.protocol_lower}_packet_array");
+                    
+                        // 1. Prepare valid data for testing
+                        // Make sure the data can be parsed successfully with the datamodel and represents a valid packet that meets the constraint before modification.
+                        var valid = new byte[] {{ /* valid data bytes of a whole packet */ }};
+                    
+                        // 2. Parse the valid data using the DataParser
+                        var root = parser.Parse(valid);
+                    
+                        // 3. Make the valid data violate the constraint (e.g., modify fields to invalid values)
+                        // Hint: Use root.find(a)?.find(b)?.find(c) instead of root.find(a.b.c); Use `name_index` instead of `name[index]` in Array fields.
+                        var field = root.find("field_name");
+                        field.SetValue(new Variant("invalid_value"));
+                    
+                        // 4. Assert that the modified data is really modified as expected.
+                        Assert.AreEqual(
+                            // Get the expected bytes for the invalid value. This depends on the field type and encoding. For example, if it's a UTF-8 string, you can use:
+                            Encoding.UTF8.GetBytes("invalid_value"),
+                            field.Bytes());
+                    
+                        // 5. Call the Fixer to attempt to fix the modified data.
+                        {self.protocol_upper}Fixers.<fixer_name>(root.find("<packet_type>"));
+                    
+                        // 6. Assert that the Fixer successfully fixed the data to meet the constraint.
+                        var fixedField = root.find("field_name");
+                        // Or other assertions depending on the constraint.
+                        Assert.AreEqual(Encoding.UTF8.GetBytes("expected_fixed_value"), fixedField.Bytes());
+                    }}
+                }}
+            }}
+            ```
+
+            Constraints for this task:
+            {chunk_content}
+
+            IMPORTANT:
+            1. You must ensure there are NO syntax errors and the code compiles successfully.
+            2. You must NOT read the Fixer functions. You should treat the Fixers as a black box and only focus on testing the constraints. 
+            3. You must validate the test data you prepare against the datamodel to ensure it's correctly structured. If the validation fails, fix the test data until it passes validation before proceeding to call the Fixer.
+
+            Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            Use the "Write_File" tool to save the generated test code to "./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs".
+            Use the "Validate_Data" tool to validate the test data you prepare against the datamodel to ensure it's correctly structured.
+            Use the "Build_DotNet_DLL" tool to compile the test file. Ensure it compiles successfully without syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Fixers/Validations/out/{self.protocol_upper}FixerTest_part_{index}.dll".
+            """
+
+            agent = build_agent_graph(
+                retriever=self.retriever, target="peach", config=self.agent_config
+            )
+
+            self.call_agent(
+                prompt,
+                f"Step 8.{index}: Fixer Validation Generation Part {index}",
+                agent_graph=agent,
+            )
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(run_test_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
+            for future in as_completed(futures):
+                future.result()
+
+    # def step_9_fixer_validation_and_fix(self):
+    #     UI.title("Step 9: Fixer Validation & Fix")
+
+    #     with UI.status("Running Fixer Tests..."):
+    #         cmd = [
+    #             "./tests/peach_fixer/run_peach_fixer_test.sh",
+    #             self.protocol_lower,
+    #             self.seed_dir,
+    #         ]
+    #         result = subprocess.run(
+    #             cmd,
+    #             stderr=subprocess.STDOUT,
+    #             stdout=subprocess.PIPE,
+    #             text=True,
+    #         )
+
+    #     UI.panel(
+    #         result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
+    #         title="Fixer Test Output (Last 2000 chars)",
+    #         border_style="grey50",
+    #     )
+
+    #     import os
+    #     import glob
+
+    #     error_log_dir = f"./llm/peach/{self.protocol_lower}/fixer_test_logs/error"
+    #     error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+
+    #     if not error_logs:
+    #         UI.success("No fixer ERRORs found. Fixer validation passed successfully!")
+    #         return
+
+    #     UI.warn(f"Found {len(error_logs)} fixers with ERRORs. Attempting to fix...")
+
+    #     for log_file in error_logs:
+    #         with open(log_file, "r", encoding="utf-8") as f:
+    #             test_output = f.read()
+
+    #         fixer_test_name = os.path.basename(log_file).replace(".log", "")
+
+    #         step9_prompt = f"""
+    #         We ran a verification test against the generated fixers. The test failed with an ERROR for the fixer/test `{fixer_test_name}`.
+    #         Here is the test error output:
+
+    #         ```
+    #         {test_output}
+    #         ```
+
+    #         The test logs indicate there are issues with either the generated C# code for the fixer or the test itself.
+            
+    #         You need to:
+    #         1. Find the C# file containing this test in `./llm/peach/{self.protocol_lower}/Validations/Fixer/` and the corresponding fixer in `./llm/peach/{self.protocol_lower}/Fixers/`.
+    #         2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
+    #         3. Use the "Read_File" tool to read the corresponding file(s).
+    #         4. Fix the bug in the C# code.
+    #         5. Use the "Write_File" tool to update the file(s) with the fix.
+    #         6. Use the "Build_DotNet_DLL" tool to ensure there are no syntax errors.
+
+    #         Be thorough and ensure the C# code will successfully compile.
+    #         """
+
+    #         self.call_agent(step9_prompt, f"Step 9: Fix Fixer {fixer_test_name}")
+
     @override
     def steps(self):
         return [
@@ -399,4 +783,9 @@ class PeachPipeline(BasePipeline):
             ),
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
             ("Step 5: Mutator Validation & Fix", self.step_5_mutator_validation_and_fix),
+            ("Step 6: Constraint Extraction", self.step_6_constraint_extraction),
+            ("Step 7: Fixer Generation", self.step_7_fixer_generation),
+            ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
+            ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
+            # ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
         ]

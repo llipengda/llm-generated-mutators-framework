@@ -245,3 +245,39 @@ f"""TOOL RESPONSE:
 {result}
 """)
     return result
+
+@tool("Validate_Data")
+def validate_data(protocol: str, hex_data: str) -> str:
+    """
+    Validates the given hex data against the specified protocol using the DataParser.
+
+    Args:
+        protocol (str): The name of the protocol to validate against.
+        hex_data (str): The hex string representing the data to be validated. e.g., "0F3B6CEE".
+
+    Returns:
+        str: A message indicating whether the data is valid or if there are any issues.
+    """
+    
+    import subprocess
+    cmd = [
+        "./tests/peach_fixer/run_data_test.sh",
+        protocol,
+        hex_data
+    ]
+
+    result = subprocess.run(cmd, text=True, capture_output=True)
+    res = ""
+    if result.returncode == 0:
+        res = f"Data is valid for protocol {protocol}."
+    else:
+        res = f"Data validation failed for protocol {protocol}:\n{(result.stdout + result.stderr) if result else 'Unknown error'}"
+
+    file_logger.log(
+f"""TOOL CALL: validate_data
+    protocol: {protocol}
+    hex_data: {hex_data}
+TOOL RESPONSE:
+{res}
+""")
+    return res

@@ -34,6 +34,7 @@ cat << EOF > pit.llm.xml
             <Param name="Host" value="##HOST##"/>
             <Param name="Port" value="##PORT##"/>
             <Param name="Timeout" value="200"/>
+            <Param name="FaultOnConnectionFailure" value="false"/>
         </Publisher>
         <Strategy class="TwoPhaseRandom">
             <Param name="TwoPhaseMutation" value="True" />
@@ -64,6 +65,7 @@ cat << EOF > pit.peach.xml
             <Param name="Host" value="##HOST##"/>
             <Param name="Port" value="##PORT##"/>
             <Param name="Timeout" value="200"/>
+            <Param name="FaultOnConnectionFailure" value="false"/>
         </Publisher>
         <Strategy class="Random"/>
         <Logger class="File">
@@ -72,6 +74,10 @@ cat << EOF > pit.peach.xml
     </Test>
 </Peach>
 EOF
+
+sed "s|<DataModel name=\"${PROTO}_packet_array\">|<DataModel name=\"${PROTO}_packet_array\"><Fixup class=\"${PROTO_UPPER}Fixup\"><Param name=\"ref\" value=\"packets\"/></Fixup>|g" datamodel.xml > datamodel.fixer.xml
+
+sed "s|file:datamodel.xml|file:datamodel.fixer.xml|g" pit.llm.xml > pit.llm.fixer.xml
 
 cat << EOF > Dockerfile.llm
 FROM pdli/llm-peach:sdk
@@ -88,6 +94,22 @@ CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /pea
     /peach/output/linux_x86_64_release/bin/peach /peach/output/linux_x86_64_release/bin/pit.llm.xml \${PEACH_ARGS}"]
 EOF
 
+cat << EOF > Dockerfile.llm.fixer
+FROM pdli/llm-peach:sdk
+WORKDIR /p
+ENV HOST= \\
+    PORT= \\
+    PEACH_ARGS=
+COPY . .
+RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
+    cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/ && \\
+    cp Fixers/out/${PROTO_UPPER}Fixers.dll /peach/output/linux_x86_64_release/bin/Plugins/
+CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /peach/output/linux_x86_64_release/bin/pit.llm.fixer.xml && \
+    ls -l /peach/output/linux_x86_64_release/bin/Plugins/ && \
+    cat /peach/output/linux_x86_64_release/bin/pit.llm.fixer.xml && \
+    /peach/output/linux_x86_64_release/bin/peach /peach/output/linux_x86_64_release/bin/pit.llm.fixer.xml \${PEACH_ARGS}"]
+EOF
+
 cat << EOF > Dockerfile.peach
 FROM pdli/llm-peach:sdk
 WORKDIR /p
@@ -102,7 +124,8 @@ CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /pea
     /peach/output/linux_x86_64_release/bin/peach /peach/output/linux_x86_64_release/bin/pit.peach.xml \${PEACH_ARGS}"]
 EOF
 
-docker build -t "pdli/llm-peach:${PROTO}-llm" -f Dockerfile.llm .
-docker build -t "pdli/llm-peach:${PROTO}-peach" -f Dockerfile.peach .
+docker build -t "pdli/llm-peach:${PROTO}-llm" -f Dockerfile.llm . --platform=linux/amd64
+docker build -t "pdli/llm-peach:${PROTO}-llm-fixer" -f Dockerfile.llm.fixer . --platform=linux/amd64
+docker build -t "pdli/llm-peach:${PROTO}-peach" -f Dockerfile.peach . --platform=linux/amd64
 
 cd "$PWD"

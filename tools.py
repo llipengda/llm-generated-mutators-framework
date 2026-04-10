@@ -175,7 +175,7 @@ TOOL RESPONSE:
     return rfc_search
 
 
-from dotnet_tools import search_class, build_dotnet_dll
+from dotnet_tools import search_class, build_dotnet_dll, validate_data
 
 tools = {
     "aflnet": [
@@ -187,6 +187,7 @@ tools = {
         read_file,
         write_file,
         search_class,
-        build_dotnet_dll
+        build_dotnet_dll,
+        validate_data
     ]
 }
