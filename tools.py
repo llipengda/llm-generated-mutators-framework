@@ -151,7 +151,7 @@ TOOL RESPONSE:
 def make_rfc_search(retriever: BaseRetriever):
     @tool("RFC_Search")
     def rfc_search(query: str) -> str:
-        """Search RFC documents for protocol definitions, fields, and constraints."""
+        """Search RFC documents using RAG for protocol definitions, fields, and constraints."""
         console.log(f"[dim]Tool: Searching RFC for '{query}'...[/dim]")
         file_logger.log(
 f"""

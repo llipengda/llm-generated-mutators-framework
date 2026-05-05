@@ -203,6 +203,10 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
             if f.endswith(".cs")
         ]
 
+    output_dir = os.path.dirname(output_dll)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
     reference_dir = "./peach/sdk/"
     refs = [f"-r:{os.path.join(reference_dir, f)}" for f in os.listdir(reference_dir) if f.endswith(".dll")]
     if not refs:

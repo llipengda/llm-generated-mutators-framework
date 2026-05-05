@@ -23,6 +23,7 @@ class PeachPipeline(BasePipeline):
 
         step1_prompt = f"""
         For {self.protocol_name} protocol, list ALL the packet types according to the RFC document.
+
         Use the "RFC_Search" tool to look up the relevant sections in the RFC.
         Return the list as a comma-separated string.
         ONLY output the types, nothing else.
@@ -50,7 +51,8 @@ class PeachPipeline(BasePipeline):
             )
 
         step2_prompt = f"""
-        Using the packet types we just identified ({packet_types}), generate a Peach Pit file defining the precise structure of each packet for {self.protocol_name}.
+        Using the packet types we just identified ({packet_types}), generate a Peach Pit file defining the precise structure of each packet for {self.protocol_name}. 
+        **Model the structure as detail as possible**.
 
         Reference structure (Shot 1):
         ```xml
@@ -111,7 +113,7 @@ class PeachPipeline(BasePipeline):
                 <Block name="user_name" ref="MQTT_String"/>
             </Optional>
             <!-- Password (optional, if Password Flag is set) -->
-            <Optional name="password_optional" src="variable_header.connect_flags" expression="(value & 0x40) != 0">
+            <Optional name="password_optional" src="variable_header.connect_flags" expression="(value &amp; 0x40) != 0">
                 <Number name="password_length" size="16">
                     <Relation type="size" of="password"/>
                 </Number>
@@ -160,7 +162,11 @@ class PeachPipeline(BasePipeline):
         </Peach>
         ```
 
-        Hint: Usage of size `Relation`: Put a relation with type "size" on the length field. Set the "of" attribute to point to the field whose size it defines. 
+        Hint: 
+        1. Usage of size `Relation`: Put a relation with type "size" on the length field. Set the "of" attribute to point to the field whose size it defines. 
+        2. Use `Optional` to model optional fields with constraint, with the "src" attribute pointing to the flags field and an "expression" that checks the relevant bit(s) in the flags.
+        3. Use `Block` with `minOccurs=0` and `maxOccurs=1` to model optional fields without constraints.
+        
 
         Use the tool "Read_File" to read the usage of each XML element in "./peach/peach.txt" to understand how to define the structure for each packet type.
         Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
@@ -226,6 +232,8 @@ class PeachPipeline(BasePipeline):
         1. Read EACH test log file in "./llm/peach/{self.protocol_lower}/dm_test_logs/" to identify the specific issues with the datamodel. Look for parsing errors, mismatched fields, or any indications of what part of the datamodel is incorrect.
         2. For each identified issue, output a clear explanation of what the problem is and which part of the datamodel it relates to.
         3. Modify the Peach Pit file to fix the identified issues.
+
+        **CRITICAL**: Simplifying the DataModel is NOT allowed.
         
         Use the "Read_File" tool to read the current datamodel from "./llm/peach/{self.protocol_lower}/datamodel.xml" and the test logs from "./llm/peach/{self.protocol_lower}/dm_test_logs/".
         Use the "RFC_Search" tool to look up any specific protocol details needed to fix the datamodel.
@@ -392,12 +400,16 @@ class PeachPipeline(BasePipeline):
         UI.title("Step 6: Constraint Extraction")
 
         prompt = f"""
-        Extract all constraints related to request (client to server) message format from the {self.protocol_name} RFC.
+        Extract all constraints related to REQUEST(client->server) message format from the {self.protocol_name} RFC.
         For example, in MQTT there are the following constraints:
             - [MQTT-2.2.1-2] A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set to 0.
+
             - [MQTT-3.1.2-11] If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00).
+
             - ...
         Use the "RFC_Search" tool to look up the relevant sections in the RFC.
+        Split the constraints into separate blocks with double newlines (\\n\\n) between them.
+        Add a tag [<ConstraintID>] at the beginning of each constraint.
         Output the constraints ONLY, nothing else.
         """
 
@@ -407,17 +419,40 @@ class PeachPipeline(BasePipeline):
         self.save_state()
         UI.success("Constraints extracted successfully.")
 
-    def step_7_fixer_generation(self):
-        UI.title("Step 7: Fixer Generation")
-
+    def step_6_1_constraint_filtering(self):
+        UI.title("Step 6.1: Constraint Filtering")
         constraints = self.state.get("constraints") or ""
         if not constraints:
             UI.warn(
-                "Warning: constraints is empty. Step 7 will not generate any fixers."
+                "Warning: constraints is empty (Step 6 may have been skipped). Step 6.1 will still run."
             )
             return
+        prompt = f"""
+        For each constraint extracted of {self.protocol_name}, you need to:
 
-        constraint_blocks = [c.strip() for c in constraints.split("\n\n") if c.strip()]
+        1. Read the Datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+        2. Check if the constraint is already guaranteed by the structure of the datamodel. 
+            Hint: Check the Relation and Optional elements. 
+            A note for `Optional` DataElement If the expression evaluates to true, the Optional field must be present. However, the presence of the field does not imply that the expression is true.
+        3. If the constraint is already guaranteed, write [GUARANTEED][<ConstraintID>]<ConstraintText>//<explanation of why it's guaranteed in a sentence>. Otherwise, write [NOT GUARANTEED][<ConstraintID>]<ConstraintText>.
+        4. Write the output to "./llm/peach/{self.protocol_lower}/constraint_analysis.txt", separated by double newlines (\\n\\n) between constraints.
+
+        constraints:
+        {constraints}
+        """
+
+        self.call_agent(prompt, "Step 6.1: Constraint Filtering")
+
+    def step_7_fixer_generation(self):
+        UI.title("Step 7: Fixer Generation")
+
+        constraints = ""
+        with open(f"./llm/peach/{self.protocol_lower}/constraint_analysis.txt", "r", encoding="utf-8") as f:
+            constraints = f.read()
+
+        constraint_blocks = list(map(lambda x: x.replace("[NOT GUARANTEED]", ""), 
+                                filter(lambda c: c.startswith("[NOT GUARANTEED]"), 
+                                       [c.strip() for c in constraints.split("\n\n") if c.strip()])))
         
         # Group constraints into chunks of 2
         chunk_size = 3
@@ -448,18 +483,30 @@ class PeachPipeline(BasePipeline):
                 public partial class {self.protocol_upper}Fixers 
                 {{
                     // Add the constraint content as a comment above each fixer function for clarity.
-                    public static void Fix<ConstraintName>(DataElement obj) 
+                    public static void Fix<ConstraintID>(DataElement obj) 
                     {{
                         // The input is a single {self.protocol_lower}_<pkt_type>_packet_t. Fix in place.
-                        /*** HINTS
-                        - Change a field value: obj.SetValue(new Variant(...));
-                        - Remove a field: obj.parent.Remove(obj);
-                        - Make `Optional` field appear: obj.SetValue(new Variant(...)) on its child field(s) with valid value(s).
-                        ***/
                     }}
                 }}
             }}
             ```
+            The input to each fixer function is a single packet (e.g., mqtt_connect_packet_t). The function should fix the packet in place to make it compliant with the constraint. You need to:
+            1. Check if the constraint is related to the packet type. If not, do nothing and return.
+            2. Check if the packet violates the constraint. If not, do nothing and return.
+            3. Modify the fields of the packet to fix the violation according to the constraint.
+
+            When fixing, follow these principles:
+            - Preserve original values as much as possible, and only modify the minimal set of fields necessary to satisfy the constraint.
+            - Avoid unnecessary overwrites or resetting fields to default values.
+            - Prefer small, local adjustments over drastic changes.
+            - When multiple valid fixes exist, introduce reasonable diversity in the fix strategy instead of always applying the same pattern.
+
+            Useful hints:
+            - Find a field: obj.find("<field_name>") or obj.find("a")?.find("b") if you want to find "a.b";
+            - Modify a field: <field>.SetValue(new Variant(...));
+            - Delete a field: <field>.parent.Remove(<field>);
+            - Make a Optional filed present: <field>.SetValue(new Variant(...)); (if the field is in a Optional wrapper, setting a value will make all the fields in the Optional present).
+
 
             Constraints for this task:
             {chunk_content}
@@ -611,7 +658,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
         constraint_blocks = [c.strip() for c in constraints.split("\n\n") if c.strip()]
         
         # Group constraints into chunks of 2
-        chunk_size = 2
+        chunk_size = 3
         chunks = [constraint_blocks[i:i + chunk_size] for i in range(0, len(constraint_blocks), chunk_size)]
 
         def run_test_chunk(chunk: list[str], index: int):
@@ -619,76 +666,29 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             prompt = f"""
             For {self.protocol_lower}, write NUnit test functions for validating EACH fixer constraint below.
 
-            **CRITICAL:**
-            - You MUST implement a test function for EVERY SINGLE constraint provided here.
-            - DO NOT leave placeholders.
+            For EACH constraint and its corresponding fixer function:
+            1. Generate a Peach DataElement that **violates** the constraint. The generated structure should be based on the datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            2. Apply the fixer function to the violating DataElement.
+            3. Assert that after the fixer is applied, the DataElement now **complies** with the constraint.
+            You should generate at least one test function per constraint, but you can generate more if there are multiple ways to violate the constraint or if the constraint has multiple components.
+
+            Here is an example structure for the test in file "./tests/peach_fixer/example.cs".
 
             Write in C# 5.0.
             File: ./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs
-            
-            ```csharp
-            using System;
-            using System.Text;
-            using System.Linq;
-            using NUnit.Framework;
-            using Peach.Core;
-            using Peach.Core.Dom;
-            using Peach.LLM.Core;
-            using Peach.LLM.Validations.Common;
-            using Peach.LLM.Generated.Fixups.{self.protocol_upper};
-            using Encoding = System.Text.Encoding;
-
-            namespace Peach.LLM.Generated.Validations.Fixer.{self.protocol_upper}
-            {{
-                public partial class {self.protocol_upper}FixerTest
-                {{
-                    // Example test structure:
-                    [FixerTest("<constraint_name>")]
-                    public static void Test_<fixer_name>()
-                    {{
-                        var parser = new DataParser("./datamodel.xml", "{self.protocol_lower}_packet_array");
-                    
-                        // 1. Prepare valid data for testing
-                        // Make sure the data can be parsed successfully with the datamodel and represents a valid packet that meets the constraint before modification.
-                        var valid = new byte[] {{ /* valid data bytes of a whole packet */ }};
-                    
-                        // 2. Parse the valid data using the DataParser
-                        var root = parser.Parse(valid);
-                    
-                        // 3. Make the valid data violate the constraint (e.g., modify fields to invalid values)
-                        // Hint: Use root.find(a)?.find(b)?.find(c) instead of root.find(a.b.c); Use `name_index` instead of `name[index]` in Array fields.
-                        var field = root.find("field_name");
-                        field.SetValue(new Variant("invalid_value"));
-                    
-                        // 4. Assert that the modified data is really modified as expected.
-                        Assert.AreEqual(
-                            // Get the expected bytes for the invalid value. This depends on the field type and encoding. For example, if it's a UTF-8 string, you can use:
-                            Encoding.UTF8.GetBytes("invalid_value"),
-                            field.Bytes());
-                    
-                        // 5. Call the Fixer to attempt to fix the modified data.
-                        {self.protocol_upper}Fixers.<fixer_name>(root.find("<packet_type>"));
-                    
-                        // 6. Assert that the Fixer successfully fixed the data to meet the constraint.
-                        var fixedField = root.find("field_name");
-                        // Or other assertions depending on the constraint.
-                        Assert.AreEqual(Encoding.UTF8.GetBytes("expected_fixed_value"), fixedField.Bytes());
-                    }}
-                }}
-            }}
-            ```
 
             Constraints for this task:
             {chunk_content}
 
             IMPORTANT:
-            1. You must ensure there are NO syntax errors and the code compiles successfully.
-            2. You must NOT read the Fixer functions. You should treat the Fixers as a black box and only focus on testing the constraints. 
-            3. You must validate the test data you prepare against the datamodel to ensure it's correctly structured. If the validation fails, fix the test data until it passes validation before proceeding to call the Fixer.
+            1. You MUST implement one or more test function(s) for EVERY SINGLE constraint provided here.
+            2. DO NOT leave placeholders.
+            3. Add Part{index} to helper function names to avoid naming conflicts across chunks.
+            4. You must ensure there are NO syntax errors and the code compiles successfully.
+            5. You must NOT read the Fixer functions. You should treat the Fixers as a black box and only focus on testing the constraints. 
 
             Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
             Use the "Write_File" tool to save the generated test code to "./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs".
-            Use the "Validate_Data" tool to validate the test data you prepare against the datamodel to ensure it's correctly structured.
             Use the "Build_DotNet_DLL" tool to compile the test file. Ensure it compiles successfully without syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Fixers/Validations/out/{self.protocol_upper}FixerTest_part_{index}.dll".
             """
 
@@ -784,6 +784,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
             ("Step 5: Mutator Validation & Fix", self.step_5_mutator_validation_and_fix),
             ("Step 6: Constraint Extraction", self.step_6_constraint_extraction),
+            ("Step 6.1: Constraint Filtering", self.step_6_1_constraint_filtering),
             ("Step 7: Fixer Generation", self.step_7_fixer_generation),
             ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
             ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
