@@ -6,7 +6,7 @@ __pycache__/
 .env
 llm/
 *.log
-.pipeline_state.json
+.pipeline_state*
 
 tests/fixer_sanity/build*
 tests/fixer_sanity/out*

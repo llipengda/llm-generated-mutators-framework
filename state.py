@@ -16,6 +16,7 @@ def new_usage_bucket() -> dict[str, int]:
     return {
         "prompt_tokens": 0,
         "completion_tokens": 0,
+        "cached_tokens": 0,
         "total_tokens": 0,
         "calls": 0,
     }
@@ -31,28 +32,20 @@ def add_step_usage(
     by_step = state.setdefault("token_usage_by_step", {})
     step_bucket = by_step.setdefault(step_title, new_usage_bucket())
 
-    prompt = int(usage.get("prompt_tokens", 0))
-    completion = int(usage.get("completion_tokens", 0))
-    total_tokens = int(usage.get("total_tokens", 0))
+    for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens", "calls"):
+        val = int(usage.get(key, 0))
+        total[key] += val
+        step_bucket[key] += val
 
-    total["prompt_tokens"] += prompt
-    total["completion_tokens"] += completion
-    total["total_tokens"] += total_tokens
-    total["calls"] += 1
-
-    step_bucket["prompt_tokens"] += prompt
-    step_bucket["completion_tokens"] += completion
-    step_bucket["total_tokens"] += total_tokens
-    step_bucket["calls"] += 1
-
-def _pipeline_state_path() -> str:
-    # Store next to repo root to make it easy to find/reuse across runs.
+def _pipeline_state_path(protocol_name: str) -> str:
     repo_root = os.path.dirname(__file__)
-    return os.path.join(repo_root, ".pipeline_state.json")
+    state_dir = os.path.join(repo_root, ".pipeline_state")
+    os.makedirs(state_dir, exist_ok=True)
+    return os.path.join(state_dir, f"{protocol_name}.json")
 
 
-def load_pipeline_state() -> PipelineState:
-    path = _pipeline_state_path()
+def load_pipeline_state(protocol_name: str) -> PipelineState:
+    path = _pipeline_state_path(protocol_name)
     if not os.path.exists(path):
         return {
             "packet_types": [],
@@ -81,8 +74,8 @@ def load_pipeline_state() -> PipelineState:
     }
 
 
-def save_pipeline_state(state: PipelineState) -> None:
-    path = _pipeline_state_path()
+def save_pipeline_state(state: PipelineState, protocol_name: str) -> None:
+    path = _pipeline_state_path(protocol_name)
     tmp_path = f"{path}.tmp"
 
     UI.dim(f"Saving pipeline state to {path}...")

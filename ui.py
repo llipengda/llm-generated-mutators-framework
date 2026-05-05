@@ -96,9 +96,9 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     choices: list[str | questionary.Choice] = [
         "Continue",
         questionary.Choice(
-            "Retry previous step", disabled=None if has_previous else "No previous step"
+            "Go to previous step", disabled=None if has_previous else "No previous step"
         ),
-        "Skip the step",
+        "Go to next step",
         "Exit",
     ]
 
@@ -121,17 +121,119 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
 
     if choice == "Continue":
         return "continue"
-    if choice == "Retry previous step":
+    if choice == "Go to previous step":
         return "retry_prev"
-    if choice == "Skip the step":
+    if choice == "Go to next step":
         return "skip"
     return "exit"
 
 
+def ask_resume_state(protocol_name: str) -> bool:
+    """Ask whether to resume from a saved pipeline state.
+
+    Returns True to resume, False to start fresh.
+    """
+    console.print()
+    console.print(
+        f"[bold blue]Found saved pipeline state for protocol: {protocol_name}[/bold blue]"
+    )
+
+    choice = questionary.select(
+        "Would you like to resume from the saved state?",
+        choices=[
+            "Resume from saved state",
+            "Start fresh (discard saved state)",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    if choice is None:
+        return False
+    return choice == "Resume from saved state"
+
+
+def ask_after_fix_failure(step_title: str) -> str:
+    """Ask user what to do after auto-fix retries are exhausted.
+
+    Returns 'wait', 'hint', or 'exit'. No timeout.
+    """
+    console.print()
+    console.print(
+        f"[bold red]Auto-fix retries exhausted for: {step_title}[/bold red]"
+    )
+
+    choice = questionary.select(
+        "What would you like to do?",
+        choices=[
+            "Wait for me to fix manually, then re-verify",
+            "Provide a hint and retry the LLM fix",
+            "Exit pipeline",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    if choice is None:
+        return "exit"
+    if choice == "Provide a hint and retry the LLM fix":
+        return "hint"
+    if choice == "Wait for me to fix manually, then re-verify":
+        return "wait"
+    return "exit"
+
+
+def ask_wait_for_fix(step_title: str) -> None:
+    """Pause and wait for the user to manually fix files, then press Enter."""
+    console.print()
+    console.print(
+        f"[bold yellow]Please fix the issue manually for: {step_title}[/bold yellow]"
+    )
+    console.print(
+        "[dim]Press Enter when you are ready to re-verify...[/dim]"
+    )
+    input()
+
+
+def ask_regenerate(what: str, protocol: str) -> bool:
+    """Ask whether to regenerate existing generated code.
+
+    Returns True to regenerate, False to skip.
+    """
+    console.print()
+    console.print(
+        f"[bold blue]Found existing {what} for protocol: {protocol}[/bold blue]"
+    )
+
+    choice = questionary.select(
+        "Would you like to regenerate?",
+        choices=[
+            "Regenerate",
+            "Use existing and skip",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    if choice is None:
+        return False
+    return choice == "Regenerate"
+
+
+def ask_for_hint(step_title: str) -> str:
+    """Ask user for a free-text hint to guide the LLM fix. No timeout."""
+    console.print()
+    console.print(
+        f"[bold yellow]Enter a hint to guide the LLM fix for: {step_title}[/bold yellow]"
+    )
+
+    hint = questionary.text(
+        "Hint:",
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    return hint or ""
+
+
 def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config: RunnableConfig, step_title: str):
     """Run the agent with a loading spinner and formatted output."""
-
-    UI.title(step_title)
 
     with UI.status(f"LLM is thinking & coding for {step_title}...", spinner="dots"):
         response = agent_graph.invoke(
@@ -143,4 +245,4 @@ def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config:
     UI.result_markdown(step_title, final_response)
 
     return response
-    
+

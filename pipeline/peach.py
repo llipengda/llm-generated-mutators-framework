@@ -1,17 +1,29 @@
+import os
 import subprocess
 from typing import override
 
 from agent import AgentConfig, build_agent_graph
 from pipeline.base import BasePipeline
-from ui import UI
+from ui import UI, ask_regenerate
+
+
+def _env_float(key: str, default: float) -> float:
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        return default
 
 
 class PeachPipeline(BasePipeline):
     def __init__(self):
         super().__init__()
+        peach_model = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
         self.agent_config = AgentConfig(
-            temperature=0.7,
-            model="gpt-5.4",
+            temperature=_env_float("LLM_PEACH_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.7)),
+            model=peach_model,
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
         )
         self.agent_graph = build_agent_graph(
@@ -211,15 +223,9 @@ class PeachPipeline(BasePipeline):
     def step_3_datamodel_validation_and_fix(self):
         UI.title("Step 3: Datamodel Validation & Fix")
 
-        success, test_output = self.verify_datamodel()
-        if success:
-            UI.success("Datamodel tests passed successfully!")
-            return
-
-        UI.warn("Datamodel tests failed. Attempting to fix issues...")
-
-        step3_prompt = f"""
-        We ran a verification test against the generated datamodel, which used the Peach Pit file to parse packets and check if the fields were correctly extracted. 
+        def fix_fn(test_output: str, hint: str | None) -> None:
+            prompt = f"""
+        We ran a verification test against the generated datamodel, which used the Peach Pit file to parse packets and check if the fields were correctly extracted.
         The test failed, indicating there are issues with the datamodel.
         Here is the test output:
 
@@ -234,13 +240,23 @@ class PeachPipeline(BasePipeline):
         3. Modify the Peach Pit file to fix the identified issues.
 
         **CRITICAL**: Simplifying the DataModel is NOT allowed.
-        
+
         Use the "Read_File" tool to read the current datamodel from "./llm/peach/{self.protocol_lower}/datamodel.xml" and the test logs from "./llm/peach/{self.protocol_lower}/dm_test_logs/".
         Use the "RFC_Search" tool to look up any specific protocol details needed to fix the datamodel.
         Use the "Write_File" tool to save the updated Peach Pit file back to "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
+            if hint:
+                prompt += (
+                    f"\n\nAdditional guidance from the user:\n{hint}\n"
+                )
 
-        self.call_agent(step3_prompt, "Step 3: Datamodel Validation & Fix")
+            self.call_agent(prompt, "Step 3: Datamodel Validation & Fix")
+
+        self.fix_verify_loop(
+            "Step 3: Datamodel Validation & Fix",
+            self.verify_datamodel,
+            fix_fn,
+        )
 
     def step_4_mutator_generation(self):
         UI.title("Step 4: Mutator Generation")
@@ -249,6 +265,27 @@ class PeachPipeline(BasePipeline):
             UI.warn(
                 "Warning: packet_types is empty. Step 4 will not generate any mutators."
             )
+            return
+
+        import os
+
+        out_dir = f"./llm/peach/{self.protocol_lower}/Mutators/out"
+        types_to_generate = []
+        for pkt_type in packet_types:
+            dll_name = (
+                f"{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll"
+            )
+            dll_path = os.path.join(out_dir, dll_name)
+            if os.path.exists(dll_path):
+                if not ask_regenerate(
+                    f"mutator DLL for {pkt_type}", self.protocol_lower
+                ):
+                    UI.dim(f"Skipping mutator generation for {pkt_type}.")
+                    continue
+            types_to_generate.append(pkt_type)
+
+        if not types_to_generate:
+            UI.success("All mutator DLLs already exist and were skipped.")
             return
 
         def run_one(pkt_type: str, index: int):
@@ -329,72 +366,105 @@ class PeachPipeline(BasePipeline):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(run_one, pkt_type, idx) for idx, pkt_type in enumerate(packet_types)]
+            futures = [executor.submit(run_one, pkt_type, idx) for idx, pkt_type in enumerate(types_to_generate)]
             for future in as_completed(futures):
                 future.result()
 
     def step_5_mutator_validation_and_fix(self):
         UI.title("Step 5: Mutator Validation & Fix")
 
-        with UI.status("Running Mutator Tests..."):
-            cmd = [
-                "./tests/peach_mutator/run_peach_mutator_test.sh",
-                self.protocol_lower,
-                self.seed_dir,
-            ]
-            result = subprocess.run(
-                cmd,
-                stderr=subprocess.STDOUT,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-
-        UI.panel(
-            result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
-            title="Mutator Test Output (Last 2000 chars)",
-            border_style="grey50",
-        )
-
         import os
         import glob
 
-        error_log_dir = f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
-        error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+        def verify_fn() -> tuple[bool, str]:
+            with UI.status("Running Mutator Tests..."):
+                cmd = [
+                    "./tests/peach_mutator/run_peach_mutator_test.sh",
+                    self.protocol_lower,
+                    self.seed_dir,
+                ]
+                result = subprocess.run(
+                    cmd,
+                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                )
 
-        if not error_logs:
-            UI.success("No mutator ERRORs found. Mutator validation passed successfully!")
+            UI.panel(
+                result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
+                title="Mutator Test Output (Last 2000 chars)",
+                border_style="grey50",
+            )
+
+            error_log_dir = (
+                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
+            )
+            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+
+            if not error_logs:
+                return True, ""
+
+            parts = []
+            for log_file in error_logs:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    parts.append(
+                        f"--- {os.path.basename(log_file)} ---\n{f.read()}"
+                    )
+            return False, "\n\n".join(parts)
+
+        def fix_fn(output: str, hint: str | None) -> None:
+            error_log_dir = (
+                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
+            )
+            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+
+            if not error_logs:
+                UI.success("No mutator errors to fix (already resolved).")
+                return
+
+            UI.warn(
+                f"Found {len(error_logs)} mutators with ERRORs. Attempting to fix..."
+            )
+
+            for log_file in error_logs:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    test_output = f.read()
+
+                mutator_name = os.path.basename(log_file).replace(".log", "")
+
+                prompt = f"""
+        We ran a verification test against the generated mutators. The test failed with an ERROR for the mutator `{mutator_name}`.
+        Here is the test error output for this mutator:
+
+        ```
+        {test_output}
+        ```
+
+        The test logs indicate there are issues with the generated C# code for `{mutator_name}`.
+
+        You need to:
+        1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
+        2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
+        3. Use the "Read_File" tool to read the corresponding mutator file.
+        4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur during `PerformMutation`.
+        5. Use the "Write_File" tool to update the file with the fix.
+        6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
+
+        Be thorough and ensure the C# code will successfully compile.
+        """
+                if hint:
+                    prompt += (
+                        f"\n\nAdditional guidance from the user:\n{hint}\n"
+                    )
+
+                self.call_agent(
+                    prompt, f"Step 5: Fix Mutator {mutator_name}"
+                )
+
+        if not self.fix_verify_loop(
+            "Step 5: Mutator Validation & Fix", verify_fn, fix_fn
+        ):
             return
-
-        UI.warn(f"Found {len(error_logs)} mutators with ERRORs. Attempting to fix...")
-
-        for log_file in error_logs:
-            with open(log_file, "r", encoding="utf-8") as f:
-                test_output = f.read()
-
-            mutator_name = os.path.basename(log_file).replace(".log", "")
-
-            step5_prompt = f"""
-            We ran a verification test against the generated mutators. The test failed with an ERROR for the mutator `{mutator_name}`.
-            Here is the test error output for this mutator:
-
-            ```
-            {test_output}
-            ```
-
-            The test logs indicate there are issues with the generated C# code for `{mutator_name}`. 
-            
-            You need to:
-            1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
-            2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
-            3. Use the "Read_File" tool to read the corresponding mutator file.
-            4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur during `PerformMutation`.
-            5. Use the "Write_File" tool to update the file with the fix.
-            6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
-
-            Be thorough and ensure the C# code will successfully compile.
-            """
-
-            self.call_agent(step5_prompt, f"Step 5: Fix Mutator {mutator_name}")
 
     def step_6_constraint_extraction(self):
         UI.title("Step 6: Constraint Extraction")
@@ -709,68 +779,112 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             for future in as_completed(futures):
                 future.result()
 
-    # def step_9_fixer_validation_and_fix(self):
-    #     UI.title("Step 9: Fixer Validation & Fix")
+    def step_9_fixer_validation_and_fix(self):
+        UI.title("Step 9: Fixer Validation & Fix")
 
-    #     with UI.status("Running Fixer Tests..."):
-    #         cmd = [
-    #             "./tests/peach_fixer/run_peach_fixer_test.sh",
-    #             self.protocol_lower,
-    #             self.seed_dir,
-    #         ]
-    #         result = subprocess.run(
-    #             cmd,
-    #             stderr=subprocess.STDOUT,
-    #             stdout=subprocess.PIPE,
-    #             text=True,
-    #         )
+        import os
+        import glob
 
-    #     UI.panel(
-    #         result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
-    #         title="Fixer Test Output (Last 2000 chars)",
-    #         border_style="grey50",
-    #     )
+        def verify_fn() -> tuple[bool, str]:
+            with UI.status("Running Fixer Tests..."):
+                cmd = [
+                    "./tests/peach_fixer/run_peach_fixer_test.sh",
+                    self.protocol_lower,
+                    self.seed_dir,
+                ]
+                result = subprocess.run(
+                    cmd,
+                    stderr=subprocess.STDOUT,
+                    stdout=subprocess.PIPE,
+                    text=True,
+                )
 
-    #     import os
-    #     import glob
+            UI.panel(
+                result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
+                title="Fixer Test Output (Last 2000 chars)",
+                border_style="grey50",
+            )
 
-    #     error_log_dir = f"./llm/peach/{self.protocol_lower}/fixer_test_logs/error"
-    #     error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+            log_dir = (
+                f"./llm/peach/{self.protocol_lower}/fixer_test_logs"
+            )
+            all_logs = glob.glob(os.path.join(log_dir, "*.log"))
+            fail_logs = [
+                l for l in all_logs if os.path.basename(l) != "fixer.log"
+            ]
 
-    #     if not error_logs:
-    #         UI.success("No fixer ERRORs found. Fixer validation passed successfully!")
-    #         return
+            if not fail_logs:
+                return True, ""
 
-    #     UI.warn(f"Found {len(error_logs)} fixers with ERRORs. Attempting to fix...")
+            parts = []
+            for log_file in fail_logs:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    parts.append(
+                        f"--- {os.path.basename(log_file)} ---\n{f.read()}"
+                    )
+            return False, "\n\n".join(parts)
 
-    #     for log_file in error_logs:
-    #         with open(log_file, "r", encoding="utf-8") as f:
-    #             test_output = f.read()
+        def fix_fn(output: str, hint: str | None) -> None:
+            log_dir = (
+                f"./llm/peach/{self.protocol_lower}/fixer_test_logs"
+            )
+            all_logs = glob.glob(os.path.join(log_dir, "*.log"))
+            fail_logs = [
+                l for l in all_logs if os.path.basename(l) != "fixer.log"
+            ]
 
-    #         fixer_test_name = os.path.basename(log_file).replace(".log", "")
+            if not fail_logs:
+                UI.success(
+                    "No fixer test failures to fix (already resolved)."
+                )
+                return
 
-    #         step9_prompt = f"""
-    #         We ran a verification test against the generated fixers. The test failed with an ERROR for the fixer/test `{fixer_test_name}`.
-    #         Here is the test error output:
+            UI.warn(
+                f"Found {len(fail_logs)} fixer tests with failures. Attempting to fix..."
+            )
 
-    #         ```
-    #         {test_output}
-    #         ```
+            for log_file in fail_logs:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    test_output = f.read()
 
-    #         The test logs indicate there are issues with either the generated C# code for the fixer or the test itself.
-            
-    #         You need to:
-    #         1. Find the C# file containing this test in `./llm/peach/{self.protocol_lower}/Validations/Fixer/` and the corresponding fixer in `./llm/peach/{self.protocol_lower}/Fixers/`.
-    #         2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
-    #         3. Use the "Read_File" tool to read the corresponding file(s).
-    #         4. Fix the bug in the C# code.
-    #         5. Use the "Write_File" tool to update the file(s) with the fix.
-    #         6. Use the "Build_DotNet_DLL" tool to ensure there are no syntax errors.
+                test_name = os.path.basename(log_file).replace(".log", "")
 
-    #         Be thorough and ensure the C# code will successfully compile.
-    #         """
+                prompt = f"""
+        We ran a verification test against the generated fixers. The test failed for the fixer/test `{test_name}`.
+        Here is the test error output:
 
-    #         self.call_agent(step9_prompt, f"Step 9: Fix Fixer {fixer_test_name}")
+        ```
+        {test_output}
+        ```
+
+        The test logs indicate there are issues with either the generated C# code for the fixer or the test itself.
+
+        You need to:
+        1. Find the C# file containing the fixer function in `./llm/peach/{self.protocol_lower}/Fixers/` and the test in `./llm/peach/{self.protocol_lower}/Fixers/Validations/`.
+        2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
+        3. Use the "Read_File" tool to read the corresponding file(s).
+        4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur at runtime.
+        5. Use the "Write_File" tool to update the file(s) with the fix.
+        6. Use the "Build_DotNet_DLL" tool to recompile:
+           - The fixers DLL at "./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers.dll"
+           - The test DLL at "./llm/peach/{self.protocol_lower}/Fixers/Validations/out/{self.protocol_upper}FixerTests.dll"
+           Ensure there are no syntax errors.
+
+        Be thorough and ensure the C# code will successfully compile and pass the tests.
+        """
+                if hint:
+                    prompt += (
+                        f"\n\nAdditional guidance from the user:\n{hint}\n"
+                    )
+
+                self.call_agent(
+                    prompt, f"Step 9: Fix Fixer Test {test_name}"
+                )
+
+        if not self.fix_verify_loop(
+            "Step 9: Fixer Validation & Fix", verify_fn, fix_fn
+        ):
+            return
 
     @override
     def steps(self):
@@ -788,5 +902,5 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             ("Step 7: Fixer Generation", self.step_7_fixer_generation),
             ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
             ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
-            # ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
+            ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
         ]
