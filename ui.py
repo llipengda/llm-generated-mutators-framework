@@ -6,7 +6,6 @@ import questionary
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.text import Text
 from log import console
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -117,28 +116,23 @@ class UI:
 
         title_str = f"[bold cyan]{title}[/bold cyan]" if title else ""
         term_width = console.width
-        # panel borders + padding use ~4 chars; clamp line width accordingly
         content_width = max(term_width - 4, 40)
 
+        # Start with a full-height placeholder so Live never resizes
+        placeholder = "\n".join([""] * max_lines)
+
         with Live(
-            Panel("", title=title_str, border_style="grey50"),
+            Panel(placeholder, title=title_str, border_style="grey50"),
             console=console,
             refresh_per_second=8,
-            vertical_overflow="visible",
         ) as live:
             while reader_thread.is_alive() or proc.poll() is None:
                 with lock:
                     tail = lines[-max_lines:]
-                # pad to fixed height so Rich can overwrite cleanly
                 padded = tail + [""] * (max_lines - len(tail))
-                # truncate long lines so panel doesn't reflow erratically
                 clipped = [ln[:content_width] for ln in padded]
                 live.update(
-                    Panel(
-                        Text("\n".join(clipped)),
-                        title=title_str,
-                        border_style="grey50",
-                    )
+                    Panel("\n".join(clipped), title=title_str, border_style="grey50")
                 )
                 reader_thread.join(timeout=0.15)
 
