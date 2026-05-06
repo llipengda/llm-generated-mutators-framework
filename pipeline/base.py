@@ -1,5 +1,5 @@
 import os
-
+import threading
 from typing import Callable
 
 from state import (
@@ -88,6 +88,7 @@ class BasePipeline:
         self.retriever = retriever
         self.config = config
         self.state = state
+        self._state_lock = threading.Lock()
 
 
     def __call__(self):
@@ -138,8 +139,9 @@ class BasePipeline:
             step_title=step_title,
         )
         step_usage = tracker.end_step()
-        add_step_usage(self.state, step_title=step_title, usage=step_usage)
-        self.save_state()
+        with self._state_lock:
+            add_step_usage(self.state, step_title=step_title, usage=step_usage)
+            self.save_state()
         return response
 
     def fix_verify_loop(

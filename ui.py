@@ -1,8 +1,12 @@
 import asyncio
+import subprocess
+import threading
 import questionary
 
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.text import Text
 from log import console
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
@@ -80,6 +84,70 @@ class UI:
         console.print(f"[dim]{message}[/dim]")
 
     print = staticmethod(console.print)
+
+    @staticmethod
+    def run_with_live_output(
+        cmd: list[str], *, title: str = "", max_lines: int = 20
+    ) -> subprocess.CompletedProcess:
+        """Run a subprocess with live-scrolling output in a Rich panel.
+
+        Returns the CompletedProcess (stdout contains all captured output).
+        """
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        lines: list[str] = []
+        lock = threading.Lock()
+
+        def _reader() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                cleaned = line.rstrip("\r\n")
+                if cleaned:
+                    with lock:
+                        lines.append(cleaned)
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+
+        title_str = f"[bold cyan]{title}[/bold cyan]" if title else ""
+        term_width = console.width
+        # panel borders + padding use ~4 chars; clamp line width accordingly
+        content_width = max(term_width - 4, 40)
+
+        with Live(
+            Panel("", title=title_str, border_style="grey50"),
+            console=console,
+            refresh_per_second=8,
+            vertical_overflow="visible",
+        ) as live:
+            while reader_thread.is_alive() or proc.poll() is None:
+                with lock:
+                    tail = lines[-max_lines:]
+                # pad to fixed height so Rich can overwrite cleanly
+                padded = tail + [""] * (max_lines - len(tail))
+                # truncate long lines so panel doesn't reflow erratically
+                clipped = [ln[:content_width] for ln in padded]
+                live.update(
+                    Panel(
+                        Text("\n".join(clipped)),
+                        title=title_str,
+                        border_style="grey50",
+                    )
+                )
+                reader_thread.join(timeout=0.15)
+
+        proc.wait()
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=proc.returncode,
+            stdout="\n".join(lines),
+        )
 
 
 def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> str:
@@ -179,6 +247,30 @@ def ask_after_fix_failure(step_title: str) -> str:
     if choice == "Wait for me to fix manually, then re-verify":
         return "wait"
     return "exit"
+
+
+def ask_skip_verification(step_title: str) -> bool:
+    """Ask whether to skip a time-consuming verification step.
+
+    Returns True to skip, False to run the verification.
+    """
+    console.print()
+    console.print(
+        f"[bold yellow]Verification step: {step_title} (may take a long time)[/bold yellow]"
+    )
+
+    choice = questionary.select(
+        "What would you like to do?",
+        choices=[
+            "Run verification",
+            "Skip verification",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    if choice is None:
+        return False
+    return choice == "Skip verification"
 
 
 def ask_wait_for_fix(step_title: str) -> None:

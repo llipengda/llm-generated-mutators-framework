@@ -34,7 +34,7 @@ rm -rf "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 mkdir -p "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 chmod u+rwx "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 
-docker run --rm -it -v "$ROOT/llm/peach/$PROTO":/generated \
+docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated \
     -v "$ROOT/llm/peach/$PROTO/fixer_test_logs:/logs" pdli/llm-peach:sdk \
     sh -c "cp /generated/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll ./Plugins && \
     cp /generated/datamodel.xml ./ && \

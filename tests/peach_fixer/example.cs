@@ -60,11 +60,8 @@ namespace Peach.LLM.Generated.Validations.Fixer.MQTT
                     )
                 );
 
-            logger.Info("Generated structure:");
-            logger.Info(packetArray.prettyPrint());
 
             MQTTFixers.FixMQTT_4_8_2_1(packetArray.find("subscribe"));
-
 
             var fixedTopicFilterValue = packetArray.find("subscribe")
                 .find("msg_body")

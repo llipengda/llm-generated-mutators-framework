@@ -1,10 +1,9 @@
 import os
-import subprocess
 from typing import override
 
 from agent import AgentConfig, build_agent_graph
 from pipeline.base import BasePipeline
-from ui import UI, ask_regenerate
+from ui import UI, ask_regenerate, ask_skip_verification
 
 
 def _env_float(key: str, default: float) -> float:
@@ -188,27 +187,17 @@ class PeachPipeline(BasePipeline):
         self.call_agent(step2_prompt, "Step 2: Datamodel Generation")
 
     def verify_datamodel(self):
-        with UI.status("Running Datamodel Tests..."):
-            cmd = [
-                "./tests/datamodel/run_datamodel_test.sh",
-                self.protocol_lower,
-                self.seed_dir,
-            ]
-            result = subprocess.run(
-                cmd,
-                stderr=subprocess.STDOUT,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
+        cmd = [
+            "./tests/datamodel/run_datamodel_test.sh",
+            self.protocol_lower,
+            self.seed_dir,
+        ]
+        result = UI.run_with_live_output(
+            cmd, title="Running Datamodel Tests"
+        )
 
         last_line = result.stdout.strip().split("\n")[-1]
-
-        UI.panel(
-            result.stdout[-2000:],
-            title="Test Output (Last 2000 chars)",
-            border_style="grey50",
-        )
-        UI.panel(f"Result Line: [bold]{last_line}[/bold]")
+        UI.panel(f"Result: [bold]{last_line}[/bold]")
 
         if "[FAIL]" in last_line:
             return False, result.stdout
@@ -376,41 +365,9 @@ class PeachPipeline(BasePipeline):
         import os
         import glob
 
-        def verify_fn() -> tuple[bool, str]:
-            with UI.status("Running Mutator Tests..."):
-                cmd = [
-                    "./tests/peach_mutator/run_peach_mutator_test.sh",
-                    self.protocol_lower,
-                    self.seed_dir,
-                ]
-                result = subprocess.run(
-                    cmd,
-                    stderr=subprocess.STDOUT,
-                    stdout=subprocess.PIPE,
-                    text=True,
-                )
-
-            UI.panel(
-                result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
-                title="Mutator Test Output (Last 2000 chars)",
-                border_style="grey50",
-            )
-
-            error_log_dir = (
-                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
-            )
-            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
-
-            if not error_logs:
-                return True, ""
-
-            parts = []
-            for log_file in error_logs:
-                with open(log_file, "r", encoding="utf-8") as f:
-                    parts.append(
-                        f"--- {os.path.basename(log_file)} ---\n{f.read()}"
-                    )
-            return False, "\n\n".join(parts)
+        skip_first = ask_skip_verification("Mutator Validation")
+        _skip_this_verify = [skip_first]  # mutable, flipped after first use
+        _failing_mutators: list[str] = []  # names of currently-failing mutators
 
         def fix_fn(output: str, hint: str | None) -> None:
             error_log_dir = (
@@ -419,14 +376,14 @@ class PeachPipeline(BasePipeline):
             error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
 
             if not error_logs:
-                UI.success("No mutator errors to fix (already resolved).")
+                UI.success("No mutator errors to fix.")
                 return
 
             UI.warn(
                 f"Found {len(error_logs)} mutators with ERRORs. Attempting to fix..."
             )
 
-            for log_file in error_logs:
+            def fix_one(log_file: str) -> None:
                 with open(log_file, "r", encoding="utf-8") as f:
                     test_output = f.read()
 
@@ -457,9 +414,59 @@ class PeachPipeline(BasePipeline):
                         f"\n\nAdditional guidance from the user:\n{hint}\n"
                     )
 
-                self.call_agent(
-                    prompt, f"Step 5: Fix Mutator {mutator_name}"
+                agent = build_agent_graph(
+                    retriever=self.retriever, target="peach", config=self.agent_config
                 )
+
+                self.call_agent(
+                    prompt,
+                    f"Step 5: Fix Mutator {mutator_name}",
+                    agent_graph=agent,
+                )
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                futures = [executor.submit(fix_one, log_file) for log_file in error_logs]
+                for future in as_completed(futures):
+                    future.result()
+
+        def verify_fn() -> tuple[bool, str]:
+            if not _skip_this_verify[0]:
+                cmd = [
+                    "./tests/peach_mutator/run_peach_mutator_test.sh",
+                    self.protocol_lower,
+                    self.seed_dir,
+                ]
+                if _failing_mutators:
+                    cmd.append(",".join(_failing_mutators))
+                    UI.dim(
+                        "Filtering to previously-failing mutators: "
+                        + ", ".join(_failing_mutators)
+                    )
+                UI.run_with_live_output(cmd, title="Running Mutator Tests")
+            _skip_this_verify[0] = False
+
+            error_log_dir = (
+                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
+            )
+            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+
+            _failing_mutators[:] = [
+                os.path.basename(l).replace(".log", "")
+                for l in error_logs
+            ]
+
+            if not error_logs:
+                return True, ""
+
+            parts = []
+            for log_file in error_logs:
+                with open(log_file, "r", encoding="utf-8") as f:
+                    parts.append(
+                        f"--- {os.path.basename(log_file)} ---\n{f.read()}"
+                    )
+            return False, "\n\n".join(parts)
 
         if not self.fix_verify_loop(
             "Step 5: Mutator Validation & Fix", verify_fn, fix_fn
@@ -690,11 +697,14 @@ class PeachPipeline(BasePipeline):
         For each constraint, list:
         - The exact text of the constraint (copy-paste from the original constraints).
         - The name of the fixer function that are designed to fix this constraint.
+        If the constraint is guaranteed by the datamodel and does not have a corresponding fixer, ignore it and do not include it in the mapping.
 
         Format:
 Constraint: [Exact constraint text]
 Fixer Function: [C# static method name, e.g., FixMQTT2212]
 \\n\\n
+
+        OUTPUT ONLY THE MAPPING, NOTHING ELSE. DO NOT OUTPUT ANY EXPLANATION OR EXTRA TEXT.
 
         This mapping is critical for traceability and future maintenance, so be thorough and accurate.
 
@@ -737,7 +747,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             For {self.protocol_lower}, write NUnit test functions for validating EACH fixer constraint below.
 
             For EACH constraint and its corresponding fixer function:
-            1. Generate a Peach DataElement that **violates** the constraint. The generated structure should be based on the datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            1. Generate a Peach DataElement that **violates** the constraint. The generated structure should be based on the datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml", and should be a packet_array containing a single packet that violates the constraint.
             2. Apply the fixer function to the violating DataElement.
             3. Assert that after the fixer is applied, the DataElement now **complies** with the constraint.
             You should generate at least one test function per constraint, but you can generate more if there are multiple ways to violate the constraint or if the constraint has multiple components.
@@ -786,23 +796,13 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
         import glob
 
         def verify_fn() -> tuple[bool, str]:
-            with UI.status("Running Fixer Tests..."):
-                cmd = [
-                    "./tests/peach_fixer/run_peach_fixer_test.sh",
-                    self.protocol_lower,
-                    self.seed_dir,
-                ]
-                result = subprocess.run(
-                    cmd,
-                    stderr=subprocess.STDOUT,
-                    stdout=subprocess.PIPE,
-                    text=True,
-                )
-
-            UI.panel(
-                result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,
-                title="Fixer Test Output (Last 2000 chars)",
-                border_style="grey50",
+            cmd = [
+                "./tests/peach_fixer/run_peach_fixer_test.sh",
+                self.protocol_lower,
+                self.seed_dir,
+            ]
+            result = UI.run_with_live_output(
+                cmd, title="Running Fixer Tests"
             )
 
             log_dir = (

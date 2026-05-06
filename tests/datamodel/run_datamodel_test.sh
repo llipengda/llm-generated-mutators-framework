@@ -22,5 +22,5 @@ fi
 mkdir -p "$ROOT/llm/peach/$PROTO/dm_test_logs"
 chmod u+rwx "$ROOT/llm/peach/$PROTO/dm_test_logs"
 
-docker run --rm --name datamodel_test -v "$ROOT/llm/peach/$PROTO:/test" -v "$SEED_DIR:/seeds" -v "$ROOT/llm/peach/$PROTO/dm_test_logs:/logs" pdli/llm-peach:sdk \
+docker run --rm -i --name datamodel_test -v "$ROOT/llm/peach/$PROTO:/test" -v "$SEED_DIR:/seeds" -v "$ROOT/llm/peach/$PROTO/dm_test_logs:/logs" pdli/llm-peach:sdk \
   mono Peach.LLM.Validations.DataModel.exe /test/datamodel.xml $PROTO\_packet_array /seeds

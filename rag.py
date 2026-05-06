@@ -104,7 +104,20 @@ def build_retriever(rfc_path: str):
                 cache_root = _default_cache_dir()
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-            embeddings = OpenAIEmbeddings()
+            embedding_model = os.environ.get(
+                "LLM_EMBEDDING_MODEL", "text-embedding-ada-002"
+            )
+            embedding_kwargs: dict[str, object] = {"model": embedding_model}
+
+            embedding_base_url = os.environ.get("LLM_EMBEDDING_BASE_URL")
+            if embedding_base_url:
+                embedding_kwargs["openai_api_base"] = embedding_base_url
+
+            embedding_api_key = os.environ.get("LLM_EMBEDDING_API_KEY")
+            if embedding_api_key:
+                embedding_kwargs["openai_api_key"] = embedding_api_key
+
+            embeddings = OpenAIEmbeddings(**embedding_kwargs)
 
             if cache_root is not None and os.path.exists(rfc_path):
                 cache_key = _cache_key_for_file(
