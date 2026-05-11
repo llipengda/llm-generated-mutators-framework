@@ -52,7 +52,8 @@ fi
 docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
     -v "$ROOT/llm/peach/$PROTO/mutator_test_logs:/logs" pdli/llm-peach:sdk \
     sh -c "cp /generated/Mutators/out/${PROTO_UPPER}Mutators.dll ./Plugins && \
-    mono Peach.LLM.Validations.Mutator.exe /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG}"
+    mono Peach.LLM.Validations.Mutator.exe /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG} && \
+    chmod -R 777 /logs"
 
 find "$ROOT/llm/peach/$PROTO/mutator_test_logs" -type f -print0 | while IFS= read -r -d '' log_file; do
   sed_i "s|/generated|$ROOT/llm/peach/$PROTO|g" "$log_file"

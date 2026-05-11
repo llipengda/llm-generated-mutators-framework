@@ -126,7 +126,7 @@ class UI:
             console=console,
             refresh_per_second=8,
         ) as live:
-            while reader_thread.is_alive() or proc.poll() is None:
+            while True:
                 with lock:
                     tail = lines[-max_lines:]
                 padded = tail + [""] * (max_lines - len(tail))
@@ -134,6 +134,8 @@ class UI:
                 live.update(
                     Panel("\n".join(clipped), title=title_str, border_style="grey50")
                 )
+                if not (reader_thread.is_alive() or proc.poll() is None):
+                    break
                 reader_thread.join(timeout=0.15)
 
         proc.wait()
@@ -277,6 +279,31 @@ def ask_wait_for_fix(step_title: str) -> None:
         "[dim]Press Enter when you are ready to re-verify...[/dim]"
     )
     input()
+
+
+def ask_select_types(packet_types: list[str], protocol: str) -> list[str]:
+    """Ask user to select packet types for mutator generation.
+
+    All types are pre-selected by default. Returns the selected types.
+    """
+    console.print()
+    console.print(
+        f"[bold blue]Select packet types to generate mutators for protocol: {protocol}[/bold blue]"
+    )
+
+    choices = [
+        questionary.Choice(title=t, value=t, checked=True) for t in packet_types
+    ]
+    selected = questionary.checkbox(
+        "Packet types:",
+        choices=choices,
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+
+    if selected is None:
+        UI.dim("Selection cancelled. Using all types.")
+        return list(packet_types)
+    return selected
 
 
 def ask_regenerate(what: str, protocol: str) -> bool:

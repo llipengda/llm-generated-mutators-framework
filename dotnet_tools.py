@@ -153,6 +153,11 @@ from langchain_core.tools import tool
 from log import console, file_logger
 
 
+import threading
+
+_search_lock = threading.Lock()
+
+
 @tool("Search_Class")
 def search_class(query: str) -> str:
     """
@@ -169,7 +174,8 @@ def search_class(query: str) -> str:
 f"""TOOL CALL: search_class
     query: {query}
 """)
-    response = inspector.fuzzy_search(query)
+    with _search_lock:
+        response = inspector.fuzzy_search(query)
     file_logger.log(
 f"""TOOL RESPONSE:
 {response}

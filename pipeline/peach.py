@@ -3,7 +3,7 @@ from typing import override
 
 from agent import AgentConfig, build_agent_graph
 from pipeline.base import BasePipeline
-from ui import UI, ask_regenerate, ask_skip_verification
+from ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
 
 
 def _env_float(key: str, default: float) -> float:
@@ -277,6 +277,11 @@ class PeachPipeline(BasePipeline):
             UI.success("All mutator DLLs already exist and were skipped.")
             return
 
+        types_to_generate = ask_select_types(types_to_generate, self.protocol_lower)
+        if not types_to_generate:
+            UI.warn("No packet types selected. Skipping mutator generation.")
+            return
+
         def run_one(pkt_type: str, index: int):
             mutator_prompt = f"""
             List ALL fields for the {self.protocol_lower} {pkt_type} packet.
@@ -403,9 +408,15 @@ class PeachPipeline(BasePipeline):
         1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
         2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
         3. Use the "Read_File" tool to read the corresponding mutator file.
-        4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur during `PerformMutation`.
+        4. Fix the bug in the C# code. 
         5. Use the "Write_File" tool to update the file with the fix.
         6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
+        
+        Hint for common errors:
+        - InternalValueToBitStream called on DataElement where InternalValue is not a BitStream. Type is String. 
+          Do not set a Variant(String) to DataElement that is not of type String. Instead, set the a Variant of bytes using System.Text.Encoding.XX.GetBytes(...).
+        - Detected duplicate child name of 'xx'.
+          When copying a DataElement, use elem.Clone(newName) to avoid duplicate names in the same parent.
 
         Be thorough and ensure the C# code will successfully compile.
         """

@@ -54,8 +54,7 @@ case "$TARGET" in
             nunit.framework.dll
         )
         mkdir -p peach/sdk
-        chmod 777 peach
-        chmod 777 peach/sdk
+        chmod -R 777 peach
         docker run --rm -v "$(pwd)/peach:/p" pdli/llm-peach:sdk \
             sh -c "cp /peach/output/linux_x86_64_release/bin/${ESSENTIAL_DLLS[*]} /p/sdk/ \
                    && /peach/output/linux_x86_64_release/bin/peach --showenv > /p/peach.txt \
