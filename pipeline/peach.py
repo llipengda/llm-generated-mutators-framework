@@ -2,6 +2,7 @@ import os
 from typing import override
 
 from agent import AgentConfig, build_agent_graph
+from config import get_fixer_enabled
 from pipeline.base import BasePipeline
 from ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
 
@@ -897,9 +898,54 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
         ):
             return
 
+    def step_final_compile(self):
+        UI.title("Final Compilation")
+
+        import glob
+        import subprocess
+
+        cs_files = []
+        mutators_dir = f"./llm/peach/{self.protocol_lower}/Mutators/"
+        fixers_dir = f"./llm/peach/{self.protocol_lower}/Fixers/"
+
+        if os.path.isdir(mutators_dir):
+            cs_files.extend(glob.glob(os.path.join(mutators_dir, "*.cs")))
+        if os.path.isdir(fixers_dir):
+            cs_files.extend(
+                f for f in glob.glob(os.path.join(fixers_dir, "*.cs"))
+                if "Validations" not in f
+            )
+
+        if not cs_files:
+            UI.warn("No .cs files found to compile.")
+            return
+
+        output_dll = f"./llm/peach/{self.protocol_lower}/{self.protocol_upper}.dll"
+        os.makedirs(os.path.dirname(output_dll), exist_ok=True)
+
+        reference_dir = "./peach/sdk/"
+        refs = [
+            f"-r:{os.path.join(reference_dir, f)}"
+            for f in os.listdir(reference_dir)
+            if f.endswith(".dll")
+        ]
+
+        UI.dim(f"Compiling {len(cs_files)} .cs files into {output_dll}...")
+
+        cmd = (
+            ["mcs", "-sdk:4.5", "-target:library", "-out:" + output_dll]
+            + refs
+            + cs_files
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            UI.success(f"Successfully compiled: {output_dll}")
+        else:
+            UI.error(f"Compilation failed:\n{result.stderr}")
+
     @override
     def steps(self):
-        return [
+        steps = [
             ("Step 1: Packet Types Extraction", self.step_1_packet_types_extraction),
             ("Step 2: Datamodel Generation", self.step_2_datamodel_generation),
             (
@@ -908,10 +954,20 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             ),
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
             ("Step 5: Mutator Validation & Fix", self.step_5_mutator_validation_and_fix),
-            ("Step 6: Constraint Extraction", self.step_6_constraint_extraction),
-            ("Step 6.1: Constraint Filtering", self.step_6_1_constraint_filtering),
-            ("Step 7: Fixer Generation", self.step_7_fixer_generation),
-            ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
-            ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
-            ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
         ]
+
+        if get_fixer_enabled():
+            steps += [
+                ("Step 6: Constraint Extraction", self.step_6_constraint_extraction),
+                ("Step 6.1: Constraint Filtering", self.step_6_1_constraint_filtering),
+                ("Step 7: Fixer Generation", self.step_7_fixer_generation),
+                ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
+                ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
+                ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
+            ]
+
+        steps.append(
+            ("Final Compilation", self.step_final_compile),
+        )
+
+        return steps
