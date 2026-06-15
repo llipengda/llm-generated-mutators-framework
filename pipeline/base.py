@@ -7,10 +7,12 @@ from state import (
     _pipeline_state_path,
     add_step_usage,
     load_pipeline_state,
+    load_session_state,
     new_usage_bucket,
     save_pipeline_state,
+    save_session_state,
 )
-from agent import build_agent_graph
+from agent import LlmOverrides, build_agent_graph
 from config import (
     get_protocol_name,
     get_rfc_path,
@@ -31,13 +33,20 @@ class BasePipeline:
     protocol_name: str
     agent_graph: CompiledStateGraph
     config: RunnableConfig
-    state: PipelineState 
+    state: PipelineState
     seed_dir: str
     retriever: BaseRetriever
+    interactive: bool
 
     def __init__(
         self,
+        *,
+        interactive: bool = True,
+        state_namespace: str | None = None,
+        llm_overrides: LlmOverrides | None = None,
     ):
+        self.interactive = interactive
+
         protocol_name = get_protocol_name()
         rfc_path = get_rfc_path()
         seed_dir = get_seed_dir()
@@ -46,42 +55,51 @@ class BasePipeline:
         self.protocol_lower = protocol_name.lower()
         self.protocol_upper = protocol_name.upper()
 
-        warn_if_rfc_missing(rfc_path)
-        retriever = build_retriever(rfc_path)
+        # When state_namespace is provided (API session), state is persisted
+        # per-session instead of per-protocol, enabling concurrent sessions.
+        self._state_namespace = state_namespace or self.protocol_lower
+        self._use_session_state = state_namespace is not None
 
-        agent_graph = build_agent_graph(retriever=retriever)
+        warn_if_rfc_missing(rfc_path)
+        retriever = build_retriever(rfc_path, llm_overrides=llm_overrides)
+
+        agent_graph = build_agent_graph(
+            retriever=retriever, llm_overrides=llm_overrides
+        )
 
         config: RunnableConfig = {
             "configurable": {"thread_id": "session_001"},
         }
 
-        state_path = _pipeline_state_path(self.protocol_lower)
-        if os.path.exists(state_path):
-            existing = load_pipeline_state(self.protocol_lower)
-            has_data = bool(
-                existing.get("packet_types") or existing.get("constraints")
-            )
-            if has_data and ask_resume_state(self.protocol_lower):
-                state = existing
+        if self._use_session_state:
+            # API session: load from session-specific file, never ask.
+            state = load_session_state(self._state_namespace)
+        else:
+            state_path = _pipeline_state_path(self.protocol_lower)
+            if os.path.exists(state_path):
+                existing = load_pipeline_state(self.protocol_lower)
+                has_data = bool(
+                    existing.get("packet_types") or existing.get("constraints")
+                )
+                if has_data and interactive and ask_resume_state(self.protocol_lower):
+                    state = existing
+                else:
+                    if has_data:
+                        UI.dim("Discarding saved state, starting fresh.")
+                        os.remove(state_path)
+                    state: PipelineState = {
+                        "packet_types": [],
+                        "constraints": "",
+                        "token_usage_total": new_usage_bucket(),
+                        "token_usage_by_step": {},
+                    }
             else:
-                if has_data:
-                    UI.dim(
-                        "Discarding saved state, starting fresh."
-                    )
-                    os.remove(state_path)
-                state: PipelineState = {
+                state = {
                     "packet_types": [],
                     "constraints": "",
                     "token_usage_total": new_usage_bucket(),
                     "token_usage_by_step": {},
                 }
-        else:
-            state = {
-                "packet_types": [],
-                "constraints": "",
-                "token_usage_total": new_usage_bucket(),
-                "token_usage_by_step": {},
-            }
 
         self.seed_dir = os.path.abspath(seed_dir)
         self.agent_graph = agent_graph
@@ -89,9 +107,15 @@ class BasePipeline:
         self.config = config
         self.state = state
         self._state_lock = threading.Lock()
+        self._last_llm_outputs: list[str] = []
 
 
     def __call__(self):
+        if not self.interactive:
+            raise RuntimeError(
+                "BasePipeline.__call__ requires interactive mode. "
+                "In API mode, call individual step methods directly instead."
+            )
         i = 0
         steps = self.steps()
         while i < len(steps):
@@ -142,6 +166,13 @@ class BasePipeline:
         with self._state_lock:
             add_step_usage(self.state, step_title=step_title, usage=step_usage)
             self.save_state()
+            # Accumulate LLM outputs so the API can return them all.
+            try:
+                final_content = response["messages"][-1].content
+                if isinstance(final_content, str):
+                    self._last_llm_outputs.append(final_content)
+            except Exception:
+                pass
         return response
 
     def fix_verify_loop(
@@ -152,18 +183,25 @@ class BasePipeline:
         *,
         max_retries: int = 3,
     ) -> bool:
-        """Verify → fix → re-verify loop with auto-retry and human-in-the-loop fallback.
+        """Verify → fix → re-verify loop with auto-retry.
+
+        In interactive mode, falls back to human-in-the-loop after
+        auto-retries are exhausted.  In non-interactive (API) mode only
+        the auto-retries are attempted — if they all fail, the method
+        returns False.
 
         Args:
             step_title: label used in UI messages.
             verify_fn: runs the test/validation; returns (success, output).
             fix_fn: performs the LLM fix; called with (output, hint) where hint
                     is None during auto-fix and a user-provided string otherwise.
-            max_retries: number of auto-fix attempts before asking the user.
+            max_retries: number of auto-fix attempts before asking the user
+                         (interactive) or giving up (non-interactive).
 
         Returns:
             True if verification passed (with or without fixes).
-            False if the user chose to exit the pipeline.
+            False if all auto-retries failed (non-interactive) or the user
+            chose to exit the pipeline (interactive).
         """
         success, output = verify_fn()
         if success:
@@ -184,6 +222,15 @@ class BasePipeline:
                 f"{step_title} still failing after fix attempt {attempt}/{max_retries}."
             )
 
+        # Non-interactive mode: give up after auto-retries.
+        if not self.interactive:
+            UI.error(
+                f"{step_title} failed after {max_retries} auto-fix attempts. "
+                "Non-interactive mode — giving up."
+            )
+            return False
+
+        # Interactive mode: human-in-the-loop fallback.
         while True:
             choice = ask_after_fix_failure(step_title)
             if choice == "exit":
@@ -215,7 +262,10 @@ class BasePipeline:
         return build_agent_graph(retriever=self.retriever)
     
     def save_state(self):
-        save_pipeline_state(self.state, self.protocol_lower)
+        if self._use_session_state:
+            save_session_state(self.state, self._state_namespace)
+        else:
+            save_pipeline_state(self.state, self.protocol_lower)
 
     def print_token_usage_summary(self) -> None:
         total = self.state.get("token_usage_total", {})

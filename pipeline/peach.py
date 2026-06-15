@@ -1,7 +1,7 @@
 import os
 from typing import override
 
-from agent import AgentConfig, build_agent_graph
+from agent import AgentConfig, LlmOverrides, build_agent_graph
 from config import get_fixer_enabled
 from pipeline.base import BasePipeline
 from ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
@@ -18,16 +18,38 @@ def _env_float(key: str, default: float) -> float:
 
 
 class PeachPipeline(BasePipeline):
-    def __init__(self):
-        super().__init__()
-        peach_model = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
+    def __init__(
+        self,
+        *,
+        interactive: bool = True,
+        state_namespace: str | None = None,
+        llm_overrides: LlmOverrides | None = None,
+    ):
+        super().__init__(
+            interactive=interactive,
+            state_namespace=state_namespace,
+            llm_overrides=llm_overrides,
+        )
+
+        # Peach model defaults — overrides applied on top of env vars.
+        peach_model_default = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
+        peach_temp_default = _env_float("LLM_PEACH_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.7))
+        if llm_overrides is not None:
+            if llm_overrides.model is not None:
+                peach_model_default = llm_overrides.model
+            if llm_overrides.temperature is not None:
+                peach_temp_default = llm_overrides.temperature
+
         self.agent_config = AgentConfig(
-            temperature=_env_float("LLM_PEACH_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.7)),
-            model=peach_model,
+            temperature=peach_temp_default,
+            model=peach_model_default,
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
         )
         self.agent_graph = build_agent_graph(
-            retriever=self.retriever, target="peach", config=self.agent_config
+            retriever=self.retriever,
+            target="peach",
+            config=self.agent_config,
+            llm_overrides=llm_overrides,
         )
 
     def step_1_packet_types_extraction(self):
@@ -248,7 +270,22 @@ class PeachPipeline(BasePipeline):
             fix_fn,
         )
 
-    def step_4_mutator_generation(self):
+    def step_4_mutator_generation(
+        self,
+        *,
+        selected_types: list[str] | None = None,
+        regenerate: bool | None = None,
+    ):
+        """Generate mutator classes for each packet type.
+
+        Args:
+            selected_types: Packet types to generate mutators for.
+                If None in interactive mode, the user is asked to select.
+                If None in non-interactive mode, all packet types are used.
+            regenerate: Whether to regenerate existing DLLs.
+                If None in interactive mode, the user is asked.
+                If None in non-interactive mode, defaults to True.
+        """
         UI.title("Step 4: Mutator Generation")
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
@@ -259,6 +296,13 @@ class PeachPipeline(BasePipeline):
 
         import os
 
+        # Determine regenerate behaviour.
+        if regenerate is None:
+            if self.interactive:
+                regenerate = True  # will be decided per-type below
+            else:
+                regenerate = True
+
         out_dir = f"./llm/peach/{self.protocol_lower}/Mutators/out"
         types_to_generate = []
         for pkt_type in packet_types:
@@ -267,9 +311,13 @@ class PeachPipeline(BasePipeline):
             )
             dll_path = os.path.join(out_dir, dll_name)
             if os.path.exists(dll_path):
-                if not ask_regenerate(
-                    f"mutator DLL for {pkt_type}", self.protocol_lower
-                ):
+                if self.interactive:
+                    if not ask_regenerate(
+                        f"mutator DLL for {pkt_type}", self.protocol_lower
+                    ):
+                        UI.dim(f"Skipping mutator generation for {pkt_type}.")
+                        continue
+                elif not regenerate:
                     UI.dim(f"Skipping mutator generation for {pkt_type}.")
                     continue
             types_to_generate.append(pkt_type)
@@ -278,7 +326,17 @@ class PeachPipeline(BasePipeline):
             UI.success("All mutator DLLs already exist and were skipped.")
             return
 
-        types_to_generate = ask_select_types(types_to_generate, self.protocol_lower)
+        # Determine which types to generate.
+        if selected_types is not None:
+            # Filter to valid types only.
+            types_to_generate = [t for t in selected_types if t in types_to_generate]
+            if not types_to_generate:
+                UI.warn("No valid packet types selected. Skipping mutator generation.")
+                return
+        elif self.interactive:
+            types_to_generate = ask_select_types(types_to_generate, self.protocol_lower)
+        # else: non-interactive without selection → use all packet_types
+
         if not types_to_generate:
             UI.warn("No packet types selected. Skipping mutator generation.")
             return
@@ -365,13 +423,29 @@ class PeachPipeline(BasePipeline):
             for future in as_completed(futures):
                 future.result()
 
-    def step_5_mutator_validation_and_fix(self):
+    def step_5_mutator_validation_and_fix(
+        self, *, skip_first_verification: bool | None = None
+    ):
+        """Validate mutators and auto-fix failures.
+
+        Args:
+            skip_first_verification: If True, the first verification pass is
+                skipped (useful when verification was already done recently).
+                If None in interactive mode, the user is asked.
+                If None in non-interactive mode, defaults to False.
+        """
         UI.title("Step 5: Mutator Validation & Fix")
 
         import os
         import glob
 
-        skip_first = ask_skip_verification("Mutator Validation")
+        if skip_first_verification is None:
+            if self.interactive:
+                skip_first = ask_skip_verification("Mutator Validation")
+            else:
+                skip_first = False
+        else:
+            skip_first = skip_first_verification
         _skip_this_verify = [skip_first]  # mutable, flipped after first use
         _failing_mutators: list[str] = []  # names of currently-failing mutators
 
@@ -942,6 +1016,8 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             UI.success(f"Successfully compiled: {output_dll}")
         else:
             UI.error(f"Compilation failed:\n{result.stderr}")
+            from log import step_info
+            step_info(result.stderr)
 
     @override
     def steps(self):

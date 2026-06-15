@@ -7,6 +7,8 @@ __pycache__/
 llm/
 *.log
 .pipeline_state*
+data/uploads/
+logs/
 
 tests/fixer_sanity/build*
 tests/fixer_sanity/out*
@@ -26,3 +28,4 @@ peach/
 
 .DS_Store
 __MACOSX/
+node_modules

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Literal
@@ -9,6 +11,28 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.retrievers import BaseRetriever
 
 from tools import tools, make_rfc_search
+
+
+# ---------------------------------------------------------------------------
+# Per-session LLM configuration overrides (API mode).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LlmOverrides:
+    """LLM configuration that can be set per session via the HTTP API.
+
+    All fields default to ``None``, meaning "use the environment variable".
+    """
+
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+    # Embedding overrides.
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: preserve reasoning_content round-trip through LangChain
@@ -67,11 +91,47 @@ class AgentConfig:
 You are a helpful assistant expert in C programming and protocol fuzzing.
 """
 
-def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = None, target: Literal["aflnet", "peach"] = "aflnet"):
+    def apply_overrides(self, overrides: LlmOverrides | None) -> None:
+        """Apply per-session overrides, falling back to env vars."""
+        if overrides is None:
+            return
+        if overrides.model is not None:
+            self.model = overrides.model
+        if overrides.temperature is not None:
+            self.temperature = overrides.temperature
+
+
+def build_agent_graph(
+    *,
+    retriever: BaseRetriever,
+    config: AgentConfig | None = None,
+    target: Literal["aflnet", "peach"] = "aflnet",
+    llm_overrides: LlmOverrides | None = None,
+):
     if config is None:
         config = AgentConfig()
+    config.apply_overrides(llm_overrides)
 
-    llm = ChatOpenAI(temperature=config.temperature, model=config.model)
+    # Merge overrides with env vars for ChatOpenAI kwargs.
+    openai_api_key = (
+        (llm_overrides.api_key if llm_overrides else None)
+        or os.environ.get("OPENAI_API_KEY")
+    )
+    openai_base_url = (
+        (llm_overrides.base_url if llm_overrides else None)
+        or os.environ.get("OPENAI_BASE_URL")
+    )
+
+    llm_kwargs: dict[str, Any] = {
+        "temperature": config.temperature,
+        "model": config.model,
+    }
+    if openai_api_key:
+        llm_kwargs["openai_api_key"] = openai_api_key
+    if openai_base_url:
+        llm_kwargs["openai_api_base"] = openai_base_url
+
+    llm = ChatOpenAI(**llm_kwargs)
     rfc_search = make_rfc_search(retriever)
 
     memory = MemorySaver()
@@ -80,5 +140,5 @@ def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = 
         model=llm,
         tools=[rfc_search] + tools[target],
         checkpointer=memory,
-        system_prompt=config.system_prompt
+        system_prompt=config.system_prompt,
     )

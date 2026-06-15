@@ -37,11 +37,104 @@ def add_step_usage(
         total[key] += val
         step_bucket[key] += val
 
+REPO_ROOT = os.path.dirname(__file__)
+
 def _pipeline_state_path(protocol_name: str) -> str:
-    repo_root = os.path.dirname(__file__)
-    state_dir = os.path.join(repo_root, ".pipeline_state")
+    state_dir = os.path.join(REPO_ROOT, ".pipeline_state")
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, f"{protocol_name}.json")
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped pipeline state — lives inside the session folder
+# under data/uploads/sessions/<session_id>/pipeline_state.json.
+# When the session folder is deleted, the state is cleaned up automatically.
+# ---------------------------------------------------------------------------
+
+SESSION_STATE_FILENAME = "pipeline_state.json"
+
+
+def _session_dir(session_id: str) -> str:
+    return os.path.join(REPO_ROOT, "data", "uploads", "sessions", session_id)
+
+
+def _session_state_path(session_id: str) -> str:
+    return os.path.join(_session_dir(session_id), SESSION_STATE_FILENAME)
+
+
+def load_session_state(session_id: str) -> PipelineState:
+    """Load pipeline state for a specific API session."""
+    path = _session_state_path(session_id)
+    if not os.path.exists(path):
+        return {
+            "packet_types": [],
+            "constraints": "",
+            "token_usage_total": new_usage_bucket(),
+            "token_usage_by_step": {},
+        }
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "packet_types" in data and "constraints" in data:
+            data.setdefault("token_usage_total", new_usage_bucket())
+            data.setdefault("token_usage_by_step", {})
+            data.setdefault("_session_meta", {})
+            return data  # type: ignore
+    except Exception as e:
+        UI.warn(f"Warning: failed to load session state from {path}: {e}")
+    return {
+        "packet_types": [],
+        "constraints": "",
+        "token_usage_total": new_usage_bucket(),
+        "token_usage_by_step": {},
+    }
+
+
+def save_session_state(state: PipelineState, session_id: str) -> None:
+    """Persist pipeline state for a specific API session."""
+    path = _session_state_path(session_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    UI.dim(f"Saving session state to {path}...")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except Exception as e:
+        UI.warn(f"Warning: failed to save session state to {path}: {e}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def delete_session_state(session_id: str) -> None:
+    """Remove the pipeline state file for a session (and the session dir if empty)."""
+    path = _session_state_path(session_id)
+    if os.path.exists(path):
+        os.remove(path)
+    # Remove session dir if it's now empty.
+    sdir = _session_dir(session_id)
+    try:
+        if os.path.isdir(sdir) and not os.listdir(sdir):
+            os.rmdir(sdir)
+    except OSError:
+        pass
+
+
+def list_session_state_ids() -> list[str]:
+    """Return session IDs by scanning for pipeline_state.json inside session dirs."""
+    sessions_root = os.path.join(REPO_ROOT, "data", "uploads", "sessions")
+    if not os.path.isdir(sessions_root):
+        return []
+    ids: list[str] = []
+    for name in os.listdir(sessions_root):
+        state_file = os.path.join(sessions_root, name, SESSION_STATE_FILENAME)
+        if os.path.isfile(state_file):
+            ids.append(name)
+    return ids
 
 
 def load_pipeline_state(protocol_name: str) -> PipelineState:

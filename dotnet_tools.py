@@ -141,16 +141,24 @@ class MultiAssemblyInspector:
         return "\n".join(output)
 
 
+_API_MODE = os.environ.get("API_MODE", "0") == "1"
+
 if not os.path.exists("./peach/sdk/"):
-    print(
-        "Error: ./peach/sdk/ not found. Please run `./setup.sh peach` first to prepare the SDK."
+    msg = (
+        "Error: ./peach/sdk/ not found. "
+        "Please run `./setup.sh peach` first to prepare the SDK."
     )
+    if _API_MODE:
+        # In API mode we raise so the server can catch it and report via
+        # the health endpoint instead of killing the process.
+        raise RuntimeError(msg)
+    print(msg)
     sys.exit(1)
 
 inspector = MultiAssemblyInspector(["./peach/sdk/"])
 
 from langchain_core.tools import tool
-from log import console, file_logger
+from log import tool_log, tool_status
 
 
 import threading
@@ -169,14 +177,14 @@ def search_class(query: str) -> str:
     Returns:
         str: A formatted string with class details and member signatures.
     """
-    console.log(f"[dim]Tool: Searching for class matching '{query}'...[/dim]")
-    file_logger.log(
+    tool_status(f"[dim]Tool: Searching for class matching '{query}'...[/dim]")
+    tool_log(
 f"""TOOL CALL: search_class
     query: {query}
 """)
     with _search_lock:
         response = inspector.fuzzy_search(query)
-    file_logger.log(
+    tool_log(
 f"""TOOL RESPONSE:
 {response}
 """)
@@ -216,17 +224,17 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
     reference_dir = "./peach/sdk/"
     refs = [f"-r:{os.path.join(reference_dir, f)}" for f in os.listdir(reference_dir) if f.endswith(".dll")]
     if not refs:
-        console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh peach` first to prepare the SDK. [/red][/dim]")
+        tool_status(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh peach` first to prepare the SDK. [/red][/dim]")
         sys.exit(1)
 
-    console.log(
+    tool_status(
         f"[dim]Tool: Compiling C# files from '{source_file_or_dir}' into '{output_dll}'...[/dim]"
     )
 
     if not csharp_files:
         return "Error: No C# source files found in the specified directory."
 
-    file_logger.log(
+    tool_log(
 f"""TOOL CALL: build_dotnet_dll
     source_dir: {source_file_or_dir}
     output_dll: {output_dll}
@@ -250,7 +258,7 @@ f"""TOOL CALL: build_dotnet_dll
             result = f"Success: Compiled DLL: {output_dll}"
     else:
         result = f"Compilation failed:\n{(res.stderr) if res else 'Unknown error'}"
-    file_logger.log(
+    tool_log(
 f"""TOOL RESPONSE:
 {result}
 """)
@@ -283,7 +291,7 @@ def validate_data(protocol: str, hex_data: str) -> str:
     else:
         res = f"Data validation failed for protocol {protocol}:\n{(result.stdout + result.stderr) if result else 'Unknown error'}"
 
-    file_logger.log(
+    tool_log(
 f"""TOOL CALL: validate_data
     protocol: {protocol}
     hex_data: {hex_data}

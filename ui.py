@@ -6,7 +6,7 @@ import questionary
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from log import console
+from log import console, step_error, step_info, step_success, step_title, step_warn
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 
@@ -30,10 +30,11 @@ QUESTIONARY_BASE_STYLE = questionary.Style(
 class UI:
     @staticmethod
     def title(text: str):
-        console.rule(f"[bold blue]{text}[/bold blue]")
+        step_title(text)
 
     @staticmethod
     def warning_rule(text: str):
+        step_warn(text)
         console.rule(f"[yellow]{text}[/yellow]", style="yellow")
 
     @staticmethod
@@ -68,19 +69,19 @@ class UI:
 
     @staticmethod
     def warn(message: str):
-        console.print(f"[bold yellow]{message}[/bold yellow]")
+        step_warn(message)
 
     @staticmethod
     def error(message: str):
-        console.print(f"[bold red]{message}[/bold red]")
+        step_error(message)
 
     @staticmethod
     def success(message: str):
-        console.print(f"[bold green]{message}[/bold green]")
+        step_success(message)
 
     @staticmethod
     def dim(message: str):
-        console.print(f"[dim]{message}[/dim]")
+        step_info(message)
 
     print = staticmethod(console.print)
 
@@ -110,6 +111,8 @@ class UI:
                 if cleaned:
                     with lock:
                         lines.append(cleaned)
+                    # Also stream to the session log for WebSocket clients.
+                    step_info(cleaned)
 
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()

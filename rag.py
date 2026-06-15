@@ -91,11 +91,18 @@ def _save_faiss_cache(vectorstore: FAISS, cache_dir: Path) -> None:
         shutil.move(str(tmp_dir), str(cache_dir))
 
 
-def build_retriever(rfc_path: str):
+def build_retriever(
+    rfc_path: str,
+    *,
+    llm_overrides: "LlmOverrides | None" = None,
+):
     """Build a retriever from the RFC PDF / text file.
 
-    Returns None if setup fails (e.g., missing file or dependencies).
+    *llm_overrides* allows the API to override embedding settings per session.
     """
+    # Lazy import to avoid circular dependency.
+    from agent import LlmOverrides
+
     with UI.status("Setting up RAG components...", spinner="dots"):
         try:
             if os.environ.get("RAG_DISABLE_CACHE") in {"1", "true", "TRUE", "yes", "YES"}:
@@ -104,16 +111,24 @@ def build_retriever(rfc_path: str):
                 cache_root = _default_cache_dir()
 
             splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-            embedding_model = os.environ.get(
-                "LLM_EMBEDDING_MODEL", "text-embedding-ada-002"
+
+            embedding_model = (
+                (llm_overrides.embedding_model if llm_overrides else None)
+                or os.environ.get("LLM_EMBEDDING_MODEL", "text-embedding-ada-002")
             )
             embedding_kwargs: dict[str, object] = {"model": embedding_model}
 
-            embedding_base_url = os.environ.get("LLM_EMBEDDING_BASE_URL")
+            embedding_base_url = (
+                (llm_overrides.embedding_base_url if llm_overrides else None)
+                or os.environ.get("LLM_EMBEDDING_BASE_URL")
+            )
             if embedding_base_url:
                 embedding_kwargs["openai_api_base"] = embedding_base_url
 
-            embedding_api_key = os.environ.get("LLM_EMBEDDING_API_KEY")
+            embedding_api_key = (
+                (llm_overrides.embedding_api_key if llm_overrides else None)
+                or os.environ.get("LLM_EMBEDDING_API_KEY")
+            )
             if embedding_api_key:
                 embedding_kwargs["openai_api_key"] = embedding_api_key
 
