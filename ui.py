@@ -1,7 +1,13 @@
-import asyncio
 import subprocess
 import threading
+
 import questionary
+from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.styles import Style
 
 from rich.live import Live
 from rich.markdown import Markdown
@@ -146,50 +152,166 @@ class UI:
         )
 
 
-def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> str:
+def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> tuple[str, str | None]:
     """Ask what to do BEFORE starting a step.
 
-    Returns one of: 'continue', 'retry_prev', 'skip', 'exit'.
+    Returns (action, extra_prompt) where action is one of: 'continue', 'retry_prev', 'skip', 'exit'.
+    extra_prompt carries the user's additional instructions when the user types text
+    on the "Continue with extra prompt" line and presses Enter.
+
+    Uses a custom prompt_toolkit select menu with inline text editing.
+    Use ↑/↓ to navigate, Enter to confirm. When "Continue with extra prompt"
+    is selected, typing edits the text directly on that line.
     Defaults to 'continue' after timeout.
     """
-    console.print()
-    console.print(
-        f"[blue italic]About to start: {step_name} (auto-continue in {timeout_s:.0f}s)[/blue italic]"
-    )
-
-    choices: list[str | questionary.Choice] = [
-        "Continue",
-        questionary.Choice(
-            "Go to previous step", disabled=None if has_previous else "No previous step"
-        ),
-        "Go to next step",
-        "Exit",
+    # ---------- mutable state ----------
+    options = [
+        ("continue", "Continue", False),
+        ("continue", "Continue with extra prompt:", True),
+        ("retry_prev", "Go to previous step", False),
+        ("skip", "Go to next step", False),
+        ("exit", "Exit", False),
     ]
+    selected = [0]
+    cursor_on = [True]  # set False on Enter to hide █ while keeping ▶
+    extra_buffer = Buffer(multiline=False)
+    result: list = [None]  # will hold (action, extra_text) or None
 
-    question = questionary.select(
-        "Choose an action:",
-        choices=choices,
-        style=QUESTIONARY_BASE_STYLE,
+    # ---------- styles ----------
+    style = Style(
+        [
+            ("message", "fg:ansiblue italic"),
+            ("pointer", "fg:ansipurple bold"),
+            ("selected", "bold"),
+            ("extra", "fg:ansigreen"),
+            ("dimmed", "fg:ansibrightblack"),
+        ]
     )
 
-    async def get_input_with_timeout():
-        try:
-            return await asyncio.wait_for(question.ask_async(), timeout=timeout_s)
-        except asyncio.TimeoutError:
-            return "TIMEOUT"
+    # ---------- display ----------
+    def _render():
+        lines = [
+            ("class:message", f"About to start: {step_name} (auto-continue in {timeout_s:.0f}s)"),
+            ("", "\n\n"),
+        ]
+        for i, (_, label, editable) in enumerate(options):
+            is_sel = i == selected[0]
+            pointer = "▶" if is_sel else " "
 
-    choice = asyncio.run(get_input_with_timeout())
-    if choice == "TIMEOUT" or choice is None:
+            if i == 2 and not has_previous:  # "Go to previous step" unavailable
+                lines.append(("class:dimmed", f"  {pointer} {label}  (no previous step)\n"))
+                continue
+
+            if editable:
+                text = extra_buffer.text
+                cursor = "█" if (is_sel and cursor_on[0]) else ""
+                if is_sel:
+                    lines.append(("class:pointer", f"  {pointer} "))
+                    lines.append(("class:selected", label))
+                    lines.append(("", " "))
+                    lines.append(("class:extra", text))
+                    lines.append(("class:pointer", cursor))
+                    lines.append(("", "\n"))
+                else:
+                    lines.append(("", f"  {pointer} "))
+                    lines.append(("", label))
+                    lines.append(("", " "))
+                    lines.append(("class:extra", text))
+                    lines.append(("", "\n"))
+            else:
+                style_class = "class:selected" if is_sel else ""
+                if is_sel:
+                    lines.append(("class:pointer", f"  {pointer} "))
+                    lines.append((style_class, label))
+                    lines.append(("", "\n"))
+                else:
+                    lines.append(("", f"  {pointer} {label}\n"))
+
+        lines.append(("", "\n"))
+        return lines
+
+    display_control = FormattedTextControl(_render)
+    display_window = Window(content=display_control, always_hide_cursor=True)
+
+    # Hidden input that captures text editing (height=0, invisible cursor)
+    input_window = Window(
+        content=BufferControl(buffer=extra_buffer),
+        height=0,
+        always_hide_cursor=True,
+    )
+
+    # ---------- key bindings ----------
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _up(event):
+        selected[0] = (selected[0] - 1) % len(options)
+        # Skip disabled "previous step" option
+        if selected[0] == 2 and not has_previous:
+            selected[0] = (selected[0] - 1) % len(options)
+
+    @kb.add("down")
+    def _down(event):
+        selected[0] = (selected[0] + 1) % len(options)
+        # Skip disabled "previous step" option
+        if selected[0] == 2 and not has_previous:
+            selected[0] = (selected[0] + 1) % len(options)
+
+    @kb.add("enter")
+    def _enter(event):
+        val, _, editable = options[selected[0]]
+        extra = extra_buffer.text if editable else None
+        result[0] = (val, extra)
+        cursor_on[0] = False  # hide █, keep ▶ on selected option
+        event.app.exit()
+
+    @kb.add("c-c")
+    def _ctrl_c(event):
+        result[0] = ("exit", None)
+        event.app.exit()
+
+    # ---------- layout ----------
+    root = HSplit([display_window, input_window])
+    layout = Layout(root)
+
+    app = Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    # Always focus the hidden input so typing works immediately
+    layout.focus(input_window)
+
+    # ---------- timeout ----------
+    timer = threading.Timer(timeout_s, lambda: _timeout(app, result))
+    timer.daemon = True
+    timer.start()
+
+    try:
+        app.run()
+    finally:
+        timer.cancel()
+
+    if result[0] is None:
         UI.dim("Timeout reached. Defaulting to: Continue")
-        choice = "Continue"
+        return "continue", None
 
-    if choice == "Continue":
-        return "continue"
-    if choice == "Go to previous step":
-        return "retry_prev"
-    if choice == "Go to next step":
-        return "skip"
-    return "exit"
+    action, extra = result[0]
+    if extra:
+        UI.dim(f"  Continuing with extra prompt: {extra}")
+    return action, extra
+
+
+def _timeout(app: Application, result: list) -> None:
+    """Called by the timer thread when the auto-continue timeout fires."""
+    if result[0] is None:
+        result[0] = ("continue", None)
+        try:
+            app.exit()
+        except Exception:
+            pass
 
 
 def ask_resume_state(protocol_name: str) -> bool:

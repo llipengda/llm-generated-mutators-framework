@@ -96,7 +96,7 @@ class BasePipeline:
         steps = self.steps()
         while i < len(steps):
             step_title, step_fn = steps[i]
-            action = ask_before_step(step_title, has_previous=i > 0)
+            action, extra_prompt = ask_before_step(step_title, has_previous=i > 0)
 
             if action == "exit":
                 UI.error("Exiting pipeline.")
@@ -113,6 +113,7 @@ class BasePipeline:
                 i += 1
                 continue
 
+            self._extra_prompt = extra_prompt
             step_fn()
             i += 1
 
@@ -126,6 +127,12 @@ class BasePipeline:
         raise NotImplementedError("Subclasses must implement the steps method.")
     
     def call_agent(self, prompt_text: str, step_title: str, *, agent_graph: CompiledStateGraph | None = None):
+        extra = getattr(self, "_extra_prompt", None)
+        if extra:
+            prompt_text = prompt_text + "\n\n" + extra
+            UI.dim(f"  Appended extra prompt: {extra}")
+            self._extra_prompt = None
+
         tracker = TokenUsageTracker()
         local_config: RunnableConfig = {
             **self.config,
