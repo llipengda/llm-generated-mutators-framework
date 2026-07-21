@@ -173,7 +173,8 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
         ("exit", "Exit", False),
     ]
     selected = [0]
-    cursor_on = [True]  # set False on Enter to hide █ while keeping ▶
+    cursor_on = [True]   # set False on Enter to hide █ while keeping ▶
+    confirmed = [False]  # set True on Enter: collapse display to selected option only
     extra_buffer = Buffer(multiline=False)
     result: list = [None]  # will hold (action, extra_text) or None
 
@@ -189,45 +190,57 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     )
 
     # ---------- display ----------
+    def _render_line(i: int, label: str, editable: bool) -> list:
+        """Render a single option line. Returns list of (style, text) tuples (no trailing newline)."""
+        is_sel = i == selected[0]
+        pointer = "▶" if is_sel else " "
+
+        if i == 2 and not has_previous:
+            return [("class:dimmed", f"  {pointer} {label}  (no previous step)")]
+
+        if editable:
+            text = extra_buffer.text
+            cursor = "█" if (is_sel and cursor_on[0]) else ""
+            if is_sel:
+                return [
+                    ("class:pointer", f"  {pointer} "),
+                    ("class:selected", label),
+                    ("", " "),
+                    ("class:extra", text),
+                    ("class:pointer", cursor),
+                ]
+            else:
+                return [
+                    ("", f"  {pointer} "),
+                    ("", label),
+                    ("", " "),
+                    ("class:extra", text),
+                ]
+        else:
+            if is_sel:
+                return [
+                    ("class:pointer", f"  {pointer} "),
+                    ("class:selected", label),
+                ]
+            else:
+                return [("", f"  {pointer} {label}")]
+
     def _render():
+        if confirmed[0]:
+            _, label, editable = options[selected[0]]
+            lines = [("class:message", f"About to start: {step_name}"),
+                     ("", "\n")]
+            lines.extend(_render_line(selected[0], label, editable))
+            return lines
+
         lines = [
             ("class:message", f"About to start: {step_name} (auto-continue in {timeout_s:.0f}s)"),
-            ("", "\n\n"),
+            ("", "\n"),
         ]
-        for i, (_, label, editable) in enumerate(options):
-            is_sel = i == selected[0]
-            pointer = "▶" if is_sel else " "
-
-            if i == 2 and not has_previous:  # "Go to previous step" unavailable
-                lines.append(("class:dimmed", f"  {pointer} {label}  (no previous step)\n"))
-                continue
-
-            if editable:
-                text = extra_buffer.text
-                cursor = "█" if (is_sel and cursor_on[0]) else ""
-                if is_sel:
-                    lines.append(("class:pointer", f"  {pointer} "))
-                    lines.append(("class:selected", label))
-                    lines.append(("", " "))
-                    lines.append(("class:extra", text))
-                    lines.append(("class:pointer", cursor))
-                    lines.append(("", "\n"))
-                else:
-                    lines.append(("", f"  {pointer} "))
-                    lines.append(("", label))
-                    lines.append(("", " "))
-                    lines.append(("class:extra", text))
-                    lines.append(("", "\n"))
-            else:
-                style_class = "class:selected" if is_sel else ""
-                if is_sel:
-                    lines.append(("class:pointer", f"  {pointer} "))
-                    lines.append((style_class, label))
-                    lines.append(("", "\n"))
-                else:
-                    lines.append(("", f"  {pointer} {label}\n"))
-
-        lines.append(("", "\n"))
+        for idx, (_, label, editable) in enumerate(options):
+            if idx > 0:
+                lines.append(("", "\n"))
+            lines.extend(_render_line(idx, label, editable))
         return lines
 
     display_control = FormattedTextControl(_render)
@@ -262,7 +275,8 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
         val, _, editable = options[selected[0]]
         extra = extra_buffer.text if editable else None
         result[0] = (val, extra)
-        cursor_on[0] = False  # hide █, keep ▶ on selected option
+        cursor_on[0] = False
+        confirmed[0] = True  # collapse to selected option only
         event.app.exit()
 
     @kb.add("c-c")

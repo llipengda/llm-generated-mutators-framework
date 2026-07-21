@@ -38,7 +38,7 @@ class PeachPipeline(BasePipeline):
 
         Use the "RFC_Search" tool to look up the relevant sections in the RFC.
         Return the list as a comma-separated string.
-        ONLY output the types, nothing else.
+        ONLY output the types without any additional explanation or formatting. For example: "CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, AUTH, PUBACK, PUBREC, PUBREL, PUBCOMP, PINGREQ, DISCONNECT".
 
         When using the "RFC_Search" tool, **ASK questions instead of assuming knowledge**.
         For example:
@@ -456,7 +456,15 @@ class PeachPipeline(BasePipeline):
                         "Filtering to previously-failing mutators: "
                         + ", ".join(_failing_mutators)
                     )
-                UI.run_with_live_output(cmd, title="Running Mutator Tests")
+                result = UI.run_with_live_output(cmd, title="Running Mutator Tests")
+
+                # Save results to file
+                results_dir = os.path.join("llm", "peach", self.protocol_lower, "mutator_test_logs")
+                os.makedirs(results_dir, exist_ok=True)
+                results_path = os.path.join(results_dir, "results.txt")
+                with open(results_path, "w", encoding="utf-8") as f:
+                    f.write(result.stdout)
+                UI.dim(f"  Mutator test results saved to: {results_path}")
             _skip_this_verify[0] = False
 
             error_log_dir = (

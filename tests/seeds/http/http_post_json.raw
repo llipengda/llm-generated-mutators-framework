@@ -1,0 +1,9 @@
+POST /api/v1/users HTTP/1.1
+Host: www.example.com
+User-Agent: curl/8.4.0
+Content-Type: application/json; charset=utf-8
+Content-Length: 75
+Accept: application/json
+Connection: keep-alive
+
+{"name": "John Doe", "email": "john@example.com", "message": "Hello World"}

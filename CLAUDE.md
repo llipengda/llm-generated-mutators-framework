@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to produce protocol-aware fuzzing code (C or C#), and iteratively validates/fixes the output. Two targets: **AFLNet** (C) and **Peach** (C#).
+LLM-assisted generator that reads one or more RFCs (PDF/text) via RAG, prompts an LLM to produce protocol-aware fuzzing code (C or C#), and iteratively validates/fixes the output. Two targets: **AFLNet** (C) and **Peach** (C#).
 
 ## Build, test, and lint
 
@@ -18,6 +18,10 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -r requirement
 # Run full pipeline (interactive, auto-continues after 60s)
 python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf --target peach
+
+# Multiple RFCs can be specified by repeating --rfc-path
+python3 main.py --protocol someip --seed-dir tests/seeds/someip \
+    --rfc-path rfc/someip.pdf --rfc-path rfc/someip-sd.pdf --target peach
 
 # AFLNet sanity checks
 ./tests/PR_mr/mr_test.sh mqtt tests/seeds/mqtt          # parser + reassembler metamorphic tests
@@ -39,7 +43,7 @@ No linter or type-checker is configured. A `.env` file with `OPENAI_API_KEY` is 
 
 ```
 main.py                  # CLI entry point (click). Routes --target to AFLNetPipeline or PeachPipeline.
-config.py                # Global mutable state: protocol_name, seed_dir, rfc_path. Set by build_config_from_args().
+config.py                # Global mutable state: protocol_name, seed_dir, rfc_paths. Set by build_config_from_args().
 state.py                 # PipelineState persistence (.pipeline_state.json): packet_types, constraints, token usage.
 agent.py                 # LangChain agent factory. Creates ChatOpenAI + tools + MemorySaver checkpoint.
 rag.py                   # RFC retriever: loads PDF/text → splits → FAISS vector store (cached under .cache/rag/).

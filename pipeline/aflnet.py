@@ -1,3 +1,4 @@
+import os
 import subprocess
 from typing import override
 
@@ -328,6 +329,14 @@ class AFLNetPipeline(BasePipeline):
                 stdout=subprocess.PIPE,
                 text=True,
             )
+
+        # Save results to file
+        results_dir = os.path.join("llm", self.protocol_lower)
+        os.makedirs(results_dir, exist_ok=True)
+        results_path = os.path.join(results_dir, "mutator_sanity_results.txt")
+        with open(results_path, "w", encoding="utf-8") as f:
+            f.write(result.stdout)
+        UI.dim(f"  Mutator sanity results saved to: {results_path}")
 
         last_line = result.stdout.strip().split("\n")[-1]
 

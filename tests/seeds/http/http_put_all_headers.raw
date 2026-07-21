@@ -1,0 +1,11 @@
+PUT /api/v1/resources/123 HTTP/1.1
+Host: www.example.com
+User-Agent: MyApp/2.0
+Content-Type: application/json
+Content-Length: 52
+Accept: application/json
+Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjMifQ
+If-Match: "abc123"
+Connection: keep-alive
+
+{"title": "Updated Resource", "status": "published"}

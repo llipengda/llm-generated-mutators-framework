@@ -1,0 +1,17 @@
+POST /upload HTTP/1.1
+Host: www.example.com
+User-Agent: python-requests/2.31.0
+Transfer-Encoding: chunked
+Content-Type: text/plain
+Connection: keep-alive
+
+4
+Wiki
+5
+pedia
+e
+ in
+
+chunks.
+0
+

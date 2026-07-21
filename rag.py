@@ -36,24 +36,26 @@ def _default_cache_dir() -> Path:
     return Path(".cache") / "rag"
 
 
-def _cache_key_for_file(
+def _cache_key_for_files(
     *,
-    rfc_path: str,
+    rfc_paths: list[str],
     chunk_size: int,
     chunk_overlap: int,
     embeddings: OpenAIEmbeddings,
 ) -> str:
-    # Cache must be invalidated when the file content or any relevant config changes.
-    # We use a stable JSON payload then hash it to get a filesystem-friendly key.
+    # Cache must be invalidated when any file content or relevant config changes.
     try:
         model_name: Optional[str] = getattr(embeddings, "model", None)
     except Exception:
         model_name = None
 
+    files = [
+        {"abspath": str(Path(p).resolve()), "sha256": _sha256_file(p)}
+        for p in sorted(rfc_paths)
+    ]
     payload: dict[str, object] = {
         "v": _RAG_CACHE_VERSION,
-        "rfc_abspath": str(Path(rfc_path).resolve()),
-        "rfc_sha256": _sha256_file(rfc_path),
+        "files": files,
         "chunk_size": chunk_size,
         "chunk_overlap": chunk_overlap,
         "embeddings": {
@@ -91,10 +93,10 @@ def _save_faiss_cache(vectorstore: FAISS, cache_dir: Path) -> None:
         shutil.move(str(tmp_dir), str(cache_dir))
 
 
-def build_retriever(rfc_path: str):
-    """Build a retriever from the RFC PDF / text file.
+def build_retriever(rfc_paths: list[str]):
+    """Build a retriever from one or more RFC PDF / text files.
 
-    Returns None if setup fails (e.g., missing file or dependencies).
+    Returns None if setup fails (e.g., missing files or dependencies).
     """
     with UI.status("Setting up RAG components...", spinner="dots"):
         try:
@@ -119,9 +121,10 @@ def build_retriever(rfc_path: str):
 
             embeddings = OpenAIEmbeddings(**embedding_kwargs)
 
-            if cache_root is not None and os.path.exists(rfc_path):
-                cache_key = _cache_key_for_file(
-                    rfc_path=rfc_path,
+            all_exist = all(os.path.exists(p) for p in rfc_paths)
+            if cache_root is not None and all_exist:
+                cache_key = _cache_key_for_files(
+                    rfc_paths=rfc_paths,
                     chunk_size=splitter._chunk_size,  # type: ignore[attr-defined]
                     chunk_overlap=splitter._chunk_overlap,  # type: ignore[attr-defined]
                     embeddings=embeddings,
@@ -132,19 +135,34 @@ def build_retriever(rfc_path: str):
                     UI.dim(f"RAG cache hit: {cache_dir}")
                     return cached.as_retriever(search_kwargs={"k": 4})
 
-            # Cache miss -> build index.
-            if rfc_path.endswith(".pdf"):
-                loader = PyPDFLoader(rfc_path)
-            else:
-                loader = TextLoader(rfc_path, encoding="utf-8")
-            docs = loader.load()
-            chunks = splitter.split_documents(docs)
+            # Cache miss -> build index from all RFCs.
+            all_docs = []
+            for rfc_path in rfc_paths:
+                if not os.path.exists(rfc_path):
+                    UI.warn(f"RFC file not found, skipping: {rfc_path}")
+                    continue
+                if rfc_path.endswith(".pdf"):
+                    loader = PyPDFLoader(rfc_path)
+                else:
+                    loader = TextLoader(rfc_path, encoding="utf-8")
+                docs = loader.load()
+                # Tag each document with its source for traceability
+                src = os.path.basename(rfc_path)
+                for d in docs:
+                    d.metadata.setdefault("source", src)
+                all_docs.extend(docs)
+
+            if not all_docs:
+                raise FileNotFoundError(f"None of the specified RFC files could be loaded: {rfc_paths}")
+
+            chunks = splitter.split_documents(all_docs)
+            UI.dim(f"  Loaded {len(all_docs)} docs / {len(chunks)} chunks from {len(rfc_paths)} RFC(s)")
             vectorstore = FAISS.from_documents(chunks, embeddings)
 
-            if cache_root is not None and os.path.exists(rfc_path):
+            if cache_root is not None and all_exist:
                 try:
-                    cache_key = _cache_key_for_file(
-                        rfc_path=rfc_path,
+                    cache_key = _cache_key_for_files(
+                        rfc_paths=rfc_paths,
                         chunk_size=splitter._chunk_size,  # type: ignore[attr-defined]
                         chunk_overlap=splitter._chunk_overlap,  # type: ignore[attr-defined]
                         embeddings=embeddings,

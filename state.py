@@ -10,6 +10,7 @@ class PipelineState(TypedDict):
     constraints: str
     token_usage_total: dict[str, int]
     token_usage_by_step: dict[str, dict[str, int]]
+    current_step_index: int
 
 
 def new_usage_bucket() -> dict[str, int]:
@@ -52,6 +53,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
             "constraints": "",
             "token_usage_total": new_usage_bucket(),
             "token_usage_by_step": {},
+            "current_step_index": 0,
         }
 
     try:
@@ -60,6 +62,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
         if isinstance(data, dict) and "packet_types" in data and "constraints" in data:
             data.setdefault("token_usage_total", new_usage_bucket())
             data.setdefault("token_usage_by_step", {})
+            data.setdefault("current_step_index", 0)
             return data # type: ignore
     except Exception as e:
         UI.warn(
@@ -71,6 +74,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
         "constraints": "",
         "token_usage_total": new_usage_bucket(),
         "token_usage_by_step": {},
+        "current_step_index": 0,
     }
 
 

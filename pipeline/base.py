@@ -13,7 +13,7 @@ from state import (
 from agent import build_agent_graph
 from config import (
     get_protocol_name,
-    get_rfc_path,
+    get_rfc_paths,
     get_seed_dir,
     warn_if_rfc_missing,
 )
@@ -39,15 +39,15 @@ class BasePipeline:
         self,
     ):
         protocol_name = get_protocol_name()
-        rfc_path = get_rfc_path()
+        rfc_paths = get_rfc_paths()
         seed_dir = get_seed_dir()
 
         self.protocol_name = protocol_name
         self.protocol_lower = protocol_name.lower()
         self.protocol_upper = protocol_name.upper()
 
-        warn_if_rfc_missing(rfc_path)
-        retriever = build_retriever(rfc_path)
+        warn_if_rfc_missing(rfc_paths)
+        retriever = build_retriever(rfc_paths)
 
         agent_graph = build_agent_graph(retriever=retriever)
 
@@ -74,6 +74,7 @@ class BasePipeline:
                     "constraints": "",
                     "token_usage_total": new_usage_bucket(),
                     "token_usage_by_step": {},
+                    "current_step_index": 0,
                 }
         else:
             state = {
@@ -81,6 +82,7 @@ class BasePipeline:
                 "constraints": "",
                 "token_usage_total": new_usage_bucket(),
                 "token_usage_by_step": {},
+                "current_step_index": 0,
             }
 
         self.seed_dir = os.path.abspath(seed_dir)
@@ -92,8 +94,10 @@ class BasePipeline:
 
 
     def __call__(self):
-        i = 0
+        i = self.state.get("current_step_index", 0)
         steps = self.steps()
+        if i > 0:
+            UI.warning_rule(f"Resuming from step {i + 1}: {steps[i][0]}")
         while i < len(steps):
             step_title, step_fn = steps[i]
             action, extra_prompt = ask_before_step(step_title, has_previous=i > 0)
@@ -107,12 +111,18 @@ class BasePipeline:
                 else:
                     UI.warning_rule(f"Going back to previous step: {steps[i-1][0]}")
                     i -= 1
+                    self.state["current_step_index"] = i
+                    self.save_state()
                 continue
             if action == "skip":
                 UI.warning_rule(f"Skipping: {step_title}")
                 i += 1
+                self.state["current_step_index"] = i
+                self.save_state()
                 continue
 
+            self.state["current_step_index"] = i
+            self.save_state()
             self._extra_prompt = extra_prompt
             step_fn()
             i += 1

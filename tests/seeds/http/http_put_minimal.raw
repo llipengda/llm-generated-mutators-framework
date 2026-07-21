@@ -1,0 +1,6 @@
+PUT /data/file.txt HTTP/1.1
+Host: www.example.com
+Content-Type: text/plain
+Content-Length: 12
+
+Hello World!
