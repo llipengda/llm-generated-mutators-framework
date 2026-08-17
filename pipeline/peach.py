@@ -63,126 +63,105 @@ class PeachPipeline(BasePipeline):
             )
 
         step2_prompt = f"""
-        Using the packet types we just identified ({packet_types}), generate a Peach Pit file defining the precise structure of each packet for {self.protocol_name}. 
-        **Model the structure as detail as possible**.
+        Generate one complete Peach Pit file that precisely models every requested
+        {self.protocol_name} packet type: {packet_types}.
 
-        Reference structure (Shot 1):
-        ```xml
-        <?xml version="1.0" encoding="utf-8"?>
-        <Peach xmlns="http://peachfuzzer.com/2012/Peach" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://peachfuzzer.com/2012/Peach /peach/peach.xsd">
-        <Defaults>
-            <Number signed="false" endian="big"/>
-        </Defaults>
+        Before generating anything, use "Read_File" to read BOTH:
+        - "./prompts/peach_datamodel_example.xml" for the required document shape,
+          decomposition, and naming style. It is a structural example, not a
+          complete MQTT model; never copy its protocol facts and never omit a
+          requested packet merely because the example omits it.
+        - "./peach/peach.txt" for the supported Peach XML elements and their syntax.
 
-        <!-- MQTT UTF-8 String: 2-byte length prefix (big endian) + UTF-8 string -->
-        <DataModel name="MQTT_String">
-            <Number name="length" size="16">
-                <Relation type="size" of="value"/>
-            </Number>
-            <String name="value" type="utf8"/>
-        </DataModel>
+        Use "RFC_Search" separately for EACH requested packet type. Confirm its
+        discriminator, fixed fields, field order, bit widths/endianness, length
+        encoding, optional-field conditions, repeated-field termination/count,
+        and payload structure. Do not rely on prior protocol knowledge when the
+        RFC can answer the question.
 
-        <!-- Fixed Header: message_type (4 bits) + flags (4 bits) + remaining_length (MqttVarInt) -->
-        <DataModel name="mqtt_fixed_header_t">
-            <Number name="message_type" size="4"/>
-            <Number name="flags" size="4"/>
-            <MqttVarInt name="remaining_length">
-                <Relation type="size" of="msg_body"/>
-            </MqttVarInt>
-        </DataModel>
+        The output MUST follow all of these format and naming requirements:
 
-        <!-- Connect Variable Header (MQTT 5.0) -->
-        <DataModel name="mqtt_connect_variable_header_t">
-            <Block name="protocol_name" ref="MQTT_String"/>
-            <Number name="protocol_level" size="8"/>
-            <Number name="connect_flags" size="8"/>
-            <Number name="keep_alive" size="16"/>
-            <MqttVarInt name="property_length">
-                <Relation type="size" of="properties"/>
-            </MqttVarInt>
-            <Blob name="properties"/>
-        </DataModel>
+        1. Document envelope
+           - Emit exactly one XML document with the XML declaration, one <Peach>
+             root using the namespaces shown in the reference, one <Defaults>,
+             and then all <DataModel> definitions.
+           - Keep definitions in dependency order: reusable protocol primitives,
+             shared headers, packet-specific components, packet models, union,
+             then packet array. Every ref must resolve to a definition in the
+             same file; no forward placeholder or "similar structures" omission.
 
-        <!-- Connect Payload (MQTT 5.0) -->
-        <DataModel name="mqtt_connect_payload_t">
-            <Block name="client_id" ref="MQTT_String"/>
-            <!-- Will Properties (optional, if Will Flag is set) -->
-            <Optional name="will_optional" src="variable_header.connect_flags" expression="(value & 0x04) != 0">
-                <MqttVarInt name="will_property_length">
-                    <Relation type="size" of="will_properties"/>
-                </MqttVarInt>
-                <Blob name="will_properties"/>
-                <!-- Will Topic (optional, if Will Flag is set) -->
-                <Block name="will_topic" ref="MQTT_String"/>
-                <!-- Will Payload (optional, if Will Flag is set) -->
-                <Number name="will_payload_length" size="16">
-                    <Relation type="size" of="will_payload"/>
-                </Number>
-                <Blob name="will_payload"/>
-            </Optional>
-            <!-- User Name (optional, if Username Flag is set) -->
-            <Optional name="username_optional" src="variable_header.connect_flags" expression="(value & 0x80) != 0">
-                <Block name="user_name" ref="MQTT_String"/>
-            </Optional>
-            <!-- Password (optional, if Password Flag is set) -->
-            <Optional name="password_optional" src="variable_header.connect_flags" expression="(value &amp; 0x40) != 0">
-                <Number name="password_length" size="16">
-                    <Relation type="size" of="password"/>
-                </Number>
-                <Blob name="password"/>
-            </Optional>
-        </DataModel>
+        2. Identifier spelling
+           - Let `<proto>` mean `{self.protocol_lower}`. All generated DataElement
+             names and ordinary DataModel names must use ASCII lower_snake_case.
+             Normalize packet types to lower_snake_case; do not preserve spaces,
+             hyphens, mixed case, or RFC display capitalization in identifiers.
+           - Name packet models `<proto>_<packet_type>_packet_t`.
+           - Name packet-specific component models
+             `<proto>_<packet_type>_<component>_t`, for example
+             `<proto>_connect_variable_header_t` and
+             `<proto>_connect_payload_t`.
+           - Name shared structural models `<proto>_<purpose>_t`, for example
+             `<proto>_fixed_header_t`.
+           - A reusable protocol primitive may use
+             `<PROTOCOL_UPPER>_<DescriptiveType>` as in `MQTT_String`; use this
+             exception consistently and only for actual reusable primitives.
+           - Use semantic lower_snake_case field names from the RFC. Use the
+             suffix `_length` for a length field, `_count` for a count field,
+             and `_optional` for an <Optional> wrapper. Do not use generic names
+             such as field1, data1, block1, or reserved padding unless that is
+             truly the wire field's meaning.
 
-        <!-- Connect Packet -->
-        <DataModel name="mqtt_connect_packet_t">
-            <Block name="fixed_header" ref="mqtt_fixed_header_t">
-                <Number name="message_type" size="4" value="1" token="true"/>
-                <Number name="flags" size="4" value="0" token="true"/>
-            </Block>
-            <Block name="msg_body">
-                <Block name="variable_header" ref="mqtt_connect_variable_header_t"/>
-                <Block name="payload" ref="mqtt_connect_payload_t"/>
-            </Block>
-        </DataModel>
+        3. Packet decomposition
+           - When the protocol has a common header, define it once and reference
+             it from every packet as `<Block name="fixed_header" ...>`.
+           - Specialize discriminator and other packet-constant header fields
+             inside that referencing Block with exact `value` and `token="true"`.
+           - Put all bytes covered by a body/remaining-length field inside one
+             `<Block name="msg_body">`. Inside it, use
+             `<Block name="variable_header" ...>` and
+             `<Block name="payload" ...>` when those concepts exist. Preserve
+             exact wire order at every nesting level.
+           - Model every meaningful field explicitly. A catch-all <Blob> is only
+             allowed for RFC-defined opaque bytes or a payload whose internal
+             format the RFC genuinely does not define. It must not replace known
+             headers, properties, entries, flags, or length/count fields.
 
-        <!-- Similar structures would be defined for other packet types (PUBLISH, SUBSCRIBE, etc.) -->
+        4. Sizes, conditions, and repetitions
+           - Put `<Relation type="size" of="target"/>` inside the field that
+             encodes target's byte length. `of` must name the exact sibling or
+             otherwise valid Peach-relative target and the target must exist.
+           - Use the protocol's real length encoding (Number, MqttVarInt, etc.);
+             do not force all lengths to 16-bit Numbers.
+           - Use <Optional> with an exact `src` path and XML-escaped `expression`
+             for conditionally present fields. In XML attributes write bitwise
+             AND as `&amp;`. Use `<Block minOccurs="0" maxOccurs="1">` only when
+             optionality has no representable controlling condition.
+           - Represent repeated wire items with a named plural container and a
+             named singular item. Set minOccurs/maxOccurs or a count/size Relation
+             according to the RFC; do not flatten multiple items into one Blob.
+           - Set Number size, signedness, and endian exactly. Defaults may supply
+             common values, but override them wherever the protocol differs.
 
-        <!-- Union of all packet types -->
-        <DataModel name="mqtt_packet_t">
-            <Choice name="packet_union">
-                <Block name="connect" ref="mqtt_connect_packet_t"/>
-                <Block name="subscribe" ref="mqtt_subscribe_packet_t"/>
-                <Block name="publish" ref="mqtt_publish_packet_t"/>
-                <Block name="unsubscribe" ref="mqtt_unsubscribe_packet_t"/>
-                <Block name="auth" ref="mqtt_auth_packet_t"/>
-                <Block name="puback" ref="mqtt_puback_packet_t"/>
-                <Block name="pubrec" ref="mqtt_pubrec_packet_t"/>
-                <Block name="pubrel" ref="mqtt_pubrel_packet_t"/>
-                <Block name="pubcomp" ref="mqtt_pubcomp_packet_t"/>
-                <Block name="pingreq" ref="mqtt_pingreq_packet_t"/>
-                <Block name="disconnect" ref="mqtt_disconnect_packet_t"/>
-            </Choice>
-        </DataModel>
+        5. Required top-level models
+           - Define `<DataModel name="{self.protocol_lower}_packet_t">` containing
+             exactly one `<Choice name="packet_union">`. Add one branch per
+             requested packet type, named with the normalized packet type and
+             referencing its `<proto>_<packet_type>_packet_t` model.
+           - Define the final `<DataModel name="{self.protocol_lower}_packet_array">`
+             with `<Block name="packets" minOccurs="1" maxOccurs="100">` and an
+             inner `<Block ref="{self.protocol_lower}_packet_t"/>`, matching the
+             reference exactly.
 
-        <!-- Array of packets for fuzzing -->
-        <!-- mqtt_packet_t[] - Array of MQTT packets -->
-        <DataModel name="mqtt_packet_array">
-            <Block name="packets" minOccurs="1" maxOccurs="100">
-                <Block ref="mqtt_packet_t"/>
-            </Block>
-        </DataModel>
-        </Peach>
-        ```
+        6. Completeness check before writing
+           - Verify that every requested packet type has one packet DataModel and
+             one packet_union branch, every ref/relation/src target resolves, all
+             identifiers obey the naming scheme, XML special characters are
+             escaped, and the XML is well formed.
+           - Do not output prose, Markdown fences, TODOs, ellipses, or placeholder
+             definitions in the file.
 
-        Hint: 
-        1. Usage of size `Relation`: Put a relation with type "size" on the length field. Set the "of" attribute to point to the field whose size it defines. 
-        2. Use `Optional` to model optional fields with constraint, with the "src" attribute pointing to the flags field and an "expression" that checks the relevant bit(s) in the flags.
-        3. Use `Block` with `minOccurs=0` and `maxOccurs=1` to model optional fields without constraints.
-        
-
-        Use the tool "Read_File" to read the usage of each XML element in "./peach/peach.txt" to understand how to define the structure for each packet type.
-        Use the tool "RFC_Search" to look up the specific fields for EACH packet type in the RFC.
-        Use the tool "Write_File" to save the generated Peach Pit file to "./llm/peach/{self.protocol_lower}/datamodel.xml".
+        Use "Write_File" to save only the finished XML to
+        "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
 
         self.call_agent(step2_prompt, "Step 2: Datamodel Generation")
