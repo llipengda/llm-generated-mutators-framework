@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Peach xmlns="http://peachfuzzer.com/2012/Peach"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://peachfuzzer.com/2012/Peach /peach/peach.xsd">
+  <Defaults>
+    <Number signed="false" endian="big"/>
+  </Defaults>
+
+  <!-- Protocol primitive: 2-byte length prefix followed by a UTF-8 string. -->
+  <DataModel name="MQTT_String">
+    <Number name="length" size="16">
+      <Relation type="size" of="value"/>
+    </Number>
+    <String name="value" type="utf8"/>
+  </DataModel>
+
+  <!-- Shared fixed header. -->
+  <DataModel name="mqtt_fixed_header_t">
+    <Number name="message_type" size="4"/>
+    <Number name="flags" size="4"/>
+    <MqttVarInt name="remaining_length">
+      <Relation type="size" of="msg_body"/>
+    </MqttVarInt>
+  </DataModel>
+
+  <DataModel name="mqtt_connect_variable_header_t">
+    <Block name="protocol_name" ref="MQTT_String"/>
+    <Number name="protocol_level" size="8"/>
+    <Number name="connect_flags" size="8"/>
+    <Number name="keep_alive" size="16"/>
+    <MqttVarInt name="property_length">
+      <Relation type="size" of="properties"/>
+    </MqttVarInt>
+    <Blob name="properties"/>
+  </DataModel>
+
+  <DataModel name="mqtt_connect_payload_t">
+    <Block name="client_id" ref="MQTT_String"/>
+    <Optional name="will_optional"
+              src="variable_header.connect_flags"
+              expression="(value &amp; 0x04) != 0">
+      <MqttVarInt name="will_property_length">
+        <Relation type="size" of="will_properties"/>
+      </MqttVarInt>
+      <Blob name="will_properties"/>
+      <Block name="will_topic" ref="MQTT_String"/>
+      <Number name="will_payload_length" size="16">
+        <Relation type="size" of="will_payload"/>
+      </Number>
+      <Blob name="will_payload"/>
+    </Optional>
+    <Optional name="username_optional"
+              src="variable_header.connect_flags"
+              expression="(value &amp; 0x80) != 0">
+      <Block name="user_name" ref="MQTT_String"/>
+    </Optional>
+    <Optional name="password_optional"
+              src="variable_header.connect_flags"
+              expression="(value &amp; 0x40) != 0">
+      <Number name="password_length" size="16">
+        <Relation type="size" of="password"/>
+      </Number>
+      <Blob name="password"/>
+    </Optional>
+  </DataModel>
+
+  <!-- Packet model: specialize shared header tokens, then model the body. -->
+  <DataModel name="mqtt_connect_packet_t">
+    <Block name="fixed_header" ref="mqtt_fixed_header_t">
+      <Number name="message_type" size="4" value="1" token="true"/>
+      <Number name="flags" size="4" value="0" token="true"/>
+    </Block>
+    <Block name="msg_body">
+      <Block name="variable_header" ref="mqtt_connect_variable_header_t"/>
+      <Block name="payload" ref="mqtt_connect_payload_t"/>
+    </Block>
+  </DataModel>
+
+  <!-- The production output must add one branch for every requested packet type. -->
+  <DataModel name="mqtt_packet_t">
+    <Choice name="packet_union">
+      <Block name="connect" ref="mqtt_connect_packet_t"/>
+    </Choice>
+  </DataModel>
+
+  <DataModel name="mqtt_packet_array">
+    <Block name="packets" minOccurs="1" maxOccurs="100">
+      <Block ref="mqtt_packet_t"/>
+    </Block>
+  </DataModel>
+</Peach>
