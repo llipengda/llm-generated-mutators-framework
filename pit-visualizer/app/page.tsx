@@ -460,11 +460,13 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
   const mergedIsRelationTarget = mergedAncestors.some((ancestor) => activeRelation?.targetKey === ancestor.renderKey);
   const isDiagnosed = matchesDiagnosticLocation(field, diagnosticLocations) || mergedAncestors.some((ancestor) => matchesDiagnosticLocation(ancestor.field, diagnosticLocations));
   const containsDiagnosis = diagnosticLocations.length > 0 && containsDiagnosticLocation(field, byName, diagnosticLocations, stack);
-  if (isGroup && visibleNested.length === 1 && !relationElement) {
+  // Keep every container visible while diagnosing so off-path containers can
+  // be collapsed, including shallow and single-child blocks normally flattened.
+  if (isGroup && visibleNested.length === 1 && !relationElement && diagnosticLocations.length === 0) {
     const [{ child, index }] = visibleNested;
     return <InlineField field={child} byName={byName} stack={nextStack} onSelect={onSelect} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} renderKey={`${nestedContainerKey}/${index}`} depth={depth} mergedAncestors={[...mergedAncestors, { field, renderKey }]} />;
   }
-  const canCollapse = isGroup && depth >= 2;
+  const canCollapse = isGroup && (depth >= 2 || diagnosticLocations.length > 0);
   const collapsed = canCollapse && (diagnosticLocations.length > 0 ? !containsDiagnosis : !expandedFields.has(renderKey));
   const activateRelation = (button: HTMLElement) => {
     if (!relationElement || !relationTargetName) return;
@@ -723,13 +725,11 @@ function ProtocolTree({ entry, byName, selectedPath, selectedNodeId, onSelect, o
 
 function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisReport; fileNames: string[]; onClear: () => void }) {
   const rootCause = report.llm_judgment?.root_cause;
-  const locationCount = rootCause?.xml_locations.length ?? 0;
   return (
     <section className="diagnosis-panel" aria-live="polite">
       <div className="diagnosis-head">
         <div className="diagnosis-title-icon"><Stethoscope size={18} /></div>
-        <div><span>DATAMODEL DIAGNOSER</span><h2>测试结果诊断</h2></div>
-        <div className="diagnosis-stats"><strong>{report.logs_analyzed}</strong><span>份日志</span><strong>1</strong><span>最可能根因</span><strong>{locationCount}</strong><span>处定位</span></div>
+        <div><h2>测试结果诊断</h2></div>
         <button className="diagnosis-clear" onClick={onClear}>清除诊断</button>
       </div>
         <div className="diagnosis-files">诊断文件：{fileNames.join("、")}</div>
@@ -737,8 +737,8 @@ function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisRepor
         <div className="diagnosis-empty"><CheckCircle2 size={20} /><div><strong>诊断结果中没有单一根因</strong><span>请重新生成并上传有效的诊断 JSON。</span></div></div>
       ) : (
         <div className="diagnosis-grid">
-          <article className="diagnosis-card severity-error">
-            <div className="diagnosis-card-top"><span className="diagnosis-severity">最可能根因</span><code>{rootCause.category}</code><strong>{Math.round(rootCause.confidence * 100)}%</strong></div>
+          <article className="diagnosis-card">
+            <div className="diagnosis-card-top"><code>{rootCause.category}</code></div>
             <h3>{rootCause.title}</h3>
             <p className="diagnosis-reasoning">{rootCause.reasoning}</p>
             <div className="diagnosis-seed">测试：{rootCause.affected_seeds.join("、") || "未指定"}</div>

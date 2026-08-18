@@ -2219,45 +2219,15 @@ select:focus-visible {
   border-radius: 2px;
 }
 
-.diagnosis-head>div:nth-child(2)>span {
-  color: #8f2626;
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: .12em;
-}
-
 .diagnosis-head h2 {
-  margin: 2px 0 0;
+  margin: 0;
   color: #202d38;
   font-size: 17px;
 }
 
-.diagnosis-stats {
-  display: grid;
-  grid-template-columns: repeat(3, auto auto);
-  align-items: baseline;
-  gap: 0 5px;
-  margin-left: auto;
-  padding: 7px 12px;
-  background: #fff;
-  border: 1px solid #d6dee4;
-}
-
-.diagnosis-stats strong {
-  color: #a51e1e;
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 15px;
-}
-
-.diagnosis-stats span {
-  margin-right: 8px;
-  color: #71808c;
-  font-size: 9px;
-}
-
 .diagnosis-clear {
   height: 30px;
+  margin-left: auto;
   padding: 0 9px;
   color: #52616c;
   background: #fff;
@@ -2279,22 +2249,11 @@ select:focus-visible {
 }
 
 .diagnosis-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 12px;
+  padding: 16px;
 }
 
 .diagnosis-card {
   min-width: 0;
-  padding: 12px;
-  background: #fff;
-  border: 1px solid #d8e0e6;
-  border-left: 4px solid #c92d2d;
-}
-
-.diagnosis-card.severity-warning {
-  border-left-color: #d28a1c;
 }
 
 .diagnosis-card-top {
@@ -2303,44 +2262,25 @@ select:focus-visible {
   gap: 7px;
 }
 
-.diagnosis-severity {
-  padding: 3px 6px;
-  color: #fff;
-  background: #b42323;
-  font-size: 8px;
-  font-weight: 800;
-}
-
-.severity-warning .diagnosis-severity {
-  background: #b9740c;
-}
-
 .diagnosis-card-top code {
   overflow: hidden;
   color: #667784;
   text-overflow: ellipsis;
-  font-size: 9px;
+  font-size: 11px;
   white-space: nowrap;
-}
-
-.diagnosis-card-top strong {
-  margin-left: auto;
-  color: #9a2626;
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 10px;
 }
 
 .diagnosis-card h3 {
   margin: 10px 0 6px;
   color: #26343f;
-  font-size: 12px;
+  font-size: 16px;
   line-height: 1.5;
 }
 
 .diagnosis-reasoning {
   margin: 0 0 9px;
   color: #536571;
-  font-size: 10px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -2348,7 +2288,7 @@ select:focus-visible {
 .diagnosis-log-lines {
   color: #7a8791;
   font-family: var(--font-geist-mono), monospace;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .diagnosis-locations {
@@ -2367,14 +2307,14 @@ select:focus-visible {
   background: #fff0f0;
   border: 1px solid #eccaca;
   font-family: var(--font-geist-mono), monospace;
-  font-size: 8px;
+  font-size: 10px;
 }
 
 .diagnosis-card ul {
   margin: 9px 0;
   padding-left: 18px;
   color: #586a77;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -2388,7 +2328,7 @@ select:focus-visible {
   color: #536571;
   background: #f7f9fa;
   border-left: 2px solid #b42323;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.5;
 }
 
@@ -2399,7 +2339,7 @@ select:focus-visible {
 .diagnosis-fix strong,
 .diagnosis-verification strong {
   color: #26343f;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .diagnosis-empty {
@@ -2452,18 +2392,9 @@ select:focus-visible {
     flex-wrap: wrap;
   }
 
-  .diagnosis-stats {
-    width: 100%;
-    margin-left: 0;
-  }
-
   .diagnosis-clear {
     position: absolute;
     right: 18px;
-  }
-
-  .diagnosis-grid {
-    grid-template-columns: 1fr;
   }
 
   .protocol-workspace {
