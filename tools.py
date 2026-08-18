@@ -188,6 +188,6 @@ tools = {
         write_file,
         search_class,
         build_dotnet_dll,
-        validate_data
+        # validate_data
     ]
 }

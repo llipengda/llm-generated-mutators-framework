@@ -32,7 +32,7 @@ def build_config_from_args(
 
 
 def load_env() -> None:
-    dotenv.load_dotenv(".env")
+    dotenv.load_dotenv(".env", override=True, verbose=True)
 
 
 def get_protocol_name() -> str:
