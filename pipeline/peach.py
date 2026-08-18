@@ -1,10 +1,18 @@
+import json
 import os
+from pathlib import Path
 from typing import override
 
 from agent import AgentConfig, build_agent_graph
 from config import get_fixer_enabled
 from pipeline.base import BasePipeline
-from ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
+from ui import (
+    UI,
+    ask_regenerate,
+    ask_reuse_diagnosis,
+    ask_select_types,
+    ask_skip_verification,
+)
 
 
 def _env_float(key: str, default: float) -> float:
@@ -28,6 +36,40 @@ class PeachPipeline(BasePipeline):
         )
         self.agent_graph = build_agent_graph(
             retriever=self.retriever, target="peach", config=self.agent_config
+        )
+        diagnosis_config = AgentConfig(
+            temperature=0.0,
+            model=os.environ.get("LLM_DIAGNOSER_MODEL") or peach_model,
+            system_prompt=(
+                "You are an expert in binary protocol parsing and Peach Pit "
+                "DataModels. Diagnose failures directly from files by using "
+                "Read_File, and use RFC_Search when protocol semantics need "
+                "confirmation. Write only the completed diagnosis report to "
+                "the explicitly requested path with Write_File; never modify "
+                "the DataModel, logs, or any other file."
+            ),
+        )
+        self.diagnosis_agent_graph = build_agent_graph(
+            retriever=self.retriever,
+            target="peach",
+            config=diagnosis_config,
+            tool_names={"Read_File", "RFC_Search", "Write_File"},
+        )
+        autofix_config = AgentConfig(
+            temperature=self.agent_config.temperature,
+            model=peach_model,
+            system_prompt=(
+                "You repair Peach Pit DataModels strictly from a completed "
+                "diagnosis report. Read only that report and the current "
+                "DataModel, then write only the repaired DataModel. Do not "
+                "inspect validator output, failure logs, or RFC sources."
+            ),
+        )
+        self.datamodel_autofix_agent_graph = build_agent_graph(
+            retriever=self.retriever,
+            target="peach",
+            config=autofix_config,
+            tool_names={"Read_File", "Write_File"},
         )
 
     def step_1_packet_types_extraction(self):
@@ -189,37 +231,247 @@ class PeachPipeline(BasePipeline):
             "Verification script did not complete as expected.\n" + result.stdout,
         )
 
+    def diagnose_datamodel_failure(self, test_output: str) -> str:
+        """Diagnose through the pipeline agent using Read_File tool calls."""
+        output_dir = Path("./llm/peach") / self.protocol_lower
+        datamodel_path = output_dir / "datamodel.xml"
+        log_dir = output_dir / "dm_test_logs"
+        report_path = output_dir / "datamodel_diagnosis.json"
+        report: dict[str, object] = {
+            "diagnosis_mode": "llm",
+            "datamodel": str(datamodel_path),
+            "logs_analyzed": 0,
+            "log_files": [],
+            "cross_log_summary": [],
+            "reports": [],
+            "static_diagnostics": [],
+        }
+
+        try:
+            prompt = f"""
+        Diagnose the failed {self.protocol_name} Peach DataModel directly from
+        its source files. Do not use heuristic rules or prior diagnosis.
+
+        The validator summary was:
+        ```
+        {test_output}
+        ```
+
+        You MUST perform these tool calls before answering:
+        1. Call "Read_File" for "{datamodel_path}".
+        2. Call "Read_File" for "{log_dir}" to obtain the directory listing.
+        3. Call "Read_File" separately for EVERY .log file in that listing.
+
+        Analyze the raw file contents yourself. Respect log ordering, distinguish
+        root causes from cascading Choice-branch symptoms, and do not invent
+        protocol facts. After reading all files, use "RFC_Search" as needed to
+        confirm packet layout, field semantics, constraints, byte order, length
+        encoding, optionality, or repetition rules. Ask focused RFC questions
+        instead of relying on prior knowledge, and distinguish RFC-backed facts
+        from conclusions supported only by logs. This is diagnosis only: never
+        modify the DataModel or logs.
+
+        Build one JSON report with this shape:
+        {{
+          "diagnosis_mode": "llm",
+          "datamodel": "{datamodel_path}",
+          "logs_analyzed": 1,
+          "log_files": ["path/to/failure.log"],
+          "cross_log_summary": [],
+          "reports": [],
+          "static_diagnostics": [],
+          "llm_judgment": {{
+            "status": "ok",
+            "model": "{os.environ.get('LLM_DIAGNOSER_MODEL') or self.agent_config.model}",
+            "analysis": {{
+              "summary": "short Chinese conclusion",
+              "root_causes": [{{
+                "id": "RC1",
+                "title": "concise Chinese title",
+                "classification": "root_cause | contributing_factor | symptom | uncertain",
+                "category": "reference | endianness | layout | choice | cardinality | boundary | other",
+                "confidence": 0.0,
+                "affected_seeds": ["seed.raw"],
+                "xml_locations": [{{
+                  "line": 1,
+                  "tag": "Number",
+                  "name": "field_name",
+                  "model": "packet_model",
+                  "attributes": {{}}
+                }}],
+                "reasoning": "why this is causal",
+                "evidence": ["raw file evidence"],
+                "suggested_fix": "focused candidate change or null",
+                "verification": "focused re-test"
+              }}],
+              "causal_relationships": [],
+              "priority_order": ["RC1"],
+              "uncertainties": []
+            }}
+          }}
+        }}
+
+        After the diagnosis is complete, you MUST call "Write_File" exactly
+        once with filepath "{report_path}" and the complete JSON report as its
+        content. Do not write any other file. After that tool succeeds, return
+        only the same JSON object without Markdown fences.
+        """
+            response = self.call_agent(
+                prompt,
+                "Step 3: Datamodel Failure Diagnosis",
+                agent_graph=self.diagnosis_agent_graph,
+            )
+            read_calls: dict[str, tuple[str, str | None]] = {}
+            write_calls: list[tuple[str, str, str]] = []
+            tool_outputs: dict[str, str] = {}
+            for message in response["messages"]:
+                for call in getattr(message, "tool_calls", []) or []:
+                    args = call.get("args", {})
+                    if not isinstance(args, dict):
+                        continue
+                    filepath = args.get("filepath")
+                    if call.get("name") == "Read_File" and isinstance(filepath, str):
+                        read_calls[os.path.normpath(filepath)] = (
+                            str(call.get("id", "")),
+                            filepath,
+                        )
+                    if (
+                        call.get("name") == "Write_File"
+                        and isinstance(filepath, str)
+                        and isinstance(args.get("content"), str)
+                    ):
+                        write_calls.append(
+                            (
+                                os.path.normpath(filepath),
+                                args["content"],
+                                str(call.get("id", "")),
+                            )
+                        )
+                tool_call_id = getattr(message, "tool_call_id", None)
+                if isinstance(tool_call_id, str):
+                    tool_outputs[tool_call_id] = str(message.content)
+
+            normalized_datamodel = os.path.normpath(str(datamodel_path))
+            normalized_log_dir = os.path.normpath(str(log_dir))
+            if normalized_datamodel not in read_calls or normalized_log_dir not in read_calls:
+                raise RuntimeError(
+                    "Diagnosis agent did not read the datamodel and log directory"
+                )
+            listing_call_id = read_calls[normalized_log_dir][0]
+            listing = tool_outputs.get(listing_call_id, "")
+            expected_logs = {
+                os.path.normpath(str(log_dir / name.strip()))
+                for name in listing.splitlines()[1:]
+                if name.strip().endswith(".log")
+            }
+            missing_logs = expected_logs.difference(read_calls)
+            if missing_logs:
+                raise RuntimeError(
+                    "Diagnosis agent did not read every failure log: "
+                    + ", ".join(sorted(missing_logs))
+                )
+            normalized_report_path = os.path.normpath(str(report_path))
+            if len(write_calls) != 1 or write_calls[0][0] != normalized_report_path:
+                raise RuntimeError(
+                    "Diagnosis agent must write exactly one diagnosis report "
+                    f"to {report_path}"
+                )
+            write_output = tool_outputs.get(write_calls[0][2], "")
+            if not write_output.startswith("SUCCESS:"):
+                raise RuntimeError(
+                    f"Diagnosis report write did not succeed: {write_output}"
+                )
+            stripped = write_calls[0][1].strip()
+            if stripped.startswith("```"):
+                stripped = stripped.removeprefix("```json").removeprefix("```")
+                stripped = stripped.removesuffix("```").strip()
+            written_report = json.loads(stripped)
+            judgment = (
+                written_report.get("llm_judgment", {})
+                if isinstance(written_report, dict)
+                else {}
+            )
+            analysis = judgment.get("analysis", {}) if isinstance(judgment, dict) else {}
+            if not isinstance(analysis, dict) or not isinstance(
+                analysis.get("root_causes"), list
+            ):
+                raise RuntimeError("Diagnosis agent wrote an invalid JSON schema")
+            report = written_report
+        except Exception as error:
+            UI.warn(f"Datamodel LLM diagnosis failed: {error}")
+            report["llm_judgment"] = {
+                "status": "error",
+                "model": (
+                    os.environ.get("LLM_DIAGNOSER_MODEL")
+                    or self.agent_config.model
+                ),
+                "error": str(error),
+            }
+
+        diagnosis = json.dumps(report, indent=2, ensure_ascii=False)
+        judgment = report.get("llm_judgment", {})
+        if isinstance(judgment, dict) and judgment.get("status") == "ok":
+            UI.success(f"Datamodel diagnosis saved to {report_path} by the agent.")
+        UI.panel(
+            diagnosis,
+            title="Datamodel LLM Diagnosis",
+            border_style="cyan",
+            expand=True,
+        )
+        return diagnosis
+
     def step_3_datamodel_validation_and_fix(self):
         UI.title("Step 3: Datamodel Validation & Fix")
 
         def fix_fn(test_output: str, hint: str | None) -> None:
-            prompt = f"""
-        We ran a verification test against the generated datamodel, which used the Peach Pit file to parse packets and check if the fields were correctly extracted.
-        The test failed, indicating there are issues with the datamodel.
-        Here is the test output:
+            diagnosis_path = (
+                Path("./llm/peach")
+                / self.protocol_lower
+                / "datamodel_diagnosis.json"
+            )
+            reuse_diagnosis = diagnosis_path.exists() and ask_reuse_diagnosis(
+                self.protocol_lower
+            )
+            if reuse_diagnosis:
+                UI.success(f"Reusing existing diagnosis from {diagnosis_path}.")
+            else:
+                UI.warning_rule("Step 3: Diagnosing Datamodel Failure")
+                self.diagnose_datamodel_failure(test_output)
 
-        ```
-        {test_output}
-        ```
-        The test logs were written to "./llm/peach/{self.protocol_lower}/dm_test_logs/<test_file_with_extension>.log". You can read these logs to get more details on what went wrong.
+            UI.warning_rule("Step 3: Applying Datamodel Auto-fix")
+            prompt = f"""
+        Repair the current {self.protocol_name} Peach DataModel using only the
+        completed diagnosis report and the current DataModel.
+
+        **FIRST ACTION**: Use "Read_File" to read
+        "./llm/peach/{self.protocol_lower}/datamodel_diagnosis.json".
+        Treat its `llm_judgment.analysis.priority_order` and ranked root causes
+        as the complete repair plan. Address the highest-priority confirmed root
+        cause first.
 
         You need to:
-        1. Read EACH test log file in "./llm/peach/{self.protocol_lower}/dm_test_logs/" to identify the specific issues with the datamodel. Look for parsing errors, mismatched fields, or any indications of what part of the datamodel is incorrect.
-        2. For each identified issue, output a clear explanation of what the problem is and which part of the datamodel it relates to.
-        3. Modify the Peach Pit file to fix the identified issues.
+        1. Read and prioritize the diagnosis report.
+        2. Use "Read_File" to read only the current DataModel at
+           "./llm/peach/{self.protocol_lower}/datamodel.xml".
+        3. Apply the diagnosed fixes without performing another diagnosis.
+        4. Use "Write_File" to save the repaired DataModel to that same path.
+
+        Do NOT read validator output, failure logs, seed files, or any other
+        source. Do NOT call RFC_Search. The diagnosis report is the sole source
+        of failure evidence for this repair.
 
         **CRITICAL**: Simplifying the DataModel is NOT allowed.
-
-        Use the "Read_File" tool to read the current datamodel from "./llm/peach/{self.protocol_lower}/datamodel.xml" and the test logs from "./llm/peach/{self.protocol_lower}/dm_test_logs/".
-        Use the "RFC_Search" tool to look up any specific protocol details needed to fix the datamodel.
-        Use the "Write_File" tool to save the updated Peach Pit file back to "./llm/peach/{self.protocol_lower}/datamodel.xml".
         """
             if hint:
                 prompt += (
                     f"\n\nAdditional guidance from the user:\n{hint}\n"
                 )
 
-            self.call_agent(prompt, "Step 3: Datamodel Validation & Fix")
+            self.call_agent(
+                prompt,
+                "Step 3: Datamodel Validation & Fix",
+                agent_graph=self.datamodel_autofix_agent_graph,
+            )
 
         self.fix_verify_loop(
             "Step 3: Datamodel Validation & Fix",

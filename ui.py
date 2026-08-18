@@ -405,6 +405,23 @@ def ask_skip_verification(step_title: str) -> bool:
     return choice == "Skip verification"
 
 
+def ask_reuse_diagnosis(protocol_name: str) -> bool:
+    """Ask whether to reuse an existing DataModel diagnosis report."""
+    console.print()
+    console.print(
+        f"[bold blue]Found existing DataModel diagnosis for: {protocol_name}[/bold blue]"
+    )
+    choice = questionary.select(
+        "Would you like to reuse it and skip diagnosis?",
+        choices=[
+            "Reuse existing diagnosis (skip diagnosis)",
+            "Run diagnosis again",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+    return choice == "Reuse existing diagnosis (skip diagnosis)"
+
+
 def ask_wait_for_fix(step_title: str) -> None:
     """Pause and wait for the user to manually fix files, then press Enter."""
     console.print()
@@ -494,4 +511,3 @@ def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config:
     UI.result_markdown(step_title, final_response)
 
     return response
-

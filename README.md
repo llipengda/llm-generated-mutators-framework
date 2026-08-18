@@ -82,7 +82,7 @@ python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-
 |------|-------------|
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
 | 2. Datamodel Generation | Generates a **Peach Pit XML** file (`datamodel.xml`) defining the binary structure of each packet type — fields, types, relations, optional blocks, and packet union. |
-| 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, the LLM diagnoses and fixes. Up to 3 auto-retries, then interactive fallback. |
+| 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, an existing diagnosis can be reused or a diagnosis agent uses `Read_File`, `RFC_Search`, and `Write_File` to produce one. The auto-fix agent then reads only that diagnosis and the current DataModel—never raw validator output or logs. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
 | 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Each iteration: clone → mutate → serialize → re-parse. Failures trigger LLM fixes. |
 | Final Compilation | Compiles all `.cs` files into a single `{PROTO}.dll`. |

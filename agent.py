@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Literal
+from typing import Any, Collection, Mapping, Literal
 
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
@@ -67,18 +67,32 @@ class AgentConfig:
 You are a helpful assistant expert in C programming and protocol fuzzing.
 """
 
-def build_agent_graph(*, retriever: BaseRetriever, config: AgentConfig | None = None, target: Literal["aflnet", "peach"] = "aflnet"):
+def build_agent_graph(
+    *,
+    retriever: BaseRetriever,
+    config: AgentConfig | None = None,
+    target: Literal["aflnet", "peach"] = "aflnet",
+    tool_names: Collection[str] | None = None,
+):
     if config is None:
         config = AgentConfig()
 
     llm = ChatOpenAI(temperature=config.temperature, model=config.model)
     rfc_search = make_rfc_search(retriever)
+    available_tools = [rfc_search] + tools[target]
+    if tool_names is None:
+        selected_tools = available_tools
+    else:
+        selected_tools = [tool for tool in available_tools if tool.name in tool_names]
+        missing = set(tool_names).difference(tool.name for tool in selected_tools)
+        if missing:
+            raise ValueError(f"Unknown agent tools: {', '.join(sorted(missing))}")
 
     memory = MemorySaver()
 
     return create_agent(
         model=llm,
-        tools=[rfc_search] + tools[target],
+        tools=selected_tools,
         checkpointer=memory,
         system_prompt=config.system_prompt
     )
