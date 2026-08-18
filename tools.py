@@ -4,13 +4,13 @@ import subprocess
 from langchain_core.tools import tool
 from langchain_core.retrievers import BaseRetriever
 
-from log import console, file_logger
+from log import console, file_logger, runtime_log
 
 
 @tool("Save_And_Verify_Code")
 def save_and_verify_code(filename: str, complete_c_code: str) -> str:
     """Save COMPLETE C code to filename and check syntax with GCC."""
-    console.log(f"[dim]Tool: Saving to {filename}...[/dim]")
+    runtime_log(f"Tool: Saving to {filename}...")
     file_logger.log(
 f"""
 TOOL CALL: save_and_verify_code
@@ -29,7 +29,7 @@ TOOL CALL: save_and_verify_code
         cmd = ["gcc", "-fsyntax-only", filename]
         result = subprocess.run(cmd, capture_output=True, text=True)
 
-        console.log(f"[dim]Tool: Running GCC check on {filename}...[/dim]")
+        runtime_log(f"Tool: Running GCC check on {filename}...")
 
         if result.returncode == 0:
             response = f"SUCCESS: Code saved to {filename}. GCC syntax check passed."
@@ -52,7 +52,7 @@ TOOL RESPONSE:
 @tool("Read_File")
 def read_file(filepath: str, *, line_count: int = -1, start_line: int = 1) -> str:
     """Read a file and return its content."""
-    console.log(f"[dim]Tool: Reading file {filepath} (lines {start_line}+)[/dim]")
+    runtime_log(f"Tool: Reading file {filepath} (lines {start_line}+)")
 
     file_logger.log(
 f"""
@@ -86,7 +86,7 @@ TOOL RESPONSE:
 @tool("Append_And_Verify_Code")
 def append_and_verify_code(filepath: str, content_to_append: str) -> str:
     """Append content to a file and run a GCC syntax check."""
-    console.log(f"[dim]Tool: Appending to {filepath}...[/dim]")
+    runtime_log(f"Tool: Appending to {filepath}...")
     file_logger.log(
 f"""
 TOOL CALL: append_and_verify_code
@@ -122,7 +122,7 @@ TOOL RESPONSE:
 @tool("Write_File")
 def write_file(filepath: str, content: str) -> str:
     """Write content to a file."""
-    console.log(f"[dim]Tool: Writing to file {filepath}...[/dim]")
+    runtime_log(f"Tool: Writing to file {filepath}...")
     file_logger.log(
 f"""
 TOOL CALL: write_file
@@ -152,7 +152,7 @@ def make_rfc_search(retriever: BaseRetriever):
     @tool("RFC_Search")
     def rfc_search(query: str) -> str:
         """Search RFC documents using RAG for protocol definitions, fields, and constraints."""
-        console.log(f"[dim]Tool: Searching RFC for '{query}'...[/dim]")
+        runtime_log(f"Tool: Searching RFC for '{query}'...")
         file_logger.log(
 f"""
 TOOL CALL: rfc_search

@@ -637,12 +637,12 @@ class PeachPipeline(BasePipeline):
         The test logs indicate there are issues with the generated C# code for `{mutator_name}`.
 
         You need to:
-        1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
+        1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`.
         2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
         3. Use the "Read_File" tool to read the corresponding mutator file.
         4. Fix the bug in the C# code. 
         5. Use the "Write_File" tool to update the file with the fix.
-        6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
+        6. Use the "Build_DotNet_DLL" tool to recompile the containing mutator source file and ensure there are no syntax errors.
         
         Hint for common errors:
         - InternalValueToBitStream called on DataElement where InternalValue is not a BitStream. Type is String. 

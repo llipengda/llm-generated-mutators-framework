@@ -15,6 +15,7 @@ from config import (
     get_protocol_name,
     get_rfc_paths,
     get_seed_dir,
+    get_state_dir,
     warn_if_rfc_missing,
 )
 from rag import build_retriever
@@ -55,9 +56,10 @@ class BasePipeline:
             "configurable": {"thread_id": "session_001"},
         }
 
-        state_path = _pipeline_state_path(self.protocol_lower)
+        self.state_dir = get_state_dir()
+        state_path = _pipeline_state_path(self.protocol_lower, self.state_dir)
         if os.path.exists(state_path):
-            existing = load_pipeline_state(self.protocol_lower)
+            existing = load_pipeline_state(self.protocol_lower, self.state_dir)
             has_data = bool(
                 existing.get("packet_types") or existing.get("constraints")
             )
@@ -232,7 +234,7 @@ class BasePipeline:
         return build_agent_graph(retriever=self.retriever)
     
     def save_state(self):
-        save_pipeline_state(self.state, self.protocol_lower)
+        save_pipeline_state(self.state, self.protocol_lower, self.state_dir)
 
     def print_token_usage_summary(self) -> None:
         total = self.state.get("token_usage_total", {})

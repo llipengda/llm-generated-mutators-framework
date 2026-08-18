@@ -11,6 +11,7 @@ class Config(TypedDict):
     seed_dir: str
     rfc_paths: list[str]
     fixer: bool
+    state_dir: str | None
 
 
 config: Config | None = None
@@ -21,6 +22,7 @@ def build_config_from_args(
     seed_dir: str,
     rfc_paths: list[str],
     fixer: bool = False,
+    state_dir: str | None = None,
 ) -> None:
     global config
     config = Config(
@@ -28,6 +30,7 @@ def build_config_from_args(
         seed_dir=seed_dir,
         rfc_paths=rfc_paths,
         fixer=fixer,
+        state_dir=state_dir,
     )
 
 
@@ -57,6 +60,12 @@ def get_fixer_enabled() -> bool:
     if config is None:
         raise ValueError("Config not built yet.")
     return config["fixer"]
+
+
+def get_state_dir() -> str | None:
+    if config is None:
+        raise ValueError("Config not built yet.")
+    return config.get("state_dir")
 
 
 def warn_if_rfc_missing(rfc_paths: list[str]) -> None:

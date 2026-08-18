@@ -38,15 +38,15 @@ def add_step_usage(
         total[key] += val
         step_bucket[key] += val
 
-def _pipeline_state_path(protocol_name: str) -> str:
+def _pipeline_state_path(protocol_name: str, state_dir: str | None = None) -> str:
     repo_root = os.path.dirname(__file__)
-    state_dir = os.path.join(repo_root, ".pipeline_state")
+    state_dir = state_dir or os.path.join(repo_root, ".pipeline_state")
     os.makedirs(state_dir, exist_ok=True)
     return os.path.join(state_dir, f"{protocol_name}.json")
 
 
-def load_pipeline_state(protocol_name: str) -> PipelineState:
-    path = _pipeline_state_path(protocol_name)
+def load_pipeline_state(protocol_name: str, state_dir: str | None = None) -> PipelineState:
+    path = _pipeline_state_path(protocol_name, state_dir)
     if not os.path.exists(path):
         return {
             "packet_types": [],
@@ -78,8 +78,10 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
     }
 
 
-def save_pipeline_state(state: PipelineState, protocol_name: str) -> None:
-    path = _pipeline_state_path(protocol_name)
+def save_pipeline_state(
+    state: PipelineState, protocol_name: str, state_dir: str | None = None
+) -> None:
+    path = _pipeline_state_path(protocol_name, state_dir)
     tmp_path = f"{path}.tmp"
 
     UI.dim(f"Saving pipeline state to {path}...")

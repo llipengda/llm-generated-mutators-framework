@@ -132,6 +132,19 @@ npm run dev
 ```
 
 See [`pit-visualizer/README.md`](pit-visualizer/README.md) for validation and
+
+## Peach Web Console (local only)
+
+After installing the Python and Pit Studio dependencies, run:
+
+```bash
+python3 web.py
+```
+
+Open the local Pit Studio URL, then visit `/pipeline`. The page uses the same
+machine's Docker, Mono/Peach SDK, and `OPENAI_API_KEY`; it is not a hosted
+service. At most one generation task can run at a time. Runtime uploads,
+events, and downloadable artifacts are stored in `.web_runs/`.
 diagnosis-import instructions.
 
 ## Logs and state

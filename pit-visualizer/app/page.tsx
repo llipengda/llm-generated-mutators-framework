@@ -55,6 +55,7 @@ const KIND_META: Record<string, { label: string; icon: typeof Box; color: string
   Relation: { label: "Relation", icon: Link2, color: "rose", description: "字段之间的 size、count 或 offset 关系。" },
   MqttVarInt: { label: "MqttVarInt", icon: Gauge, color: "teal", description: "MQTT 可变字节整数。" },
 };
+const PEACH_API = process.env.NEXT_PUBLIC_PEACH_API_URL || "http://127.0.0.1:8000";
 
 const CHILD_TYPES = ["Block", "Number", "String", "Blob", "Choice", "Optional", "Relation"];
 type Path = number[];
@@ -467,7 +468,9 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
     return <InlineField field={child} byName={byName} stack={nextStack} onSelect={onSelect} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} renderKey={`${nestedContainerKey}/${index}`} depth={depth} mergedAncestors={[...mergedAncestors, { field, renderKey }]} />;
   }
   const canCollapse = isGroup && (depth >= 2 || diagnosticLocations.length > 0);
-  const collapsed = canCollapse && (diagnosticLocations.length > 0 ? !containsDiagnosis : !expandedFields.has(renderKey));
+  const defaultExpanded = diagnosticLocations.length > 0 ? containsDiagnosis : false;
+  const expanded = expandedFields.has(renderKey) ? !defaultExpanded : defaultExpanded;
+  const collapsed = canCollapse && !expanded;
   const activateRelation = (button: HTMLElement) => {
     if (!relationElement || !relationTargetName) return;
     const sourceWrapper = button.parentElement;
@@ -580,7 +583,7 @@ type TopologyNodeData = {
   circular: boolean;
   hasChildren: boolean;
   open: boolean;
-  onToggle: (id: string) => void;
+  onToggle: (id: string, open: boolean) => void;
 };
 type TopologyNode = Node<TopologyNodeData, "pitNode">;
 
@@ -591,7 +594,7 @@ function PitTopologyNode({ id, data }: NodeProps<TopologyNode>) {
       <Handle type="target" position={Position.Left} isConnectable={false} />
       {data.isRef && <span className="flow-node-dot is-ref" />}
       {data.isArray && <span className="flow-node-dot is-array" />}
-      {data.hasChildren && <button className="flow-node-toggle nodrag nopan" aria-label={data.open ? `折叠 ${data.label}` : `展开 ${data.label}`} onClick={(event) => { event.stopPropagation(); data.onToggle(id); }}>{data.open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}</button>}
+      {data.hasChildren && <button className="flow-node-toggle nodrag nopan" aria-label={data.open ? `折叠 ${data.label}` : `展开 ${data.label}`} onClick={(event) => { event.stopPropagation(); data.onToggle(id, data.open); }}>{data.open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}</button>}
       <Handle type="source" position={Position.Right} isConnectable={false} />
     </div>
   );
@@ -599,7 +602,7 @@ function PitTopologyNode({ id, data }: NodeProps<TopologyNode>) {
 
 const TOPOLOGY_NODE_TYPES = { pitNode: PitTopologyNode };
 
-function buildTopologyGraph(entry: Element, byName: Map<string, Element>, selectedNodeId: string, openOverrides: Record<string, boolean>, onToggle: (id: string) => void, diagnosticLocations: XmlLocation[]) {
+function buildTopologyGraph(entry: Element, byName: Map<string, Element>, selectedNodeId: string, openOverrides: Record<string, boolean>, onToggle: (id: string, open: boolean) => void, diagnosticLocations: XmlLocation[]) {
   const nodes: TopologyNode[] = [];
   const edges: Edge[] = [];
   const entryName = entry.getAttribute("name") || "packet_array";
@@ -608,7 +611,8 @@ function buildTopologyGraph(entry: Element, byName: Map<string, Element>, select
     const circular = Boolean(ref && stack.has(ref));
     const nested = circular ? [] : resolvedTreeChildren(field, byName, stack);
     const onDiagnosticPath = diagnosticLocations.length > 0 && containsDiagnosticLocation(field, byName, diagnosticLocations, stack);
-    const open = diagnosticLocations.length > 0 ? onDiagnosticPath : (openOverrides[id] ?? true);
+    const defaultOpen = diagnosticLocations.length > 0 ? onDiagnosticPath : true;
+    const open = openOverrides[id] ?? defaultOpen;
     const meta = KIND_META[field.localName] || { label: field.localName, icon: Shapes, color: "slate", description: "Peach 扩展元素。" };
     nodes.push({
       id,
@@ -651,7 +655,7 @@ function buildTopologyGraph(entry: Element, byName: Map<string, Element>, select
 
 function TopologyGraph({ entry, byName, selectedNodeId, onSelect, diagnosticLocations }: { entry: Element; byName: Map<string, Element>; selectedNodeId: string; onSelect: (path: Path, nodeId: string) => void; diagnosticLocations: XmlLocation[] }) {
   const [openOverrides, setOpenOverrides] = useState<Record<string, boolean>>({});
-  const toggle = useCallback((id: string) => setOpenOverrides((current) => ({ ...current, [id]: !(current[id] ?? true) })), []);
+  const toggle = useCallback((id: string, open: boolean) => setOpenOverrides((current) => ({ ...current, [id]: !open })), []);
   const { nodes, edges } = useMemo(() => buildTopologyGraph(entry, byName, selectedNodeId, openOverrides, toggle, diagnosticLocations), [entry, byName, selectedNodeId, openOverrides, toggle, diagnosticLocations]);
   return (
     <ReactFlow<TopologyNode, Edge>
@@ -677,6 +681,25 @@ function TopologyGraph({ entry, byName, selectedNodeId, onSelect, diagnosticLoca
       <Controls showInteractive={false} />
     </ReactFlow>
   );
+}
+
+function diagnosticParentSelection(entry: Element, byName: Map<string, Element>, locations: XmlLocation[]) {
+  let selection: { path: Path; nodeId: string } | null = null;
+  const entryName = entry.getAttribute("name") || "packet_array";
+  const walk = (field: Element, id: string, parent: Element | null, parentId: string | null, stack: Set<string>) => {
+    if (selection) return;
+    if (matchesDiagnosticLocation(field, locations)) {
+      selection = { path: pathFor(parent || field), nodeId: parentId || id };
+      return;
+    }
+    const ref = field.getAttribute("ref");
+    if (ref && stack.has(ref)) return;
+    const nextStack = new Set(stack);
+    if (ref) nextStack.add(ref);
+    resolvedTreeChildren(field, byName, stack).forEach((child, index) => walk(child, `${id}/${index}`, field, id, nextStack));
+  };
+  walk(entry, "entry", null, null, new Set([entryName]));
+  return selection;
 }
 
 function ProtocolNodeCanvas({ field, byName, onEdit, activeRelation, onRelationChange, choiceSelections, onChoiceChange, expandedFields, onToggleExpanded, diagnosticLocations }: { field: Element; byName: Map<string, Element>; onEdit: (field: Element) => void; activeRelation: ActiveRelation; onRelationChange: (relation: ActiveRelation) => void; choiceSelections: ChoiceSelections; onChoiceChange: (key: string, index: number) => void; expandedFields: Set<string>; onToggleExpanded: (key: string) => void; diagnosticLocations: XmlLocation[] }) {
@@ -716,7 +739,7 @@ function ProtocolTree({ entry, byName, selectedPath, selectedNodeId, onSelect, o
     <div className="tree-workspace">
       <aside className="structure-tree-panel">
         <div className="structure-tree-head"><GitBranch size={14} /><span>结构树</span></div>
-        <div className="structure-tree-scroll"><TopologyGraph entry={entry} byName={byName} selectedNodeId={selectedNodeId} onSelect={onSelect} diagnosticLocations={diagnosticLocations} /></div>
+        <div className="structure-tree-scroll"><TopologyGraph key={diagnosticLocations.map((location) => `${location.model}:${location.tag}:${location.name}:${location.line}`).join("|")} entry={entry} byName={byName} selectedNodeId={selectedNodeId} onSelect={onSelect} diagnosticLocations={diagnosticLocations} /></div>
       </aside>
       <ProtocolNodeCanvas field={selected} byName={byName} onEdit={onEdit} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} />
     </div>
@@ -766,17 +789,31 @@ export default function Home() {
   const [expandedFields, setExpandedFields] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<"canvas" | "tree">("canvas");
   const [treeSelectedPath, setTreeSelectedPath] = useState<Path | null>(null);
-  const [treeSelectedNodeId, setTreeSelectedNodeId] = useState("entry");
+  const [treeSelectedNodeId, setTreeSelectedNodeId] = useState<string | null>(null);
   const [addType, setAddType] = useState("Block");
   const [diagnosis, setDiagnosis] = useState<DiagnosisReport | null>(null);
   const [diagnosisFiles, setDiagnosisFiles] = useState<string[]>([]);
+  const [pipelineJobId, setPipelineJobId] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const resultInput = useRef<HTMLInputElement>(null);
   const diagnosisPanel = useRef<HTMLDivElement>(null);
 
-  // DOMParser is browser-only; load the bundled demo after hydration.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => setDoc(parsePit(DEMO_PIT)), []);
+  // DOMParser is browser-only. A pipeline repair opens the generated model;
+  // otherwise retain the standalone editor's bundled demo behavior.
+  useEffect(() => {
+    const jobId = new URLSearchParams(window.location.search).get("job");
+    if (!jobId) { queueMicrotask(() => setDoc(parsePit(DEMO_PIT))); return; }
+    queueMicrotask(() => setPipelineJobId(jobId));
+    void fetch(`${PEACH_API}/api/jobs/${jobId}/datamodel`).then(async (response) => {
+      if (!response.ok) throw new Error("无法读取该 pipeline 的 DataModel。");
+      return response.json() as Promise<{ xml: string; diagnosis: unknown }>;
+    }).then((payload) => {
+      const parsed = parsePit(payload.xml);
+      if (!parsed) throw new Error("服务端 DataModel 不是有效 XML。");
+      setDoc(parsed); setFileName("datamodel.xml"); setDirty(false);
+      if (payload.diagnosis) { setDiagnosis(normalizeDiagnosis(payload.diagnosis, parsed)); setDiagnosisFiles(["自动生成的诊断结果"]); }
+    }).catch((cause: Error) => setError(cause.message));
+  }, []);
 
   const structure = useMemo(() => doc ? findPacketStructure(doc) : null, [doc]);
   const selected = doc ? getAtPath(doc, selectedPath) : null;
@@ -792,6 +829,10 @@ export default function Home() {
       return true;
     });
   }, [diagnosis]);
+
+  const defaultTreeSelection = useMemo(() => structure?.entry && diagnosticLocations.length > 0
+    ? diagnosticParentSelection(structure.entry, structure.byName, diagnosticLocations)
+    : null, [structure, diagnosticLocations]);
 
   const commit = useCallback((mutator: (draft: XMLDocument) => void) => {
     if (!doc) return;
@@ -854,7 +895,7 @@ export default function Home() {
     setChoiceSelections({});
     setExpandedFields(new Set());
     setTreeSelectedPath(null);
-    setTreeSelectedNodeId("entry");
+    setTreeSelectedNodeId(null);
   };
 
   const undo = () => {
@@ -867,7 +908,7 @@ export default function Home() {
     setChoiceSelections({});
     setExpandedFields(new Set());
     setTreeSelectedPath(null);
-    setTreeSelectedNodeId("entry");
+    setTreeSelectedNodeId(null);
   };
   const redo = () => {
     if (!doc || !future.length) return;
@@ -879,7 +920,7 @@ export default function Home() {
     setChoiceSelections({});
     setExpandedFields(new Set());
     setTreeSelectedPath(null);
-    setTreeSelectedNodeId("entry");
+    setTreeSelectedNodeId(null);
   };
 
   const loadFile = async (file?: File) => {
@@ -904,7 +945,7 @@ export default function Home() {
     setChoiceSelections({});
     setExpandedFields(new Set());
     setTreeSelectedPath(null);
-    setTreeSelectedNodeId("entry");
+    setTreeSelectedNodeId(null);
     setDiagnosis(null);
     setDiagnosisFiles([]);
     setError("");
@@ -921,14 +962,26 @@ export default function Home() {
       setSelectedPath(null);
       setActiveRelation(null);
       setExpandedFields(new Set());
+      setTreeSelectedPath(null);
+      setTreeSelectedNodeId(null);
       requestAnimationFrame(() => diagnosisPanel.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "诊断结果导入失败，请检查 JSON 格式后重试。");
     }
   };
 
-  const download = () => {
+  const download = async () => {
     if (!doc) return;
+    if (pipelineJobId) {
+      try {
+        const save = await fetch(`${PEACH_API}/api/jobs/${pipelineJobId}/datamodel`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ xml: serialize(doc) }) });
+        if (!save.ok) throw new Error("无法保存 DataModel。");
+        const verify = await fetch(`${PEACH_API}/api/jobs/${pipelineJobId}/datamodel/verify`, { method: "POST" });
+        if (!verify.ok) throw new Error("无法启动重新验证。");
+        window.location.assign("/pipeline");
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "保存失败。"); }
+      return;
+    }
     const url = URL.createObjectURL(new Blob([serialize(doc)], { type: "application/xml;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
@@ -964,7 +1017,7 @@ export default function Home() {
           <span className="toolbar-divider" />
           <button className="secondary-button" onClick={() => fileInput.current?.click()}><FileUp size={16} /> 打开文件</button>
           <button className="diagnose-button" disabled={!doc} onClick={() => resultInput.current?.click()}><Stethoscope size={16} /> 上传诊断结果</button>
-          <button className="primary-button compact" onClick={download}><Download size={16} /> 导出 Pit</button>
+          <button className="primary-button compact" onClick={() => { void download(); }}><Download size={16} /> {pipelineJobId ? "保存并重新验证" : "导出 Pit"}</button>
         </div>
       </header>
 
@@ -980,7 +1033,7 @@ export default function Home() {
                 <button className={viewMode === "tree" ? "is-active" : ""} aria-pressed={viewMode === "tree"} onClick={() => setViewMode("tree")}><GitBranch size={14} />树形结构</button>
               </div>
             </div>
-            {structure.entry ? viewMode === "canvas" ? <ProtocolCanvas entry={structure.entry} byName={structure.byName} onSelect={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <ProtocolTree entry={structure.entry} byName={structure.byName} selectedPath={treeSelectedPath} selectedNodeId={treeSelectedNodeId} onSelect={(path, nodeId) => { setTreeSelectedPath(path); setTreeSelectedNodeId(nodeId); }} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <div className="empty-packets"><GitBranch size={24} /><strong>未找到协议入口</strong><span>文件必须包含以 _packet_array 结尾的 DataModel。</span></div>}
+            {structure.entry ? viewMode === "canvas" ? <ProtocolCanvas entry={structure.entry} byName={structure.byName} onSelect={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <ProtocolTree entry={structure.entry} byName={structure.byName} selectedPath={treeSelectedPath ?? defaultTreeSelection?.path ?? null} selectedNodeId={treeSelectedNodeId ?? defaultTreeSelection?.nodeId ?? "entry"} onSelect={(path, nodeId) => { setTreeSelectedPath(path); setTreeSelectedNodeId(nodeId); }} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <div className="empty-packets"><GitBranch size={24} /><strong>未找到协议入口</strong><span>文件必须包含以 _packet_array 结尾的 DataModel。</span></div>}
           </section>
           {diagnosis && <div ref={diagnosisPanel}><DiagnosisPanel report={diagnosis} fileNames={diagnosisFiles} onClear={() => { setDiagnosis(null); setDiagnosisFiles([]); }} /></div>}
         </div>
