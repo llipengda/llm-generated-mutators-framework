@@ -246,6 +246,122 @@ select:focus-visible {
   background: #fff;
 }
 
+.packet-browser {
+  min-height: 590px;
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  background: #eef2f5;
+}
+
+.packet-type-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f8fafb;
+  border-right: 1px solid #bfcbd5;
+}
+
+.packet-type-head {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 12px;
+  color: #314251;
+  background: #e8edf1;
+  border-bottom: 1px solid #c8d2da;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .05em;
+}
+
+.packet-type-head strong {
+  min-width: 22px;
+  margin-left: auto;
+  padding: 2px 5px;
+  color: #52616d;
+  background: #d7e0e7;
+  text-align: center;
+  font-size: 9px;
+}
+
+.packet-type-list {
+  height: min(640px, calc(100vh - 190px));
+  min-height: 550px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.packet-type-list button {
+  width: 100%;
+  min-height: 49px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  color: #526675;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+}
+
+.packet-type-list button:hover {
+  color: #203240;
+  background: #edf2f5;
+  border-color: #d4dde4;
+}
+
+.packet-type-list button.is-active {
+  color: #0033bf;
+  background: #e6edff;
+  border-color: #9eb2ed;
+  box-shadow: inset 3px 0 #003DE3;
+}
+
+.packet-type-index {
+  width: 25px;
+  flex-shrink: 0;
+  color: #8998a3;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 9px;
+  text-align: center;
+}
+
+.packet-type-copy {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.packet-type-copy strong,
+.packet-type-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packet-type-copy strong {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+}
+
+.packet-type-copy small {
+  color: #8998a3;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 8px;
+}
+
+.packet-view {
+  min-width: 0;
+}
+
+.packet-view > .tree-canvas-panel {
+  min-height: 590px;
+}
+
 .tree-workspace {
   min-height: 590px;
   display: grid;
@@ -2418,6 +2534,25 @@ select:focus-visible {
 
   .tree-workspace {
     display: block;
+  }
+
+  .packet-browser {
+    grid-template-columns: 150px minmax(460px, 1fr);
+    overflow-x: auto;
+  }
+
+  .packet-type-list {
+    height: min(600px, calc(100vh - 230px));
+    min-height: 500px;
+  }
+
+  .packet-type-list button {
+    padding: 6px;
+  }
+
+  .packet-type-index,
+  .packet-type-list button > svg {
+    display: none;
   }
 
   .structure-tree-panel {

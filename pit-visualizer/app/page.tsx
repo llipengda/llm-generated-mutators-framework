@@ -203,6 +203,31 @@ function findPacketStructure(doc: XMLDocument) {
   return { entry, byName };
 }
 
+function packetTypesOf(entry: Element, byName: Map<string, Element>) {
+  const visit = (field: Element, stack: Set<string>): Element[] | null => {
+    if (field.localName === "Choice") {
+      const options = children(field).filter((child) => child.localName !== "Relation");
+      return options.length > 0 ? options : null;
+    }
+    const ref = field.getAttribute("ref");
+    if (ref) {
+      if (stack.has(ref)) return null;
+      const target = byName.get(ref);
+      if (!target) return null;
+      const next = new Set(stack);
+      next.add(ref);
+      const result = visit(target, next);
+      if (result) return result;
+    }
+    for (const child of children(field).filter((item) => item.localName !== "Relation")) {
+      const result = visit(child, stack);
+      if (result) return result;
+    }
+    return null;
+  };
+  return visit(entry, new Set([entry.getAttribute("name") || "packet_array"])) || children(entry);
+}
+
 function relationSummary(field: Element) {
   const ref = field.getAttribute("ref");
   if (ref) return { icon: Link2, text: ref, kind: "ref" };
@@ -543,25 +568,6 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
   );
 }
 
-function ProtocolCanvas({ entry, byName, onSelect, activeRelation, onRelationChange, choiceSelections, onChoiceChange, expandedFields, onToggleExpanded, diagnosticLocations }: { entry: Element; byName: Map<string, Element>; onSelect: (field: Element) => void; activeRelation: ActiveRelation; onRelationChange: (relation: ActiveRelation) => void; choiceSelections: ChoiceSelections; onChoiceChange: (key: string, index: number) => void; expandedFields: Set<string>; onToggleExpanded: (key: string) => void; diagnosticLocations: XmlLocation[] }) {
-  const entryName = entry.getAttribute("name") || "packet_array";
-  const length = fixedLength(entry, byName);
-  const entryChildren = children(entry);
-  return (
-    <div className="root-model">
-      <button className="root-model-head" onClick={() => onSelect(entry)}>
-        <span className="root-index"><Layers3 size={18} /></span>
-        <span><strong>{entryName}</strong></span>
-        <span className="field-spacer" />
-        {length && <span className={`length-badge root-length length-${length.unit.toLowerCase()}`}><strong>{length.value}</strong><span>{length.unit}</span></span>}
-      </button>
-      <AdaptiveFieldGrid className="root-children" twoColumns={entryChildren.length > 3}>
-        {verticalColumns(entryChildren.map((field, index) => ({ field, index })), ({ field }) => estimateVisualWeight(field, byName, new Set([entryName]))).map((column, columnIndex) => <div className="flow-column" key={`root-column-${columnIndex}`}>{column.map(({ field, index }) => <div className="flow-item" style={{ order: index }} key={`${field.localName}-${nameOf(field)}-${index}`}><InlineField field={field} byName={byName} stack={new Set([entryName])} onSelect={onSelect} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} renderKey={`entry/${index}`} /></div>)}</div>)}
-      </AdaptiveFieldGrid>
-    </div>
-  );
-}
-
 function resolvedTreeChildren(field: Element, byName: Map<string, Element>, stack: Set<string>) {
   const ref = field.getAttribute("ref");
   const target = ref && !stack.has(ref) ? byName.get(ref) : null;
@@ -723,6 +729,37 @@ function ProtocolTree({ entry, byName, selectedPath, selectedNodeId, onSelect, o
   );
 }
 
+function PacketTypeList({ packets, selectedIndex, onSelect }: { packets: Element[]; selectedIndex: number; onSelect: (index: number) => void }) {
+  return (
+    <aside className="packet-type-panel">
+      <div className="packet-type-head">
+        <Layers3 size={14} />
+        <span>数据包类型</span>
+        <strong>{packets.length}</strong>
+      </div>
+      <nav className="packet-type-list" aria-label="数据包类型">
+        {packets.map((packet, index) => {
+          const label = nameOf(packet);
+          const ref = packet.getAttribute("ref");
+          return (
+            <button
+              type="button"
+              key={`${label}-${ref || "inline"}-${index}`}
+              className={index === selectedIndex ? "is-active" : ""}
+              aria-current={index === selectedIndex ? "true" : undefined}
+              onClick={() => onSelect(index)}
+            >
+              <span className="packet-type-index">{String(index + 1).padStart(2, "0")}</span>
+              <span className="packet-type-copy"><strong>{label}</strong>{ref && <small>{ref}</small>}</span>
+              <ChevronRight size={14} />
+            </button>
+          );
+        })}
+      </nav>
+    </aside>
+  );
+}
+
 function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisReport; fileNames: string[]; onClear: () => void }) {
   const rootCause = report.llm_judgment?.root_cause;
   return (
@@ -765,6 +802,7 @@ export default function Home() {
   const [choiceSelections, setChoiceSelections] = useState<ChoiceSelections>({});
   const [expandedFields, setExpandedFields] = useState<Set<string>>(() => new Set());
   const [viewMode, setViewMode] = useState<"canvas" | "tree">("canvas");
+  const [selectedPacketIndex, setSelectedPacketIndex] = useState(0);
   const [treeSelectedPath, setTreeSelectedPath] = useState<Path | null>(null);
   const [treeSelectedNodeId, setTreeSelectedNodeId] = useState("entry");
   const [addType, setAddType] = useState("Block");
@@ -779,6 +817,9 @@ export default function Home() {
   useEffect(() => setDoc(parsePit(DEMO_PIT)), []);
 
   const structure = useMemo(() => doc ? findPacketStructure(doc) : null, [doc]);
+  const packetTypes = useMemo(() => structure?.entry ? packetTypesOf(structure.entry, structure.byName) : [], [structure]);
+  const effectivePacketIndex = Math.min(selectedPacketIndex, Math.max(0, packetTypes.length - 1));
+  const selectedPacket = packetTypes[effectivePacketIndex] || null;
   const selected = doc ? getAtPath(doc, selectedPath) : null;
   const entryName = structure?.entry?.getAttribute("name") || "entry_not_found";
   const protocolName = entryName.replace(/_packet_array$/i, "") || "protocol";
@@ -853,6 +894,7 @@ export default function Home() {
     setActiveRelation(null);
     setChoiceSelections({});
     setExpandedFields(new Set());
+    setSelectedPacketIndex(0);
     setTreeSelectedPath(null);
     setTreeSelectedNodeId("entry");
   };
@@ -866,6 +908,7 @@ export default function Home() {
     setActiveRelation(null);
     setChoiceSelections({});
     setExpandedFields(new Set());
+    setSelectedPacketIndex(0);
     setTreeSelectedPath(null);
     setTreeSelectedNodeId("entry");
   };
@@ -878,6 +921,7 @@ export default function Home() {
     setActiveRelation(null);
     setChoiceSelections({});
     setExpandedFields(new Set());
+    setSelectedPacketIndex(0);
     setTreeSelectedPath(null);
     setTreeSelectedNodeId("entry");
   };
@@ -903,6 +947,7 @@ export default function Home() {
     setActiveRelation(null);
     setChoiceSelections({});
     setExpandedFields(new Set());
+    setSelectedPacketIndex(0);
     setTreeSelectedPath(null);
     setTreeSelectedNodeId("entry");
     setDiagnosis(null);
@@ -949,6 +994,15 @@ export default function Home() {
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
+  const selectPacket = (index: number) => {
+    setSelectedPacketIndex(index);
+    setSelectedPath(null);
+    setTreeSelectedPath(null);
+    setTreeSelectedNodeId("entry");
+    setActiveRelation(null);
+    setChoiceSelections({});
+    setExpandedFields(new Set());
+  };
   const attributes = selected ? Array.from(selected.attributes).filter((attr) => !attr.name.startsWith("xmlns")) : [];
   const selectedMeta = selected ? KIND_META[selected.localName] || { label: selected.localName, icon: Shapes, color: "slate", description: "Peach 扩展元素。" } : null;
 
@@ -980,7 +1034,18 @@ export default function Home() {
                 <button className={viewMode === "tree" ? "is-active" : ""} aria-pressed={viewMode === "tree"} onClick={() => setViewMode("tree")}><GitBranch size={14} />树形结构</button>
               </div>
             </div>
-            {structure.entry ? viewMode === "canvas" ? <ProtocolCanvas entry={structure.entry} byName={structure.byName} onSelect={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <ProtocolTree entry={structure.entry} byName={structure.byName} selectedPath={treeSelectedPath} selectedNodeId={treeSelectedNodeId} onSelect={(path, nodeId) => { setTreeSelectedPath(path); setTreeSelectedNodeId(nodeId); }} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} /> : <div className="empty-packets"><GitBranch size={24} /><strong>未找到协议入口</strong><span>文件必须包含以 _packet_array 结尾的 DataModel。</span></div>}
+            {structure.entry && selectedPacket ? (
+              <div className="packet-browser">
+                <PacketTypeList packets={packetTypes} selectedIndex={effectivePacketIndex} onSelect={selectPacket} />
+                <div className="packet-view">
+                  {viewMode === "canvas" ? (
+                    <ProtocolNodeCanvas field={selectedPacket} byName={structure.byName} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} />
+                  ) : (
+                    <ProtocolTree entry={selectedPacket} byName={structure.byName} selectedPath={treeSelectedPath} selectedNodeId={treeSelectedNodeId} onSelect={(path, nodeId) => { setTreeSelectedPath(path); setTreeSelectedNodeId(nodeId); }} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} />
+                  )}
+                </div>
+              </div>
+            ) : <div className="empty-packets"><GitBranch size={24} /><strong>未找到数据包类型</strong><span>文件入口中必须包含可用的 Choice 数据包定义。</span></div>}
           </section>
           {diagnosis && <div ref={diagnosisPanel}><DiagnosisPanel report={diagnosis} fileNames={diagnosisFiles} onClear={() => { setDiagnosis(null); setDiagnosisFiles([]); }} /></div>}
         </div>
