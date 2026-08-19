@@ -558,7 +558,9 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
     return <InlineField field={child} byName={byName} stack={nextStack} onSelect={onSelect} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} renderKey={`${nestedContainerKey}/${index}`} depth={depth} mergedAncestors={[...mergedAncestors, { field, renderKey }]} />;
   }
   const canCollapse = isGroup && (depth >= 2 || diagnosticLocations.length > 0);
-  const collapsed = canCollapse && (diagnosticLocations.length > 0 ? !containsDiagnosis : !expandedFields.has(renderKey));
+  const collapsed = canCollapse && (diagnosticLocations.length > 0
+    ? !containsDiagnosis && !expandedFields.has(renderKey)
+    : !expandedFields.has(renderKey));
   const activateRelation = (button: HTMLElement) => {
     if (!relationElement || !relationTargetName) return;
     const sourceWrapper = button.parentElement;
@@ -671,7 +673,7 @@ function PitTopologyNode({ id, data }: NodeProps<TopologyNode>) {
 
 const TOPOLOGY_NODE_TYPES = { pitNode: PitTopologyNode };
 
-function buildTopologyGraph(entry: Element, byName: Map<string, Element>, selectedNodeId: string, openOverrides: Record<string, boolean>, onToggle: (id: string) => void, diagnosticLocations: XmlLocation[]) {
+function buildTopologyGraph(entry: Element, byName: Map<string, Element>, selectedNodeId: string, openOverrides: Record<string, boolean>, onToggle: (id: string, defaultOpen: boolean) => void, diagnosticLocations: XmlLocation[]) {
   const nodes: TopologyNode[] = [];
   const edges: Edge[] = [];
   const entryName = entry.getAttribute("name") || "packet_array";
@@ -680,7 +682,8 @@ function buildTopologyGraph(entry: Element, byName: Map<string, Element>, select
     const circular = Boolean(ref && stack.has(ref));
     const nested = circular ? [] : resolvedTreeChildren(field, byName, stack);
     const onDiagnosticPath = diagnosticLocations.length > 0 && containsDiagnosticLocation(field, byName, diagnosticLocations, stack);
-    const open = diagnosticLocations.length > 0 ? onDiagnosticPath : (openOverrides[id] ?? true);
+    const defaultOpen = diagnosticLocations.length > 0 ? onDiagnosticPath : true;
+    const open = openOverrides[id] ?? defaultOpen;
     const meta = KIND_META[field.localName] || { label: field.localName, icon: Shapes, color: "slate", description: "Peach 扩展元素。" };
     nodes.push({
       id,
@@ -698,7 +701,7 @@ function buildTopologyGraph(entry: Element, byName: Map<string, Element>, select
         circular,
         hasChildren: nested.length > 0,
         open,
-        onToggle,
+        onToggle: (nodeId) => onToggle(nodeId, defaultOpen),
       },
     });
     if (parentId) edges.push({ id: `${parentId}->${id}`, source: parentId, target: id, type: "bezier", style: { stroke: "#8098aa", strokeWidth: 1.35, opacity: .82 } });
@@ -723,7 +726,7 @@ function buildTopologyGraph(entry: Element, byName: Map<string, Element>, select
 
 function TopologyGraph({ entry, byName, selectedNodeId, onSelect, diagnosticLocations }: { entry: Element; byName: Map<string, Element>; selectedNodeId: string; onSelect: (path: Path, nodeId: string) => void; diagnosticLocations: XmlLocation[] }) {
   const [openOverrides, setOpenOverrides] = useState<Record<string, boolean>>({});
-  const toggle = useCallback((id: string) => setOpenOverrides((current) => ({ ...current, [id]: !(current[id] ?? true) })), []);
+  const toggle = useCallback((id: string, defaultOpen: boolean) => setOpenOverrides((current) => ({ ...current, [id]: !(current[id] ?? defaultOpen) })), []);
   const { nodes, edges } = useMemo(() => buildTopologyGraph(entry, byName, selectedNodeId, openOverrides, toggle, diagnosticLocations), [entry, byName, selectedNodeId, openOverrides, toggle, diagnosticLocations]);
   return (
     <ReactFlow<TopologyNode, Edge>
@@ -788,7 +791,7 @@ function ProtocolTree({ entry, byName, selectedPath, selectedNodeId, onSelect, o
     <div className="tree-workspace">
       <aside className="structure-tree-panel">
         <div className="structure-tree-head"><GitBranch size={14} /><span>结构树</span></div>
-        <div className="structure-tree-scroll"><TopologyGraph entry={entry} byName={byName} selectedNodeId={selectedNodeId} onSelect={onSelect} diagnosticLocations={diagnosticLocations} /></div>
+        <div className="structure-tree-scroll"><TopologyGraph key={`${nameOf(entry)}:${diagnosticLocations.map((location) => `${location.model}/${location.tag}/${location.name}`).join("|")}`} entry={entry} byName={byName} selectedNodeId={selectedNodeId} onSelect={onSelect} diagnosticLocations={diagnosticLocations} /></div>
       </aside>
       <ProtocolNodeCanvas field={selected} byName={byName} onEdit={onEdit} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} />
     </div>
@@ -827,13 +830,11 @@ function PacketTypeList({ packets, selectedIndex, onSelect }: { packets: Element
 }
 
 function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisView; fileNames: string[]; onClear: () => void }) {
-  const locationCount = report.issues.reduce((total, issue) => total + issue.locations.length, 0);
   return (
     <section className="diagnosis-panel" aria-live="polite">
       <div className="diagnosis-head">
         <div className="diagnosis-title-icon"><Stethoscope size={18} /></div>
-        <div><span>DATAMODEL DIAGNOSER</span><h2>测试结果诊断</h2></div>
-        <div className="diagnosis-stats">{report.logsAnalyzed !== null && <><strong>{report.logsAnalyzed}</strong><span>份日志</span></>}<strong>{report.issues.length}</strong><span>个问题</span><strong>{locationCount}</strong><span>处定位</span></div>
+        <div><h2>测试结果诊断</h2></div>
         <button className="diagnosis-clear" onClick={onClear}>清除诊断</button>
       </div>
       <div className="diagnosis-files">诊断文件：{fileNames.join("、")}</div>

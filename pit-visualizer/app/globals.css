@@ -2338,7 +2338,7 @@ select:focus-visible {
 .diagnosis-head h2 {
   margin: 0;
   color: #202d38;
-  font-size: 17px;
+  font-size: 22px;
 }
 
 .diagnosis-clear {
@@ -2372,13 +2372,13 @@ select:focus-visible {
   color: #445866;
   background: #fff9f2;
   border-bottom: 1px solid #eadfd3;
-  font-size: 11px;
+  font-size: 13px;
   line-height: 1.55;
 }
 
 .diagnosis-summary strong {
   color: #8f2626;
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .diagnosis-grid {
@@ -2395,18 +2395,37 @@ select:focus-visible {
   gap: 7px;
 }
 
+.diagnosis-severity {
+  padding: 3px 6px;
+  color: #fff;
+  background: #b42323;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.severity-warning .diagnosis-severity {
+  background: #b9740c;
+}
+
 .diagnosis-card-top code {
   overflow: hidden;
   color: #667784;
   text-overflow: ellipsis;
-  font-size: 11px;
+  font-size: 10px;
   white-space: nowrap;
+}
+
+.diagnosis-card-top strong {
+  margin-left: auto;
+  color: #9a2626;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
 }
 
 .diagnosis-card h3 {
   margin: 10px 0 6px;
   color: #26343f;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.5;
 }
 
@@ -2423,20 +2442,20 @@ select:focus-visible {
   gap: 8px;
   margin-bottom: 9px;
   color: #536571;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.6;
 }
 
 .diagnosis-evidence strong {
   color: #26343f;
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .diagnosis-seed,
 .diagnosis-log-lines {
   color: #7a8791;
   font-family: var(--font-geist-mono), monospace;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .diagnosis-locations {
