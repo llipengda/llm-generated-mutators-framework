@@ -42,7 +42,7 @@ import "@xyflow/react/dist/style.css";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import DEMO_PIT from "./demoPit";
-import type { DiagnosisReport, XmlLocation } from "../lib/datamodel-diagnoser";
+import type { XmlLocation } from "../lib/datamodel-diagnoser";
 
 const KIND_META: Record<string, { label: string; icon: typeof Box; color: string; description: string }> = {
   DataModel: { label: "DataModel", icon: Layers3, color: "blue", description: "可复用的协议数据模型。" },
@@ -62,6 +62,26 @@ type LengthInfo = { minBits: number; maxBits: number | null };
 type ActiveRelation = { sourceKey: string; targetKey: string } | null;
 type ChoiceSelections = Record<string, number>;
 type MergedAncestor = { field: Element; renderKey: string };
+type DiagnosisIssueView = {
+  id: string;
+  title: string;
+  reasoning: string;
+  evidence: string[];
+  fix: string | null;
+  verification: string | null;
+  locations: XmlLocation[];
+  locationPath: string | null;
+  confidence: number | null;
+  category: string | null;
+  affectedSeeds: string[];
+};
+type DiagnosisView = {
+  datamodel: string;
+  logsAnalyzed: number | null;
+  summary: string;
+  issues: DiagnosisIssueView[];
+  uncertainties: string[];
+};
 
 function modelNameOf(element: Element) {
   let current: Element | null = element;
@@ -105,16 +125,37 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function normalizeLocation(value: unknown, doc: XMLDocument): XmlLocation | null {
   if (!isRecord(value)) return null;
-  const descriptor = typeof value.element === "string" ? value.element.toLowerCase() : "";
+  const rawDescriptor = typeof value.path === "string" ? value.path : typeof value.element === "string" ? value.element : "";
+  const descriptor = rawDescriptor.toLowerCase();
   const suppliedName = typeof value.name === "string" ? value.name : null;
   const suppliedTag = typeof value.tag === "string" ? value.tag : null;
+  const pathTags = Array.from(rawDescriptor.matchAll(/(?:^|\/)([\w.-]+)(?:\[|$)/g)).map((match) => match[1]);
+  const terminalTag = pathTags.at(-1) || suppliedTag;
+  const pathNames = Array.from(rawDescriptor.matchAll(/@name\s*=\s*['"]([^'"]+)['"]/g)).map((match) => match[1]);
   const candidates = Array.from(doc.getElementsByTagName("*"));
-  const inferred = candidates
-    .filter((element) => {
+  const inferredElement = candidates
+    .map((element) => {
       const name = element.getAttribute("name");
-      return Boolean(name && descriptor.includes(name.toLowerCase()));
+      const model = modelNameOf(element);
+      const ancestorNames: string[] = [];
+      let ancestor = element.parentElement;
+      while (ancestor) {
+        const ancestorName = ancestor.getAttribute("name");
+        if (ancestorName) ancestorNames.push(ancestorName);
+        ancestor = ancestor.parentElement;
+      }
+      let score = 0;
+      if (suppliedName && name === suppliedName) score += 120;
+      if (terminalTag && element.localName === terminalTag) score += 70;
+      if (name && pathNames.includes(name)) score += 30;
+      if (model && pathNames.includes(model)) score += 24;
+      if (name && descriptor.includes(name.toLowerCase())) score += Math.min(name.length, 20);
+      score += ancestorNames.filter((ancestor) => pathNames.includes(ancestor)).length * 6;
+      return { element, score };
     })
-    .sort((left, right) => (right.getAttribute("name")?.length ?? 0) - (left.getAttribute("name")?.length ?? 0))[0];
+    .filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score)[0]?.element;
+  const inferred = inferredElement?.getAttribute("name") ? inferredElement : inferredElement?.parentElement?.closest("[name]") || inferredElement;
   const attributes = isRecord(value.attributes)
     ? Object.fromEntries(Object.entries(value.attributes).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
     : inferred ? Object.fromEntries(Array.from(inferred.attributes).map((attribute) => [attribute.name, attribute.value])) : {};
@@ -128,8 +169,43 @@ function normalizeLocation(value: unknown, doc: XMLDocument): XmlLocation | null
   };
 }
 
-function normalizeDiagnosis(value: unknown, doc: XMLDocument): DiagnosisReport {
+function normalizeDiagnosis(value: unknown, doc: XMLDocument): DiagnosisView {
   if (!isRecord(value)) throw new Error("诊断结果必须是 JSON 对象。");
+  if ("status" in value) {
+    if (value.status !== "ok") {
+      const message = typeof value.error === "string" ? value.error : typeof value.summary === "string" ? value.summary : "诊断未成功完成。";
+      throw new Error(message);
+    }
+    if (typeof value.summary !== "string" || !Array.isArray(value.issues)) throw new Error("诊断结果缺少 summary 或 issues。");
+    const issues = value.issues.slice(0, 3).map((rawIssue, index): DiagnosisIssueView => {
+      if (!isRecord(rawIssue) || typeof rawIssue.cause !== "string" || typeof rawIssue.evidence !== "string" || typeof rawIssue.fix !== "string") {
+        throw new Error(`诊断结果中的第 ${index + 1} 个问题格式无效。`);
+      }
+      const rawLocation = isRecord(rawIssue.location) ? rawIssue.location : null;
+      if (!rawLocation || typeof rawLocation.path !== "string") throw new Error(`诊断结果中的第 ${index + 1} 个问题缺少 location.path。`);
+      const location = normalizeLocation(rawLocation, doc);
+      return {
+        id: `ISSUE-${index + 1}`,
+        title: rawIssue.cause,
+        reasoning: rawIssue.evidence,
+        evidence: [],
+        fix: rawIssue.fix,
+        verification: null,
+        locations: location ? [location] : [],
+        locationPath: rawLocation.path,
+        confidence: null,
+        category: null,
+        affectedSeeds: [],
+      };
+    });
+    return {
+      datamodel: typeof value.datamodel === "string" ? value.datamodel : "uploaded-datamodel.xml",
+      logsAnalyzed: Number.isFinite(Number(value.logs_analyzed)) ? Number(value.logs_analyzed) : null,
+      summary: value.summary,
+      issues,
+      uncertainties: [],
+    };
+  }
   const judgment = isRecord(value.llm_judgment) ? value.llm_judgment : null;
   if (!judgment || judgment.status === "error") {
     const message = judgment && typeof judgment.error === "string" ? judgment.error : "诊断结果中没有可用的 LLM 结论。";
@@ -138,39 +214,29 @@ function normalizeDiagnosis(value: unknown, doc: XMLDocument): DiagnosisReport {
   const analysis = isRecord(judgment.analysis) ? judgment.analysis : null;
   const rootCauses = analysis && Array.isArray(analysis.root_causes) ? analysis.root_causes.filter(isRecord) : [];
   const priority = analysis && Array.isArray(analysis.priority_order) ? analysis.priority_order.map(String) : [];
-  const rankedCause = priority.map((id) => rootCauses.find((cause) => cause.id === id)).find(Boolean) || rootCauses[0];
+  const rankedCauses = [...priority.map((id) => rootCauses.find((cause) => cause.id === id)).filter((cause): cause is Record<string, unknown> => Boolean(cause)), ...rootCauses.filter((cause) => !priority.includes(String(cause.id)))];
   const legacyCause = isRecord(judgment.root_cause) ? judgment.root_cause : null;
-  const cause = rankedCause || legacyCause;
-  if (!cause) throw new Error("诊断结果中没有 root cause。");
-  const locations = Array.isArray(cause.xml_locations)
-    ? cause.xml_locations.map((location) => normalizeLocation(location, doc)).filter((location): location is XmlLocation => Boolean(location))
-    : [];
-  const classification = ["root_cause", "contributing_factor", "symptom", "uncertain"].includes(String(cause.classification))
-    ? cause.classification as "root_cause" | "contributing_factor" | "symptom" | "uncertain"
-    : "uncertain";
-  const categories = ["reference", "endianness", "layout", "choice", "cardinality", "boundary", "other"];
-  const category = categories.includes(String(cause.category)) ? cause.category as "reference" | "endianness" | "layout" | "choice" | "cardinality" | "boundary" | "other" : "other";
+  const causes = rankedCauses.length > 0 ? rankedCauses : legacyCause ? [legacyCause] : [];
+  if (!causes.length) throw new Error("诊断结果中没有 root cause。");
+  const issues = causes.slice(0, 3).map((cause, index): DiagnosisIssueView => ({
+    id: typeof cause.id === "string" ? cause.id : `RC${index + 1}`,
+    title: typeof cause.title === "string" ? cause.title : "未命名根因",
+    reasoning: typeof cause.reasoning === "string" ? cause.reasoning : "",
+    evidence: Array.isArray(cause.evidence) ? cause.evidence.map(String) : [],
+    fix: typeof cause.suggested_fix === "string" ? cause.suggested_fix : null,
+    verification: typeof cause.verification === "string" ? cause.verification : null,
+    locations: Array.isArray(cause.xml_locations) ? cause.xml_locations.map((location) => normalizeLocation(location, doc)).filter((location): location is XmlLocation => Boolean(location)) : [],
+    locationPath: null,
+    confidence: Number.isFinite(Number(cause.confidence)) ? Number(cause.confidence) : null,
+    category: typeof cause.category === "string" ? cause.category : null,
+    affectedSeeds: Array.isArray(cause.affected_seeds) ? cause.affected_seeds.map(String) : [],
+  }));
   return {
     datamodel: typeof value.datamodel === "string" ? value.datamodel : "uploaded-datamodel.xml",
-    logs_analyzed: Number.isFinite(Number(value.logs_analyzed)) ? Number(value.logs_analyzed) : 0,
-    cross_log_summary: [],
-    reports: [],
-    static_diagnostics: [],
-    llm_judgment: {
-      model: typeof judgment.model === "string" ? judgment.model : "unknown",
-      root_cause: {
-        title: typeof cause.title === "string" ? cause.title : "未命名根因",
-        classification,
-        category,
-        confidence: Number.isFinite(Number(cause.confidence)) ? Number(cause.confidence) : 0,
-        affected_seeds: Array.isArray(cause.affected_seeds) ? cause.affected_seeds.map(String) : [],
-        xml_locations: locations,
-        reasoning: typeof cause.reasoning === "string" ? cause.reasoning : "",
-        evidence: Array.isArray(cause.evidence) ? cause.evidence.map(String) : [],
-        suggested_fix: typeof cause.suggested_fix === "string" ? cause.suggested_fix : null,
-        verification: typeof cause.verification === "string" ? cause.verification : "",
-      },
-    },
+    logsAnalyzed: Number.isFinite(Number(value.logs_analyzed)) ? Number(value.logs_analyzed) : null,
+    summary: analysis && typeof analysis.summary === "string" ? analysis.summary : issues[0].title,
+    issues,
+    uncertainties: analysis && Array.isArray(analysis.uncertainties) ? analysis.uncertainties.map(String) : [],
   };
 }
 function serialize(doc: XMLDocument) {
@@ -760,32 +826,37 @@ function PacketTypeList({ packets, selectedIndex, onSelect }: { packets: Element
   );
 }
 
-function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisReport; fileNames: string[]; onClear: () => void }) {
-  const rootCause = report.llm_judgment?.root_cause;
+function DiagnosisPanel({ report, fileNames, onClear }: { report: DiagnosisView; fileNames: string[]; onClear: () => void }) {
+  const locationCount = report.issues.reduce((total, issue) => total + issue.locations.length, 0);
   return (
     <section className="diagnosis-panel" aria-live="polite">
       <div className="diagnosis-head">
         <div className="diagnosis-title-icon"><Stethoscope size={18} /></div>
-        <div><h2>测试结果诊断</h2></div>
+        <div><span>DATAMODEL DIAGNOSER</span><h2>测试结果诊断</h2></div>
+        <div className="diagnosis-stats">{report.logsAnalyzed !== null && <><strong>{report.logsAnalyzed}</strong><span>份日志</span></>}<strong>{report.issues.length}</strong><span>个问题</span><strong>{locationCount}</strong><span>处定位</span></div>
         <button className="diagnosis-clear" onClick={onClear}>清除诊断</button>
       </div>
-        <div className="diagnosis-files">诊断文件：{fileNames.join("、")}</div>
-      {!rootCause ? (
-        <div className="diagnosis-empty"><CheckCircle2 size={20} /><div><strong>诊断结果中没有单一根因</strong><span>请重新生成并上传有效的诊断 JSON。</span></div></div>
+      <div className="diagnosis-files">诊断文件：{fileNames.join("、")}</div>
+      <div className="diagnosis-summary"><strong>诊断结论</strong><span>{report.summary}</span></div>
+      {report.issues.length === 0 ? (
+        <div className="diagnosis-empty"><CheckCircle2 size={20} /><div><strong>没有发现需要修复的问题</strong><span>诊断报告中的 issues 为空。</span></div></div>
       ) : (
         <div className="diagnosis-grid">
-          <article className="diagnosis-card">
-            <div className="diagnosis-card-top"><code>{rootCause.category}</code></div>
-            <h3>{rootCause.title}</h3>
-            <p className="diagnosis-reasoning">{rootCause.reasoning}</p>
-            <div className="diagnosis-seed">测试：{rootCause.affected_seeds.join("、") || "未指定"}</div>
-            {rootCause.xml_locations.length > 0 && <div className="diagnosis-locations">{rootCause.xml_locations.map((location, locationIndex) => <span key={`${location.line}-${locationIndex}`}><FileCode2 size={11} />第 {location.line} 行 · {location.model ? `${location.model} / ` : ""}{location.tag}{location.name ? ` “${location.name}”` : ""}</span>)}</div>}
-            {rootCause.evidence.length > 0 && <ul>{rootCause.evidence.map((evidence, evidenceIndex) => <li key={evidenceIndex}>{evidence}</li>)}</ul>}
-            {rootCause.suggested_fix && <div className="diagnosis-fix"><strong>建议修复</strong>{rootCause.suggested_fix}</div>}
-            <div className="diagnosis-verification"><strong>验证方式</strong>{rootCause.verification}</div>
-          </article>
+          {report.issues.map((issue, index) => (
+            <article className="diagnosis-card severity-error" key={issue.id}>
+              <div className="diagnosis-card-top"><span className="diagnosis-severity">问题 {String(index + 1).padStart(2, "0")}</span>{issue.category && <code>{issue.category}</code>}{issue.confidence !== null && <strong>{Math.round(issue.confidence * 100)}%</strong>}</div>
+              <h3>{issue.title}</h3>
+              <div className="diagnosis-evidence"><strong>直接证据</strong><span>{issue.reasoning}</span></div>
+              {issue.affectedSeeds.length > 0 && <div className="diagnosis-seed">测试：{issue.affectedSeeds.join("、")}</div>}
+              {(issue.locations.length > 0 || issue.locationPath) && <div className="diagnosis-locations">{issue.locationPath ? <span><FileCode2 size={11} />{issue.locations[0]?.line ? `第 ${issue.locations[0].line} 行 · ` : ""}{issue.locationPath}</span> : issue.locations.map((location, locationIndex) => <span key={`${location.line}-${locationIndex}`}><FileCode2 size={11} />第 {location.line} 行 · {location.model ? `${location.model} / ` : ""}{location.tag}{location.name ? ` “${location.name}”` : ""}</span>)}</div>}
+              {issue.evidence.length > 0 && <ul>{issue.evidence.map((evidence, evidenceIndex) => <li key={evidenceIndex}>{evidence}</li>)}</ul>}
+              {issue.fix && <div className="diagnosis-fix"><strong>修复建议</strong>{issue.fix}</div>}
+              {issue.verification && <div className="diagnosis-verification"><strong>验证方式</strong>{issue.verification}</div>}
+            </article>
+          ))}
         </div>
       )}
+      {report.uncertainties.length > 0 && <div className="diagnosis-uncertainties"><strong>仍需确认</strong><ul>{report.uncertainties.map((uncertainty, index) => <li key={index}>{uncertainty}</li>)}</ul></div>}
     </section>
   );
 }
@@ -806,7 +877,7 @@ export default function Home() {
   const [treeSelectedPath, setTreeSelectedPath] = useState<Path | null>(null);
   const [treeSelectedNodeId, setTreeSelectedNodeId] = useState("entry");
   const [addType, setAddType] = useState("Block");
-  const [diagnosis, setDiagnosis] = useState<DiagnosisReport | null>(null);
+  const [diagnosis, setDiagnosis] = useState<DiagnosisView | null>(null);
   const [diagnosisFiles, setDiagnosisFiles] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
   const resultInput = useRef<HTMLInputElement>(null);
@@ -824,7 +895,7 @@ export default function Home() {
   const entryName = structure?.entry?.getAttribute("name") || "entry_not_found";
   const protocolName = entryName.replace(/_packet_array$/i, "") || "protocol";
   const diagnosticLocations = useMemo(() => {
-    const all = diagnosis?.llm_judgment?.root_cause?.xml_locations ?? [];
+    const all = diagnosis?.issues.flatMap((issue) => issue.locations) ?? [];
     const seen = new Set<string>();
     return all.filter((location) => {
       const key = `${location.model}:${location.tag}:${location.name}:${location.line}`;
@@ -960,9 +1031,12 @@ export default function Home() {
     setError("");
     try {
       const payload: unknown = JSON.parse(await file.text());
-      setDiagnosis(normalizeDiagnosis(payload, doc));
+      const normalized = normalizeDiagnosis(payload, doc);
+      setDiagnosis(normalized);
       setDiagnosisFiles([file.name]);
       setViewMode("canvas");
+      const diagnosedPacketIndex = packetTypes.findIndex((packet) => normalized.issues.some((issue) => issue.locations.some((location) => containsDiagnosticLocation(packet, structure?.byName || new Map(), [location]))));
+      if (diagnosedPacketIndex >= 0) setSelectedPacketIndex(diagnosedPacketIndex);
       setSelectedPath(null);
       setActiveRelation(null);
       setExpandedFields(new Set());
