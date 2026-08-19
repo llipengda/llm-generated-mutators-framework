@@ -797,7 +797,7 @@ function ProtocolTree({ entry, byName, selectedPath, selectedNodeId, onSelect, o
   );
 }
 
-function PacketTypeList({ packets, selectedIndex, onSelect }: { packets: Element[]; selectedIndex: number; onSelect: (index: number) => void }) {
+function PacketTypeList({ packets, byName, diagnosticLocations, selectedIndex, onSelect }: { packets: Element[]; byName: Map<string, Element>; diagnosticLocations: XmlLocation[]; selectedIndex: number; onSelect: (index: number) => void }) {
   return (
     <aside className="packet-type-panel">
       <div className="packet-type-head">
@@ -809,17 +809,19 @@ function PacketTypeList({ packets, selectedIndex, onSelect }: { packets: Element
         {packets.map((packet, index) => {
           const label = nameOf(packet);
           const ref = packet.getAttribute("ref");
+          const diagnosed = diagnosticLocations.length > 0 && containsDiagnosticLocation(packet, byName, diagnosticLocations);
           return (
             <button
               type="button"
               key={`${label}-${ref || "inline"}-${index}`}
-              className={index === selectedIndex ? "is-active" : ""}
+              className={[index === selectedIndex && "is-active", diagnosed && "is-diagnosed"].filter(Boolean).join(" ")}
               aria-current={index === selectedIndex ? "true" : undefined}
+              aria-label={`${label}${diagnosed ? "，包含诊断问题" : ""}`}
               onClick={() => onSelect(index)}
             >
               <span className="packet-type-index">{String(index + 1).padStart(2, "0")}</span>
               <span className="packet-type-copy"><strong>{label}</strong>{ref && <small>{ref}</small>}</span>
-              <ChevronRight size={14} />
+              {diagnosed ? <AlertTriangle className="packet-diagnosis-icon" size={14} /> : <ChevronRight size={14} />}
             </button>
           );
         })}
@@ -1110,7 +1112,7 @@ export default function Home() {
             </div>
             {structure.entry && selectedPacket ? (
               <div className="packet-browser">
-                <PacketTypeList packets={packetTypes} selectedIndex={effectivePacketIndex} onSelect={selectPacket} />
+                <PacketTypeList packets={packetTypes} byName={structure.byName} diagnosticLocations={diagnosticLocations} selectedIndex={effectivePacketIndex} onSelect={selectPacket} />
                 <div className="packet-view">
                   {viewMode === "canvas" ? (
                     <ProtocolNodeCanvas field={selectedPacket} byName={structure.byName} onEdit={selectElement} activeRelation={activeRelation} onRelationChange={setActiveRelation} choiceSelections={choiceSelections} onChoiceChange={changeChoice} expandedFields={expandedFields} onToggleExpanded={toggleExpanded} diagnosticLocations={diagnosticLocations} />
