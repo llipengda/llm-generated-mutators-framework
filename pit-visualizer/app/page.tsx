@@ -494,8 +494,7 @@ function AdaptiveFieldGrid({ className, twoColumns, children }: { className: str
     const resizeObserver = new ResizeObserver(checkFit);
     const mutationObserver = new MutationObserver(checkFit);
     resizeObserver.observe(container);
-    container.querySelectorAll<HTMLElement>(":scope > .flow-column > .flow-item > .inline-field > .inline-field-head").forEach((head) => resizeObserver.observe(head));
-    mutationObserver.observe(container, { attributes: true, attributeFilter: ["data-minimum-width"], childList: true, characterData: true, subtree: true });
+    mutationObserver.observe(container, { childList: true, characterData: true, subtree: true });
     document.fonts?.ready.then(checkFit);
     checkFit();
     return () => {
