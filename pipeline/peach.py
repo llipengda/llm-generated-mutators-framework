@@ -5,9 +5,16 @@ from typing import override
 
 from agent import AgentConfig, build_agent_graph
 from config import get_fixer_enabled
+from datamodel_split import (
+    assemble_datamodel,
+    load_manifest,
+    write_manifest,
+)
 from pipeline.base import BasePipeline
+from tools import get_family_validation_result, reset_family_validation_session
 from ui import (
     UI,
+    ask_before_step,
     ask_regenerate,
     ask_reuse_diagnosis,
     ask_select_types,
@@ -21,6 +28,16 @@ def _env_float(key: str, default: float) -> float:
         return default
     try:
         return float(val)
+    except ValueError:
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    try:
+        return int(val)
     except ValueError:
         return default
 
@@ -42,18 +59,22 @@ class PeachPipeline(BasePipeline):
             model=os.environ.get("LLM_DIAGNOSER_MODEL") or peach_model,
             system_prompt=(
                 "You are an expert in binary protocol parsing and Peach Pit "
-                "DataModels. Diagnose failures directly from files by using "
-                "Read_File, and use RFC_Search when protocol semantics need "
-                "confirmation. Write only the completed diagnosis report to "
-                "the explicitly requested path with Write_File; never modify "
-                "the DataModel, logs, or any other file."
+                "DataModels. Read the DataModel and validator logs, identify a "
+                "small number of actionable root causes, and use RFC_Search only "
+                "when protocol semantics need confirmation. Write only the "
+                "requested diagnosis JSON report; never modify other files."
             ),
         )
         self.diagnosis_agent_graph = build_agent_graph(
             retriever=self.retriever,
             target="peach",
             config=diagnosis_config,
-            tool_names={"Read_File", "RFC_Search", "Write_File"},
+            tool_names={
+                "Read_File",
+                "Read_File_With_Line_Numbers",
+                "RFC_Search",
+                "Write_File",
+            },
         )
         autofix_config = AgentConfig(
             temperature=self.agent_config.temperature,
@@ -69,7 +90,7 @@ class PeachPipeline(BasePipeline):
             retriever=self.retriever,
             target="peach",
             config=autofix_config,
-            tool_names={"Read_File", "Write_File"},
+            tool_names={"Read_File", "Write_File", "Validate_Peach_XML"},
         )
 
     def step_1_packet_types_extraction(self):
@@ -95,6 +116,635 @@ class PeachPipeline(BasePipeline):
         self.save_state()
         UI.success(f"[bold]Parsed Types:[/bold] {packet_types}")
 
+    def _should_split_datamodel_generation(self, packet_types: list[str]) -> bool:
+        mode = os.environ.get("LLM_PEACH_DATAMODEL_SPLIT", "auto").strip().lower()
+        if mode in {"1", "true", "yes", "always"}:
+            return True
+        if mode in {"0", "false", "no", "never"}:
+            return False
+        threshold = max(1, _env_int("LLM_PEACH_DATAMODEL_SPLIT_THRESHOLD", 6))
+        return len(packet_types) >= threshold
+
+    def _generate_split_datamodel(self, packet_types: list[str]) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        output_dir = Path("./llm/peach") / self.protocol_lower
+        fragment_dir = output_dir / "datamodel_fragments"
+        manifest_path = fragment_dir / "schema_manifest.json"
+        seed_manifest_path = fragment_dir / "seed_classification.json"
+        shared_path = fragment_dir / "shared.xml"
+        shared_ready_path = fragment_dir / "shared.xml.ready"
+        group_size = max(1, _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4))
+        workers = max(1, _env_int("LLM_PEACH_DATAMODEL_WORKERS", 4))
+        assembly_retries = max(
+            0, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2)
+        )
+        fragment_dir.mkdir(parents=True, exist_ok=True)
+        shared_ready_path.unlink(missing_ok=True)
+
+        planner_action, planner_extra = ask_before_step(
+            "Step 2.1a: Datamodel Schema Planning"
+            + (" (existing result available)" if manifest_path.is_file() else ""),
+            has_previous=False,
+        )
+        classifier_action, classifier_extra = ask_before_step(
+            "Step 2.1b: Seed Classification"
+            + (" (existing result available)" if seed_manifest_path.is_file() else ""),
+            has_previous=False,
+        )
+        if "exit" in {planner_action, classifier_action}:
+            raise RuntimeError("split DataModel preparation stopped by user")
+        run_planner_task = planner_action == "continue"
+        run_classifier_task = classifier_action == "continue"
+
+        if run_planner_task:
+            manifest_path.unlink(missing_ok=True)
+        elif manifest_path.is_file():
+            UI.dim(f"Schema planning skipped; reusing {manifest_path}.")
+        else:
+            raise RuntimeError(
+                "schema planning was skipped, but no existing schema manifest "
+                f"is available at {manifest_path}"
+            )
+
+        if run_classifier_task:
+            seed_manifest_path.unlink(missing_ok=True)
+        elif seed_manifest_path.is_file():
+            UI.dim(f"Seed classification skipped; reusing {seed_manifest_path}.")
+        else:
+            UI.dim(
+                "Seed classification skipped with no existing result; early "
+                "family validation will be skipped."
+            )
+
+        selected_tasks = []
+        if run_planner_task:
+            selected_tasks.append("schema planning")
+        if run_classifier_task:
+            selected_tasks.append("seed classification")
+        if selected_tasks:
+            UI.dim(
+                f"Starting {' and '.join(selected_tasks)} for "
+                f"{len(packet_types)} packet types."
+            )
+
+        planner_prompt = f"""
+        Plan the decomposition of a complete Peach Pit DataModel for the
+        {self.protocol_name} protocol and these packet types: {packet_types}.
+
+        FIRST, use Read_File to read "./peach/peach.txt" completely. Treat it as
+        the authoritative catalog of supported Peach elements, custom elements,
+        attributes, relations, and syntax. This is a lightweight
+        interface-planning task; do not generate XML and do not propose any
+        element type or construct that is absent from peach.txt.
+
+        Use RFC_Search to identify common wire primitives, shared headers, shared
+        option/property structures, packet discriminators, and closely related
+        packet families. Group all packet types into families of at most
+        {group_size} types so those families can be generated independently.
+        Any wire element or semantic DataModel used by packet types in more than
+        one family MUST be declared as a shared model; family tasks must never
+        independently define the same model name.
+
+        Write exactly one JSON object to "{manifest_path}" using Write_File:
+        {{
+          "protocol": "{self.protocol_lower}",
+          "shared_models": [
+            {{"name": "model_name", "purpose": "wire-level responsibility",
+              "fields": [{{"name": "field_name",
+                "peach_element": "exact supported element from peach.txt",
+                "wire_contract": "ordered encoding responsibility"}}]}}
+          ],
+          "packet_groups": [
+            {{"id": "ascii_lower_snake_case_id",
+              "packet_types": ["exact values from the requested list"],
+              "shared_refs": ["shared model names this family may reference"],
+              "rfc_queries": ["focused evidence queries for this family"]}}
+          ]
+        }}
+
+        Every requested packet type must occur exactly once. Shared model names
+        are an immutable interface contract for the parallel generation tasks.
+        Every peach_element and planned construct must be supported by the
+        peach.txt file you read; never invent a convenient protocol-specific
+        type. If no specialized type exists, plan a composition of documented
+        primitive elements instead.
+        Keep the plan concise. Do not write any other file.
+        """
+        seed_classifier_prompt = f"""
+        Classify every binary seed in "{self.seed_dir}" for the
+        {self.protocol_name} protocol. Requested packet types: {packet_types}.
+
+        First call Inspect_Seed_Directory for that directory. Use RFC_Search to
+        identify the packet discriminator and framing/length rules. Walk the
+        entire byte sequence of each seed: a seed is `single_packet=true` only
+        when exactly one complete packet consumes the whole file. Do not infer
+        packet count from the filename alone.
+
+        Write exactly one JSON object to "{seed_manifest_path}":
+        {{
+          "protocol": "{self.protocol_lower}",
+          "seeds": [{{
+            "file": "relative/path.raw",
+            "packet_count": 1,
+            "packet_types": ["exact requested packet type"],
+            "single_packet": true,
+            "confidence": "high | medium | low",
+            "evidence": "discriminator and framing evidence"
+          }}]
+        }}
+
+        Include every inspected seed exactly once. If framing is ambiguous, use
+        low confidence and set single_packet=false. Do not write any other file.
+        """
+
+        def run_planner() -> None:
+            planner_agent = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.agent_config,
+                tool_names={"Read_File", "RFC_Search", "Write_File"},
+            )
+            self.call_agent(
+                planner_prompt
+                + (f"\n\nAdditional user instruction:\n{planner_extra}" if planner_extra else ""),
+                "Step 2.1: Datamodel Schema Planning",
+                agent_graph=planner_agent,
+            )
+
+        def run_seed_classifier() -> None:
+            try:
+                classifier_agent = build_agent_graph(
+                    retriever=self.retriever,
+                    target="peach",
+                    config=self.agent_config,
+                    tool_names={
+                        "Inspect_Seed_Directory",
+                        "RFC_Search",
+                        "Write_File",
+                    },
+                )
+                self.call_agent(
+                    seed_classifier_prompt
+                    + (
+                        f"\n\nAdditional user instruction:\n{classifier_extra}"
+                        if classifier_extra
+                        else ""
+                    ),
+                    "Step 2.1: Seed Classification",
+                    agent_graph=classifier_agent,
+                )
+            except Exception as error:
+                UI.warn(
+                    "Seed classification failed; family validation will be "
+                    f"skipped, but full validation is preserved: {error}"
+                )
+
+        preparation_tasks = []
+        if run_planner_task:
+            preparation_tasks.append(run_planner)
+        if run_classifier_task:
+            preparation_tasks.append(run_seed_classifier)
+        if preparation_tasks:
+            with ThreadPoolExecutor(max_workers=len(preparation_tasks)) as executor:
+                planning_futures = [
+                    executor.submit(task) for task in preparation_tasks
+                ]
+                for future in as_completed(planning_futures):
+                    future.result()
+            UI.dim("Selected DataModel preparation tasks completed.")
+
+        manifest, warning = load_manifest(
+            manifest_path,
+            self.protocol_lower,
+            packet_types,
+            group_size,
+        )
+        if warning:
+            write_manifest(manifest_path, manifest)
+            raise ValueError(
+                "schema planner did not produce a valid manifest; a diagnostic "
+                f"fallback manifest was saved: {warning}"
+            )
+
+        classified_seeds = self._load_single_packet_seeds(
+            seed_manifest_path, packet_types
+        )
+        classified_count = sum(len(paths) for paths in classified_seeds.values())
+        UI.dim(
+            f"Seed classification selected {classified_count} high-confidence "
+            "single-packet seed(s) for early family validation."
+        )
+
+        manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
+
+        def generate_shared() -> None:
+            shared_path.unlink(missing_ok=True)
+            UI.dim(f"Generating shared DataModels at {shared_path}.")
+            prompt = f"""
+            Generate only the shared portion of a Peach Pit for
+            {self.protocol_name}. The immutable schema contract is:
+
+            {manifest_json}
+
+            Read "./prompts/peach_datamodel_example.xml" and
+            "./peach/peach.txt" before writing. Use RFC_Search to confirm every
+            shared field and encoding. Write one well-formed standalone <Peach>
+            XML document to "{shared_path}". It must contain exactly one
+            <Defaults> followed only by reusable primitives and shared
+            <DataModel> definitions. Do not define packet-specific models,
+            <DataModel name="{self.protocol_lower}_packet_t">, or
+            <DataModel name="{self.protocol_lower}_packet_array">.
+
+            Every DataModel referenced by `ref` must be defined earlier in this
+            fragment. Order shared definitions by dependency and never create a
+            cyclic DataModel reference.
+
+            Honor the shared model names in the contract exactly. Do not write
+            prose, Markdown, TODOs, or any other file.
+
+            After writing, call Validate_Peach_XML on "{shared_path}". If it
+            returns FAIL, use its line-specific XSD diagnostics to correct this
+            fragment and validate again. Make at most three XSD repair attempts
+            and finish only after PASS. An ERROR means validator infrastructure
+            is unavailable and must be reported; do not claim validation passed.
+            """
+            agent = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.agent_config,
+                tool_names={
+                    "Read_File",
+                    "RFC_Search",
+                    "Write_File",
+                    "Validate_Peach_XML",
+                },
+            )
+            self.call_agent(
+                prompt,
+                "Step 2.2: Shared Datamodel Generation",
+                agent_graph=agent,
+            )
+            if not shared_path.is_file():
+                raise RuntimeError(f"shared DataModel was not generated: {shared_path}")
+            shared_ready_path.touch()
+            UI.success(f"Shared DataModels generated: {shared_path}")
+
+        def generate_group(group: dict, index: int) -> Path:
+            group_path = fragment_dir / f"packet_{group['id']}.xml"
+            group_path.unlink(missing_ok=True)
+            seed_paths = [
+                path
+                for packet_type in group["packet_types"]
+                for path in classified_seeds.get(packet_type, [])
+            ]
+            reset_family_validation_session(str(group_path))
+            validation_instructions = ""
+            tool_names = {
+                "Read_File",
+                "RFC_Search",
+                "Write_File",
+                "Validate_Peach_XML",
+            }
+            if seed_paths:
+                tool_names.add("Validate_DataModel_Family")
+                validation_instructions = f"""
+            After writing the fragment, validate it yourself by calling
+            Validate_DataModel_Family with:
+            - protocol: "{self.protocol_lower}"
+            - group_id: "{group['id']}"
+            - seed_files: {json.dumps([str(path) for path in seed_paths])}
+            - fragment_dir: "{fragment_dir}"
+            - output_dir: "{output_dir}"
+
+            The validation tool checks for shared.xml and waits when shared
+            generation is still running. If it returns WAITING, do not edit or
+            count a repair: call it again. If it returns BLOCKED_SHARED, stop
+            family repair and defer the shared problem to integration repair. If
+            it returns FAIL, read the reported logs, diagnose the family
+            fragment, make the smallest correction, and call the tool again. You
+            may repair at most THREE times. The tool enforces this limit. Stop
+            immediately on PASS or REPAIR_LIMIT_REACHED. Never modify shared.xml
+            during family repair.
+            """
+            UI.dim(
+                f"Starting family {group['id']} generation with "
+                f"{len(seed_paths)} early-validation seed(s)."
+            )
+            prompt = f"""
+            Generate the packet-specific Peach DataModels for one independent
+            {self.protocol_name} packet family.
+
+            Complete immutable schema contract:
+            {manifest_json}
+
+            Assigned family:
+            {json.dumps(group, ensure_ascii=False, indent=2)}
+
+            Before generating XML, use Read_File to read BOTH
+            "./prompts/peach_datamodel_example.xml" and "./peach/peach.txt".
+            Follow peach.txt as the authoritative list and syntax of supported
+            Peach elements; never invent an element or attribute it does not
+            document.
+            Use RFC_Search separately for every assigned packet type and confirm
+            discriminator, field order, bit widths/endianness, length encoding,
+            optional conditions, repetitions, and payload structure. References
+            outside this fragment may target only shared model names declared by
+            the contract. Define all family-local component models and exactly
+            one packet model named
+            "{self.protocol_lower}_<normalized_packet_type>_packet_t" for every
+            assigned type. Do not define a model whose name or wire-level meaning
+            belongs to another family; cross-family models belong in shared.xml.
+
+            Write one well-formed standalone <Peach> XML document containing
+            only this family's <DataModel> definitions to "{group_path}". Do not
+            include <Defaults>, shared model definitions, packet_union, or
+            packet_array. Do not write prose, Markdown, TODOs, or any other file.
+
+            Within this fragment, and in the final assembled file, every
+            DataModel referenced by `ref` MUST be defined before the DataModel
+            that references it. Write local component definitions in dependency
+            order. Cyclic DataModel references are forbidden.
+
+            Immediately after writing "{group_path}", call Validate_Peach_XML
+            on it. If XSD validation fails, repair only this fragment from the
+            reported line-specific errors and retry, with at most three XSD
+            repair attempts. Do not call Validate_DataModel_Family until
+            Validate_Peach_XML returns PASS. If the XSD tool returns ERROR,
+            report the infrastructure problem and never claim the XML is valid.
+            {validation_instructions}
+            """
+            agent = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.agent_config,
+                tool_names=tool_names,
+            )
+            self.call_agent(
+                prompt,
+                f"Step 2.2.{index + 1}: Datamodel Family {group['id']}",
+                agent_graph=agent,
+            )
+            if not group_path.is_file():
+                raise RuntimeError(f"family fragment was not generated: {group_path}")
+            if seed_paths:
+                result = get_family_validation_result(str(group_path))
+                status = str(result.get("status"))
+                validations = int(result.get("validations", 0))
+                if status == "PASS":
+                    UI.success(
+                        f"Family {group['id']} passed early validation after "
+                        f"{validations} validation run(s)."
+                    )
+                else:
+                    UI.warn(
+                        f"Family {group['id']} early validation ended with "
+                        f"status={status}, runs={validations}; final validation "
+                        "and repair remain enabled."
+                    )
+            else:
+                UI.dim(
+                    f"Family {group['id']} has no eligible single-packet seeds; "
+                    "early validation skipped."
+                )
+            return group_path
+
+        packet_groups = manifest["packet_groups"]
+        max_workers = min(workers, len(packet_groups) + 1)
+        UI.dim(
+            f"Launching shared generation and {len(packet_groups)} family "
+            f"generation task(s) with {max_workers} worker(s)."
+        )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(generate_shared)]
+            for index, group in enumerate(packet_groups):
+                futures.append(executor.submit(generate_group, group, index))
+            for future in as_completed(futures):
+                future.result()
+        UI.dim("All shared and family generation tasks completed; assembling fragments.")
+
+        manifest = self._assemble_split_with_repair(
+            packet_types=packet_types,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            shared_path=shared_path,
+            fragment_dir=fragment_dir,
+            output_dir=output_dir,
+            group_size=group_size,
+            assembly_retries=assembly_retries,
+        )
+        UI.success(
+            f"Assembled {len(manifest['packet_groups'])} packet-family fragments "
+            f"into {output_dir / 'datamodel.xml'}."
+        )
+
+    def _load_single_packet_seeds(
+        self, seed_manifest_path: Path, packet_types: list[str]
+    ) -> dict[str, list[Path]]:
+        try:
+            classification = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+            entries = classification["seeds"]
+            if not isinstance(entries, list):
+                raise TypeError("seeds must be a list")
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+            UI.warn(f"Seed classification unavailable; skipping family validation: {error}")
+            return {}
+
+        known_types = {packet_type.casefold(): packet_type for packet_type in packet_types}
+        seed_root = Path(self.seed_dir).resolve()
+        classified: dict[str, list[Path]] = {}
+        seen: set[Path] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_types = entry.get("packet_types")
+            if (
+                entry.get("single_packet") is not True
+                or entry.get("packet_count") != 1
+                or str(entry.get("confidence", "")).lower() != "high"
+                or not isinstance(entry_types, list)
+                or len(entry_types) != 1
+            ):
+                UI.dim(
+                    f"Skipping seed {entry.get('file', '')} due to "
+                    f"{'single_packet' if entry.get('single_packet') is not True else ''}"
+                    f"{'packet_count' if entry.get('packet_count') != 1 else ''}"
+                    f"{'confidence' if str(entry.get('confidence', '')).lower() != 'high' else ''}"
+                    f"{'packet_types' if not isinstance(entry_types, list) or len(entry_types) != 1 else ''}"
+                )
+                continue
+            type_key = str(entry_types[0]).casefold()
+            if type_key not in known_types:
+                continue
+            relative = Path(str(entry.get("file", "")))
+            seed_path = (seed_root / relative).resolve()
+            try:
+                seed_path.relative_to(seed_root)
+            except ValueError:
+                continue
+            if not seed_path.is_file() or seed_path in seen:
+                continue
+            seen.add(seed_path)
+            classified.setdefault(known_types[type_key], []).append(seed_path)
+        return classified
+
+    def _assemble_split_with_repair(
+        self,
+        *,
+        packet_types: list[str],
+        manifest: dict,
+        manifest_path: Path,
+        shared_path: Path,
+        fragment_dir: Path,
+        output_dir: Path,
+        group_size: int,
+        assembly_retries: int,
+    ) -> dict:
+        for attempt in range(assembly_retries + 1):
+            packet_groups = manifest["packet_groups"]
+            packet_paths = [
+                fragment_dir / f"packet_{group['id']}.xml"
+                for group in packet_groups
+            ]
+            try:
+                assemble_datamodel(
+                    protocol=self.protocol_lower,
+                    packet_types=packet_types,
+                    shared_fragment=shared_path,
+                    packet_fragments=packet_paths,
+                    output_path=output_dir / "datamodel.xml",
+                    expected_shared_models=[
+                        str(model["name"])
+                        for model in manifest["shared_models"]
+                    ],
+                )
+                break
+            except (OSError, ValueError) as error:
+                if attempt >= assembly_retries:
+                    raise RuntimeError(
+                        "split DataModel assembly still fails after "
+                        f"{assembly_retries} integration repair attempts: {error}"
+                    ) from error
+
+                UI.warning_rule(
+                    "Step 2.3: Datamodel Integration Repair "
+                    f"{attempt + 1}/{assembly_retries}"
+                )
+                repair_prompt = f"""
+                Repair the generated {self.protocol_name} DataModel fragments so
+                they can be assembled without discarding the split design.
+
+                Assembly error:
+                {error}
+
+                Read these files before editing:
+                - "{manifest_path}"
+                - "{shared_path}"
+                {os.linesep.join(f'- "{path}"' for path in packet_paths)}
+
+                Preserve every packet type, packet-group id, packet assignment,
+                and wire-level field semantics. Modify only the manifest and the
+                listed fragment files. Do not create datamodel.xml yourself.
+
+                Integration rules:
+                - A model used by more than one family belongs in shared.xml.
+                  Add it to shared_models, add it to each consuming shared_refs,
+                  keep one canonical definition, and remove local duplicates.
+                - If equal names intentionally represent different wire formats,
+                  rename them with family-specific names and update all refs.
+                - Every external ref from a packet fragment must resolve to a
+                  model declared and defined in shared.xml.
+                - Keep exactly one Defaults in shared.xml and none in packet
+                  fragments. Do not define packet_union or packet_array.
+                - In every fragment and in the assembled output, a referenced
+                  DataModel must appear before the DataModel that references it.
+                  Reorder definitions as needed; cyclic refs are forbidden.
+                - Make the smallest changes required by the reported error.
+
+                Use RFC_Search only if choosing a canonical wire definition
+                requires protocol evidence. Finish only after writing all needed
+                corrections with Write_File. Then call Validate_Peach_XML on
+                shared.xml and every packet fragment listed above. Repair any
+                XSD violations and revalidate, with at most three XSD repair
+                attempts per file. Finish only when every file returns PASS; an
+                ERROR must be reported as validator infrastructure failure.
+                """
+                repair_agent = build_agent_graph(
+                    retriever=self.retriever,
+                    target="peach",
+                    config=self.agent_config,
+                    tool_names={
+                        "Read_File",
+                        "RFC_Search",
+                        "Write_File",
+                        "Validate_Peach_XML",
+                    },
+                )
+                self.call_agent(
+                    repair_prompt,
+                    f"Step 2.3.{attempt + 1}: Datamodel Integration Repair",
+                    agent_graph=repair_agent,
+                )
+                manifest, warning = load_manifest(
+                    manifest_path,
+                    self.protocol_lower,
+                    packet_types,
+                    group_size,
+                )
+                if warning:
+                    raise RuntimeError(
+                        "integration repair produced an invalid schema manifest: "
+                        f"{warning}"
+                    )
+        return manifest
+
+    def repair_datamodel_assembly(self) -> None:
+        """Repair and assemble existing fragments without regenerating them."""
+        output_dir = Path("./llm/peach") / self.protocol_lower
+        fragment_dir = output_dir / "datamodel_fragments"
+        manifest_path = fragment_dir / "schema_manifest.json"
+        shared_path = fragment_dir / "shared.xml"
+        try:
+            raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw_groups = raw_manifest["packet_groups"]
+            packet_types = [
+                str(packet)
+                for group in raw_groups
+                for packet in group["packet_types"]
+            ]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"cannot load split DataModel manifest {manifest_path}: {error}"
+            ) from error
+
+        group_size = max(
+            max((len(group.get("packet_types", [])) for group in raw_groups), default=1),
+            _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4),
+        )
+        manifest, warning = load_manifest(
+            manifest_path,
+            self.protocol_lower,
+            packet_types,
+            group_size,
+        )
+        if warning:
+            raise RuntimeError(f"invalid schema manifest: {warning}")
+        retries = max(1, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2))
+        manifest = self._assemble_split_with_repair(
+            packet_types=packet_types,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            shared_path=shared_path,
+            fragment_dir=fragment_dir,
+            output_dir=output_dir,
+            group_size=group_size,
+            assembly_retries=retries,
+        )
+        UI.success(
+            f"Repaired and assembled {len(manifest['packet_groups'])} packet-family "
+            f"fragments into {output_dir / 'datamodel.xml'}."
+        )
+
     def step_2_datamodel_generation(self):
         UI.title("Step 2: Datamodel Generation")
 
@@ -103,6 +753,14 @@ class PeachPipeline(BasePipeline):
             UI.warn(
                 "Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run."
             )
+
+        if packet_types and self._should_split_datamodel_generation(packet_types):
+            UI.dim(
+                "Using adaptive split generation: one schema plan followed by "
+                "parallel shared and packet-family generation."
+            )
+            self._generate_split_datamodel(packet_types)
+            return
 
         step2_prompt = f"""
         Generate one complete Peach Pit file that precisely models every requested
@@ -204,6 +862,10 @@ class PeachPipeline(BasePipeline):
 
         Use "Write_File" to save only the finished XML to
         "./llm/peach/{self.protocol_lower}/datamodel.xml".
+        Then call Validate_Peach_XML on that file. If it returns FAIL, correct
+        the line-specific XSD violations and validate again, with at most three
+        XSD repair attempts. Finish only after PASS. If it returns ERROR, report
+        the validator infrastructure failure and do not claim the XML is valid.
         """
 
         self.call_agent(step2_prompt, "Step 2: Datamodel Generation")
@@ -232,192 +894,109 @@ class PeachPipeline(BasePipeline):
         )
 
     def diagnose_datamodel_failure(self, test_output: str) -> str:
-        """Diagnose through the pipeline agent using Read_File tool calls."""
+        """Produce a small, actionable diagnosis from the DataModel and logs."""
         output_dir = Path("./llm/peach") / self.protocol_lower
         datamodel_path = output_dir / "datamodel.xml"
         log_dir = output_dir / "dm_test_logs"
         report_path = output_dir / "datamodel_diagnosis.json"
         report: dict[str, object] = {
-            "diagnosis_mode": "llm",
-            "datamodel": str(datamodel_path),
-            "logs_analyzed": 0,
-            "log_files": [],
-            "cross_log_summary": [],
-            "reports": [],
-            "static_diagnostics": [],
+            "status": "error",
+            "summary": "诊断尚未完成。",
+            "issues": [],
         }
 
         try:
+            report_path.unlink(missing_ok=True)
+            validator_summary = next(
+                (
+                    line.strip()
+                    for line in reversed(test_output.splitlines())
+                    if line.strip()
+                ),
+                "validator failed",
+            )
             prompt = f"""
-        Diagnose the failed {self.protocol_name} Peach DataModel directly from
-        its source files. Do not use heuristic rules or prior diagnosis.
+        Diagnose the failed {self.protocol_name} Peach DataModel.
+        Validator summary: {validator_summary}
 
-        The validator summary was:
-        ```
-        {test_output}
-        ```
+        1. Use Read_File_With_Line_Numbers to read "{datamodel_path}" so every
+           reported location uses the real 1-based XML source line.
+        2. List "{log_dir}" and read up to three representative .log files;
+           do not exhaustively analyze duplicate failures.
+        3. Identify at most three root causes. Ignore cascading Choice token
+           mismatches and repeated symptoms.
+        4. Use RFC_Search only when a wire-format fact must be confirmed.
 
-        You MUST perform these tool calls before answering:
-        1. Call "Read_File" for "{datamodel_path}".
-        2. Call "Read_File" for "{log_dir}" to obtain the directory listing.
-        3. Call "Read_File" separately for EVERY .log file in that listing.
-
-        Analyze the raw file contents yourself. Respect log ordering, distinguish
-        root causes from cascading Choice-branch symptoms, and do not invent
-        protocol facts. After reading all files, use "RFC_Search" as needed to
-        confirm packet layout, field semantics, constraints, byte order, length
-        encoding, optionality, or repetition rules. Ask focused RFC questions
-        instead of relying on prior knowledge, and distinguish RFC-backed facts
-        from conclusions supported only by logs. This is diagnosis only: never
-        modify the DataModel or logs.
-
-        Build one JSON report with this shape:
+        Use Write_File to write exactly this compact JSON object in Chinese to
+        "{report_path}":
         {{
-          "diagnosis_mode": "llm",
-          "datamodel": "{datamodel_path}",
-          "logs_analyzed": 1,
-          "log_files": ["path/to/failure.log"],
-          "cross_log_summary": [],
-          "reports": [],
-          "static_diagnostics": [],
-          "llm_judgment": {{
-            "status": "ok",
-            "model": "{os.environ.get('LLM_DIAGNOSER_MODEL') or self.agent_config.model}",
-            "analysis": {{
-              "summary": "short Chinese conclusion",
-              "root_causes": [{{
-                "id": "RC1",
-                "title": "concise Chinese title",
-                "classification": "root_cause | contributing_factor | symptom | uncertain",
-                "category": "reference | endianness | layout | choice | cardinality | boundary | other",
-                "confidence": 0.0,
-                "affected_seeds": ["seed.raw"],
-                "xml_locations": [{{
-                  "line": 1,
-                  "tag": "Number",
-                  "name": "field_name",
-                  "model": "packet_model",
-                  "attributes": {{}}
-                }}],
-                "reasoning": "why this is causal",
-                "evidence": ["raw file evidence"],
-                "suggested_fix": "focused candidate change or null",
-                "verification": "focused re-test"
-              }}],
-              "causal_relationships": [],
-              "priority_order": ["RC1"],
-              "uncertainties": []
-            }}
-          }}
+          "status": "ok",
+          "summary": "一句话结论",
+          "issues": [{{
+            "location": {{
+              "line": 123,
+              "path": "DataModel[@name='模型名']/Block[@name='元素名']/Relation"
+            }},
+            "cause": "为什么这里是根因",
+            "evidence": "日志中的直接证据",
+            "fix": "具体且局部的修改"
+          }}]
         }}
 
-        After the diagnosis is complete, you MUST call "Write_File" exactly
-        once with filepath "{report_path}" and the complete JSON report as its
-        content. Do not write any other file. After that tool succeeds, return
-        only the same JSON object without Markdown fences.
+        Write no other file. After Write_File succeeds, your final response may
+        only briefly confirm that the report was saved; do not print the JSON.
         """
-            response = self.call_agent(
+            self.call_agent(
                 prompt,
                 "Step 3: Datamodel Failure Diagnosis",
                 agent_graph=self.diagnosis_agent_graph,
             )
-            read_calls: dict[str, tuple[str, str | None]] = {}
-            write_calls: list[tuple[str, str, str]] = []
-            tool_outputs: dict[str, str] = {}
-            for message in response["messages"]:
-                for call in getattr(message, "tool_calls", []) or []:
-                    args = call.get("args", {})
-                    if not isinstance(args, dict):
-                        continue
-                    filepath = args.get("filepath")
-                    if call.get("name") == "Read_File" and isinstance(filepath, str):
-                        read_calls[os.path.normpath(filepath)] = (
-                            str(call.get("id", "")),
-                            filepath,
-                        )
-                    if (
-                        call.get("name") == "Write_File"
-                        and isinstance(filepath, str)
-                        and isinstance(args.get("content"), str)
-                    ):
-                        write_calls.append(
-                            (
-                                os.path.normpath(filepath),
-                                args["content"],
-                                str(call.get("id", "")),
-                            )
-                        )
-                tool_call_id = getattr(message, "tool_call_id", None)
-                if isinstance(tool_call_id, str):
-                    tool_outputs[tool_call_id] = str(message.content)
-
-            normalized_datamodel = os.path.normpath(str(datamodel_path))
-            normalized_log_dir = os.path.normpath(str(log_dir))
-            if normalized_datamodel not in read_calls or normalized_log_dir not in read_calls:
-                raise RuntimeError(
-                    "Diagnosis agent did not read the datamodel and log directory"
-                )
-            listing_call_id = read_calls[normalized_log_dir][0]
-            listing = tool_outputs.get(listing_call_id, "")
-            expected_logs = {
-                os.path.normpath(str(log_dir / name.strip()))
-                for name in listing.splitlines()[1:]
-                if name.strip().endswith(".log")
-            }
-            missing_logs = expected_logs.difference(read_calls)
-            if missing_logs:
-                raise RuntimeError(
-                    "Diagnosis agent did not read every failure log: "
-                    + ", ".join(sorted(missing_logs))
-                )
-            normalized_report_path = os.path.normpath(str(report_path))
-            if len(write_calls) != 1 or write_calls[0][0] != normalized_report_path:
-                raise RuntimeError(
-                    "Diagnosis agent must write exactly one diagnosis report "
-                    f"to {report_path}"
-                )
-            write_output = tool_outputs.get(write_calls[0][2], "")
-            if not write_output.startswith("SUCCESS:"):
-                raise RuntimeError(
-                    f"Diagnosis report write did not succeed: {write_output}"
-                )
-            stripped = write_calls[0][1].strip()
-            if stripped.startswith("```"):
-                stripped = stripped.removeprefix("```json").removeprefix("```")
-                stripped = stripped.removesuffix("```").strip()
-            written_report = json.loads(stripped)
-            judgment = (
-                written_report.get("llm_judgment", {})
-                if isinstance(written_report, dict)
-                else {}
-            )
-            analysis = judgment.get("analysis", {}) if isinstance(judgment, dict) else {}
-            if not isinstance(analysis, dict) or not isinstance(
-                analysis.get("root_causes"), list
+            candidate = json.loads(report_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(candidate, dict)
+                or candidate.get("status") != "ok"
+                or not isinstance(candidate.get("summary"), str)
+                or not isinstance(candidate.get("issues"), list)
             ):
                 raise RuntimeError("Diagnosis agent wrote an invalid JSON schema")
-            report = written_report
+            candidate["issues"] = candidate["issues"][:3]
+            for index, issue in enumerate(candidate["issues"]):
+                location = issue.get("location") if isinstance(issue, dict) else None
+                if (
+                    not isinstance(issue, dict)
+                    or not all(
+                        isinstance(issue.get(key), str)
+                        for key in ("cause", "evidence", "fix")
+                    )
+                    or not isinstance(location, dict)
+                    or type(location.get("line")) is not int
+                    or location["line"] < 1
+                    or not isinstance(location.get("path"), str)
+                    or not location["path"].strip()
+                    or "DataModel" not in location["path"]
+                ):
+                    raise RuntimeError(
+                        f"Diagnosis issue {index + 1} has an invalid JSON schema"
+                    )
+            report = candidate
         except Exception as error:
             UI.warn(f"Datamodel LLM diagnosis failed: {error}")
-            report["llm_judgment"] = {
-                "status": "error",
-                "model": (
-                    os.environ.get("LLM_DIAGNOSER_MODEL")
-                    or self.agent_config.model
-                ),
-                "error": str(error),
-            }
+            report["error"] = str(error)
+            report_path.unlink(missing_ok=True)
 
         diagnosis = json.dumps(report, indent=2, ensure_ascii=False)
-        judgment = report.get("llm_judgment", {})
-        if isinstance(judgment, dict) and judgment.get("status") == "ok":
-            UI.success(f"Datamodel diagnosis saved to {report_path} by the agent.")
+        if report.get("status") == "ok":
+            UI.success(f"Datamodel diagnosis saved to {report_path}.")
         UI.panel(
             diagnosis,
             title="Datamodel LLM Diagnosis",
             border_style="cyan",
             expand=True,
         )
+        if report.get("status") != "ok":
+            raise RuntimeError(
+                "DataModel diagnosis agent did not write a valid diagnosis report"
+            )
         return diagnosis
 
     def step_3_datamodel_validation_and_fix(self):
@@ -445,16 +1024,20 @@ class PeachPipeline(BasePipeline):
 
         **FIRST ACTION**: Use "Read_File" to read
         "./llm/peach/{self.protocol_lower}/datamodel_diagnosis.json".
-        Treat its `llm_judgment.analysis.priority_order` and ranked root causes
-        as the complete repair plan. Address the highest-priority confirmed root
-        cause first.
+        Treat its `issues` array, in order, as the complete repair plan.
+        For every issue, use `location.line` and `location.path` to find and
+        confirm the exact XML element before modifying it.
 
         You need to:
-        1. Read and prioritize the diagnosis report.
+        1. Read the diagnosis report and apply its issues in order.
         2. Use "Read_File" to read only the current DataModel at
            "./llm/peach/{self.protocol_lower}/datamodel.xml".
         3. Apply the diagnosed fixes without performing another diagnosis.
         4. Use "Write_File" to save the repaired DataModel to that same path.
+        5. Call Validate_Peach_XML on the repaired file. If it returns FAIL,
+           correct only the reported schema violations and validate again. Do
+           not finish until it returns PASS; report ERROR as infrastructure
+           failure rather than claiming success.
 
         Do NOT read validator output, failure logs, seed files, or any other
         source. Do NOT call RFC_Search. The diagnosis report is the sole source

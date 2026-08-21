@@ -1,10 +1,59 @@
 import os
+import json
+import re
+import shutil
 import subprocess
+import tempfile
+import threading
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from langchain_core.tools import tool
 from langchain_core.retrievers import BaseRetriever
 
 from log import console, file_logger
+
+
+_family_validation_lock = threading.Lock()
+_family_validation_runs: dict[str, dict[str, object]] = {}
+
+
+_VALIDATION_SUMMARY_RE = re.compile(
+    r"^\[(PASS|FAIL)\]\s+\d+/\d+\s+tests passed\.?\s*$"
+)
+
+
+def _datamodel_validation_passed(returncode: int, stdout: str) -> tuple[bool, str]:
+    """Read the validator summary from stdout, ignoring Docker stderr warnings."""
+    summaries = [
+        (match.group(1), line.strip())
+        for line in stdout.splitlines()
+        if (match := _VALIDATION_SUMMARY_RE.match(line.strip()))
+    ]
+    if not summaries:
+        return False, "validator produced no [PASS]/[FAIL] summary"
+    marker, summary = summaries[-1]
+    return returncode == 0 and marker == "PASS", summary
+
+
+def reset_family_validation_session(fragment_path: str) -> None:
+    """Reset the hard validation budget before starting one family agent."""
+    with _family_validation_lock:
+        _family_validation_runs[str(Path(fragment_path).resolve())] = {
+            "validations": 0,
+            "status": "NOT_RUN",
+        }
+
+
+def get_family_validation_result(fragment_path: str) -> dict[str, object]:
+    with _family_validation_lock:
+        return dict(
+            _family_validation_runs.get(
+                str(Path(fragment_path).resolve()),
+                {"validations": 0, "status": "NOT_RUN"},
+            )
+        )
 
 
 @tool("Save_And_Verify_Code")
@@ -83,6 +132,30 @@ TOOL RESPONSE:
         return f"ERROR: Could not read file {filepath}. {str(e)}"
 
 
+@tool("Read_File_With_Line_Numbers")
+def read_file_with_line_numbers(
+    filepath: str, *, line_count: int = -1, start_line: int = 1
+) -> str:
+    """Read a text file with stable 1-based source line numbers."""
+    console.log(
+        f"[dim]Tool: Reading numbered file {filepath} "
+        f"(lines {start_line}+)[/dim]"
+    )
+    try:
+        with open(filepath, "r", encoding="utf-8") as source:
+            lines = source.readlines()
+        first = max(1, start_line)
+        selected = lines[first - 1 :] if line_count == -1 else lines[
+            first - 1 : first - 1 + max(0, line_count)
+        ]
+        return "".join(
+            f"{line_number:6d}: {line}"
+            for line_number, line in enumerate(selected, start=first)
+        )
+    except Exception as error:
+        return f"ERROR: Could not read numbered file {filepath}. {error}"
+
+
 @tool("Append_And_Verify_Code")
 def append_and_verify_code(filepath: str, content_to_append: str) -> str:
     """Append content to a file and run a GCC syntax check."""
@@ -148,6 +221,248 @@ TOOL RESPONSE:
         return f"ERROR: Could not write to file {filepath}. {str(e)}"
 
 
+@tool("Validate_Peach_XML")
+def validate_peach_xml(xml_path: str) -> str:
+    """Validate a generated Peach XML document against peach/peach.xsd."""
+    document = Path(xml_path).resolve()
+    schema = Path(__file__).resolve().parent / "peach" / "peach.xsd"
+    console.log(f"[cyan]Peach XSD validator:[/cyan] validating {document}")
+    file_logger.log(
+        f"\nTOOL CALL: validate_peach_xml\n"
+        f"    xml_path: {document}\n"
+        f"    xsd_path: {schema}\n"
+    )
+    if not document.is_file():
+        response = f"FAIL: XML file does not exist: {document}"
+    elif not schema.is_file():
+        response = f"ERROR: Peach XSD file does not exist: {schema}"
+    elif shutil.which("xmllint") is None:
+        response = (
+            "ERROR: xmllint is required for Peach XSD validation but was not found "
+            "on PATH. Install libxml2/xmllint before generating a DataModel."
+        )
+    else:
+        result = subprocess.run(
+            ["xmllint", "--noout", "--schema", str(schema), str(document)],
+            capture_output=True,
+            text=True,
+        )
+        diagnostics = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            response = f"PASS: {document} conforms to {schema}."
+        else:
+            response = (
+                f"FAIL: {document} does not conform to {schema}.\n"
+                f"{diagnostics[-8000:]}"
+            )
+    console.log(
+        f"[{'green' if response.startswith('PASS:') else 'yellow'}]"
+        f"Peach XSD validator: {response.splitlines()[0]}[/]"
+    )
+    file_logger.log(f"\nTOOL RESPONSE:\n{response}\n")
+    return response
+
+
+@tool("Inspect_Seed_Directory")
+def inspect_seed_directory(directory: str) -> str:
+    """Return a binary-safe JSON inventory with hex bytes for protocol seed files."""
+    root = os.path.abspath(directory)
+    if not os.path.isdir(root):
+        return json.dumps({"error": f"Seed directory does not exist: {directory}"})
+
+    max_files = 256
+    max_bytes_per_file = 65536
+    max_total_bytes = 1024 * 1024
+    used = 0
+    seeds = []
+    paths = []
+    for current_root, _, filenames in os.walk(root):
+        for filename in filenames:
+            paths.append(os.path.join(current_root, filename))
+    for path in sorted(paths)[:max_files]:
+        size = os.path.getsize(path)
+        allowance = min(max_bytes_per_file, max(0, max_total_bytes - used))
+        with open(path, "rb") as seed_file:
+            data = seed_file.read(allowance)
+        used += len(data)
+        seeds.append(
+            {
+                "file": os.path.relpath(path, root),
+                "size": size,
+                "hex": data.hex(),
+                "truncated": len(data) < size,
+            }
+        )
+    return json.dumps(
+        {
+            "directory": root,
+            "seeds": seeds,
+            "truncated_file_list": len(paths) > max_files,
+        },
+        ensure_ascii=False,
+    )
+
+
+@tool("Validate_DataModel_Family")
+def validate_datamodel_family(
+    protocol: str,
+    group_id: str,
+    seed_files: list[str],
+    fragment_dir: str,
+    output_dir: str,
+) -> str:
+    """Assemble and validate one family against classified single-packet seeds.
+
+    Waits for shared.xml before validation. The initial validation plus at most
+    three post-repair validations are allowed for each family fragment.
+    """
+    from datamodel_split import assemble_datamodel, validate_manifest
+
+    fragment_root = Path(fragment_dir).resolve()
+    output_root = Path(output_dir).resolve()
+    shared_path = fragment_root / "shared.xml"
+    shared_ready_path = fragment_root / "shared.xml.ready"
+    manifest_path = fragment_root / "schema_manifest.json"
+    fragment_path = fragment_root / f"packet_{group_id}.xml"
+    key = str(fragment_path)
+
+    console.log(f"[cyan]Family validator:[/cyan] preparing {group_id}")
+    deadline = time.monotonic() + 60
+    next_log = time.monotonic() + 5
+    if not shared_ready_path.is_file():
+        console.log(
+            f"[yellow]Family validator {group_id}:[/yellow] shared.xml is not "
+            f"ready at {shared_path}; waiting up to 60 seconds"
+        )
+    while not shared_ready_path.is_file():
+        if time.monotonic() >= deadline:
+            response = (
+                "WAITING: shared.xml is not ready after 60 seconds. "
+                "Do not edit the family or count this as a repair; call this tool again."
+            )
+            with _family_validation_lock:
+                _family_validation_runs.setdefault(key, {"validations": 0})[
+                    "status"
+                ] = "WAITING"
+            console.log(f"[yellow]Family validator {group_id}:[/yellow] {response}")
+            return response
+        if time.monotonic() >= next_log:
+            console.log(
+                f"[dim]Family validator {group_id}: shared.xml still unavailable; waiting...[/dim]"
+            )
+            next_log = time.monotonic() + 5
+        time.sleep(0.25)
+
+    if not shared_path.is_file():
+        with _family_validation_lock:
+            _family_validation_runs.setdefault(key, {"validations": 0})[
+                "status"
+            ] = "BLOCKED_SHARED"
+        return "BLOCKED_SHARED: shared generation completed without shared.xml."
+    try:
+        ET.parse(shared_path)
+    except (OSError, ET.ParseError) as error:
+        with _family_validation_lock:
+            _family_validation_runs.setdefault(key, {"validations": 0})[
+                "status"
+            ] = "BLOCKED_SHARED"
+        return f"BLOCKED_SHARED: shared.xml is not valid XML: {error}"
+
+    try:
+        raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_packet_types = [
+            str(packet)
+            for group in raw_manifest.get("packet_groups", [])
+            for packet in group.get("packet_types", [])
+        ]
+        manifest = validate_manifest(raw_manifest, protocol, raw_packet_types)
+        group = next(
+            item for item in manifest["packet_groups"] if item["id"] == group_id
+        )
+    except (OSError, ValueError, KeyError, StopIteration, json.JSONDecodeError) as error:
+        with _family_validation_lock:
+            _family_validation_runs.setdefault(key, {"validations": 0})[
+                "status"
+            ] = "CONTRACT_ERROR"
+        return f"ERROR: Cannot load family contract: {error}"
+
+    with _family_validation_lock:
+        state = _family_validation_runs.setdefault(
+            key, {"validations": 0, "status": "NOT_RUN"}
+        )
+        if state.get("status") == "PASS":
+            return "PASS: this family already passed; no additional validation is needed."
+        validation_number = int(state["validations"]) + 1
+        if validation_number > 4:
+            state["status"] = "REPAIR_LIMIT_REACHED"
+            return (
+                "REPAIR_LIMIT_REACHED: three repair attempts have already been "
+                "validated. Stop editing this fragment and defer to final validation."
+            )
+        state["validations"] = validation_number
+        state["status"] = "RUNNING"
+
+    family_dir = output_root / "datamodel_family_validation" / group_id
+    family_datamodel = family_dir / "datamodel.xml"
+    log_dir = family_dir / "logs"
+    console.log(
+        f"[cyan]Family validator {group_id}:[/cyan] validation "
+        f"{validation_number}/4 with {len(seed_files)} seed(s)"
+    )
+    try:
+        assemble_datamodel(
+            protocol=protocol,
+            packet_types=[str(item) for item in group["packet_types"]],
+            shared_fragment=shared_path,
+            packet_fragments=[fragment_path],
+            output_path=family_datamodel,
+            expected_shared_models=[
+                str(model["name"]) for model in manifest["shared_models"]
+            ],
+        )
+        with tempfile.TemporaryDirectory(prefix=f"{protocol}-{group_id}-") as temp:
+            seed_dir = Path(temp) / "seeds"
+            seed_dir.mkdir()
+            for index, source_name in enumerate(seed_files):
+                source = Path(source_name).resolve()
+                if not source.is_file():
+                    raise ValueError(f"seed does not exist: {source}")
+                shutil.copy2(source, seed_dir / f"{index:04d}_{source.name}")
+            command = [
+                "./tests/datamodel/run_datamodel_test.sh",
+                protocol,
+                str(seed_dir),
+                str(family_datamodel),
+                f"{protocol}_packet_array",
+                str(log_dir),
+            ]
+            result = subprocess.run(command, capture_output=True, text=True)
+        output = (result.stdout + result.stderr).strip()
+        passed, summary = _datamodel_validation_passed(
+            result.returncode, result.stdout
+        )
+        status = "PASS" if passed else "FAIL"
+    except (OSError, ValueError) as error:
+        output = str(error)
+        summary = "validation could not be executed"
+        status = "FAIL"
+
+    with _family_validation_lock:
+        state = _family_validation_runs[key]
+        state["status"] = status
+        state["output"] = output
+        state["log_dir"] = str(log_dir)
+    repairs_remaining = max(0, 4 - validation_number)
+    console.log(
+        f"[{'green' if status == 'PASS' else 'yellow'}]Family validator "
+        f"{group_id}: {status}; repair attempts remaining: {repairs_remaining}[/]"
+    )
+    return (
+        f"{status}: validation {validation_number}/4; repair attempts remaining: "
+        f"{repairs_remaining}; summary: {summary}; logs: {log_dir}\n{output[-6000:]}"
+    )
+
+
 def make_rfc_search(retriever: BaseRetriever):
     @tool("RFC_Search")
     def rfc_search(query: str) -> str:
@@ -185,7 +500,11 @@ tools = {
     ],
     "peach": [
         read_file,
+        read_file_with_line_numbers,
         write_file,
+        validate_peach_xml,
+        inspect_seed_directory,
+        validate_datamodel_family,
         search_class,
         build_dotnet_dll,
         # validate_data

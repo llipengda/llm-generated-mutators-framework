@@ -7,6 +7,7 @@ LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to p
 - Python 3.10+
 - [Docker](https://docs.docker.com/get-docker/) — for Peach SDK setup and fuzzing images
 - [Mono](https://www.mono-project.com/) — `mono` and `mcs` for compiling and running C# code
+- `xmllint` (libxml2) — validates generated Peach XML against `peach/peach.xsd`
 - Node.js `>=22.13.0` and npm — only required for the bundled Pit visualizer
 
 Python packages (see `requirements.txt`):
@@ -33,6 +34,14 @@ LLM_TEMPERATURE=                         # Sampling temperature
 # Peach-specific model overrides (fall back to LLM_MODEL / LLM_TEMPERATURE above)
 # LLM_PEACH_MODEL=
 # LLM_PEACH_TEMPERATURE=
+
+# Peach DataModel generation (optional)
+# LLM_PEACH_DATAMODEL_SPLIT=auto       # auto, always, or never
+# LLM_PEACH_DATAMODEL_SPLIT_THRESHOLD=6
+# LLM_PEACH_DATAMODEL_GROUP_SIZE=4
+# LLM_PEACH_DATAMODEL_WORKERS=4
+# LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES=2
+# Family agents have a hard limit of 3 repair attempts during early validation.
 
 # --- Embedding (RAG) ---
 LLM_EMBEDDING_MODEL=    # Embedding model for RFC vector store
@@ -77,13 +86,40 @@ python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-
 - If you do nothing, it auto-continues after ~60 seconds.
 - The RFC can be a `.pdf` or a text file.
 
+### Re-run split DataModel assembly
+
+Validate the manifest and fragments without replacing the current
+`datamodel.xml`:
+
+```bash
+.venv/bin/python datamodel_split.py <protocol> --check
+```
+
+Run the actual assembly after resolving reported conflicts:
+
+```bash
+.venv/bin/python datamodel_split.py <protocol>
+```
+
+Ask the integration repair agent to fix existing fragments and then assemble
+them, without rerunning schema planning or packet generation:
+
+```bash
+python3 main.py --protocol <protocol> --seed-dir <seed-dir> \
+  --rfc-path <rfc-file> --target peach --repair-datamodel-assembly
+```
+
+The command reports missing fragments/models, undeclared references, unexpected
+top-level XML elements, and every duplicate DataModel together with its source
+files. Use `--fragment-dir` or `--output` to override the default paths.
+
 ## Pipeline steps
 
 | Step | Description |
 |------|-------------|
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
-| 2. Datamodel Generation | Generates a **Peach Pit XML** file (`datamodel.xml`) defining the binary structure of each packet type — fields, types, relations, optional blocks, and packet union. |
-| 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, an existing diagnosis can be reused or a diagnosis agent uses `Read_File`, `RFC_Search`, and `Write_File` to produce one. The auto-fix agent then reads only that diagnosis and the current DataModel—never raw validator output or logs. Up to 3 auto-retries, then interactive fallback. |
+| 2. Datamodel Generation | Generates a **Peach Pit XML** file (`datamodel.xml`). In split mode, schema planning and binary-safe seed classification each have an independent run/skip prompt; skipped tasks reuse their existing JSON when available, while selected tasks still run concurrently. Shared/family generators must read `peach.txt`; each eligible family agent calls its validation tool, waits for `shared.xml`, and may repair its own fragment at most three times. Deterministic assembly places every referenced DataModel before its consumer, rejects cycles, can run two integration repairs, and never falls back to single-agent generation. |
+| 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, a read-only diagnosis agent returns a short summary and at most three actionable issues; the pipeline saves the report. The auto-fix agent then reads only that diagnosis and the current DataModel. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
 | 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Each iteration: clone → mutate → serialize → re-parse. Failures trigger LLM fixes. |
 | Final Compilation | Compiles all `.cs` files into a single `{PROTO}.dll`. |
@@ -93,6 +129,12 @@ python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-
 ```
 llm/peach/<proto>/
 ├── datamodel.xml                       # Peach Pit XML datamodel
+├── datamodel_fragments/
+│   ├── schema_manifest.json            # Shared-model and packet-family contract
+│   ├── seed_classification.json        # Binary-safe seed packet classification
+│   ├── shared.xml                      # Shared DataModels
+│   └── packet_<family>.xml             # Independently generated family fragments
+├── datamodel_family_validation/        # Early single-packet family models/logs
 ├── <PROTO>.dll                         # Final compiled DLL
 ├── dm_test_logs/                       # DataModel test logs (deleted on pass)
 ├── Mutators/

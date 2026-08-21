@@ -58,7 +58,9 @@ case "$TARGET" in
         docker run --rm -v "$(pwd)/peach:/p" pdli/llm-peach:sdk \
             sh -c "cp /peach/output/linux_x86_64_release/bin/${ESSENTIAL_DLLS[*]} /p/sdk/ \
                    && /peach/output/linux_x86_64_release/bin/peach --showenv > /p/peach.txt \
-                   && cp /peach/llm/Core/README.md /p/README.md"
+                   && cp /peach/llm/Core/README.md /p/README.md \
+                   && /peach/output/linux_x86_64_release/bin/pittool makexsd \
+                   && cp /peach/output/linux_x86_64_release/bin/peach.xsd /p/peach.xsd"
         python3 process_peach_txt.py
         ;;
     *)
