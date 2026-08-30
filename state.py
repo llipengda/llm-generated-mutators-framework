@@ -7,6 +7,7 @@ from ui import UI
 
 class PipelineState(TypedDict):
     packet_types: list[str]
+    data_type_analysis: dict
     constraints: str
     token_usage_total: dict[str, int]
     token_usage_by_step: dict[str, dict[str, int]]
@@ -50,6 +51,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
     if not os.path.exists(path):
         return {
             "packet_types": [],
+            "data_type_analysis": {},
             "constraints": "",
             "token_usage_total": new_usage_bucket(),
             "token_usage_by_step": {},
@@ -63,6 +65,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
             data.setdefault("token_usage_total", new_usage_bucket())
             data.setdefault("token_usage_by_step", {})
             data.setdefault("current_step_index", 0)
+            data.setdefault("data_type_analysis", {})
             return data # type: ignore
     except Exception as e:
         UI.warn(
@@ -71,6 +74,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
 
     return {
         "packet_types": [],
+        "data_type_analysis": {},
         "constraints": "",
         "token_usage_total": new_usage_bucket(),
         "token_usage_by_step": {},

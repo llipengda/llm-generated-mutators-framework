@@ -118,6 +118,7 @@ files. Use `--fragment-dir` or `--output` to override the default paths.
 | Step | Description |
 |------|-------------|
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
+| 1.5. Peach Basic Data Type Support | Uses one bounded analysis call and a locally compacted Peach capability catalog to classify protocol wire primitives as supported, unsupported, or uncertain. Uncertain results pause for manual review. Unsupported results are shown with evidence and require explicit approval before one custom DOM generation/compile call. Generation uses the repository-owned, compile-tested `examples/ExampleEscapedUInt.cs` API example and is not given sibling-project DOM implementations as references. Saved analysis is reused on retry. |
 | 2. Datamodel Generation | Generates a **Peach Pit XML** file (`datamodel.xml`). In split mode, schema planning and binary-safe seed classification each have an independent run/skip prompt; skipped tasks reuse their existing JSON when available, while selected tasks still run concurrently. Shared/family generators must read `peach.txt`; each eligible family agent calls its validation tool, waits for `shared.xml`, and may repair its own fragment at most three times. Deterministic assembly places every referenced DataModel before its consumer, rejects cycles, can run two integration repairs, and never falls back to single-agent generation. |
 | 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, a read-only diagnosis agent returns a short summary and at most three actionable issues; the pipeline saves the report. The auto-fix agent then reads only that diagnosis and the current DataModel. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
@@ -128,6 +129,10 @@ files. Use `--fragment-dir` or `--output` to override the default paths.
 
 ```
 llm/peach/<proto>/
+├── data_type_analysis.json             # RFC/Peach primitive compatibility report
+├── DataElements/                       # Approved protocol-specific Peach DOM plugins
+│   ├── manifest.json                   # Wire type → Pit element/class mapping
+│   └── out/<PROTO>DataElements.dll     # Plugin loaded by validators and images
 ├── datamodel.xml                       # Peach Pit XML datamodel
 ├── datamodel_fragments/
 │   ├── schema_manifest.json            # Shared-model and packet-family contract

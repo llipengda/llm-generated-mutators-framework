@@ -71,6 +71,7 @@ class BasePipeline:
                     os.remove(state_path)
                 state: PipelineState = {
                     "packet_types": [],
+                    "data_type_analysis": {},
                     "constraints": "",
                     "token_usage_total": new_usage_bucket(),
                     "token_usage_by_step": {},
@@ -79,6 +80,7 @@ class BasePipeline:
         else:
             state = {
                 "packet_types": [],
+                "data_type_analysis": {},
                 "constraints": "",
                 "token_usage_total": new_usage_bucket(),
                 "token_usage_by_step": {},

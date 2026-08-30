@@ -36,6 +36,7 @@ sed_i() {
 
 mcs -sdk:4.5 "$ROOT/llm/peach/$PROTO/Mutators/*.cs" \
     $(printf -- '-r:%s ' $ROOT/peach/sdk/*.dll) \
+    $([ ! -f "$ROOT/llm/peach/$PROTO/DataElements/out/${PROTO_UPPER}DataElements.dll" ] || printf -- '-r:%s ' "$ROOT/llm/peach/$PROTO/DataElements/out/${PROTO_UPPER}DataElements.dll") \
     -target:library \
     -warnaserror \
     -out:"$ROOT/llm/peach/$PROTO/Mutators/out/${PROTO_UPPER}Mutators.dll"
@@ -52,6 +53,7 @@ fi
 docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
     -v "$ROOT/llm/peach/$PROTO/mutator_test_logs:/logs" pdli/llm-peach:sdk \
     sh -c "cp /generated/Mutators/out/${PROTO_UPPER}Mutators.dll ./Plugins && \
+    if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \
     mono Peach.LLM.Validations.Mutator.exe /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG} && \
     chmod -R 777 /logs"
 

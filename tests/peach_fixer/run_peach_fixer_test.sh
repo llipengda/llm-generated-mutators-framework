@@ -26,6 +26,7 @@ fi
 mcs -sdk:4.5 "$ROOT/llm/peach/$PROTO/Fixers/*.cs" \
     "$ROOT/llm/peach/$PROTO/Fixers/Validations/*.cs" \
     $(printf -- '-r:%s ' $ROOT/peach/sdk/*.dll) \
+    $([ ! -f "$ROOT/llm/peach/$PROTO/DataElements/out/${PROTO_UPPER}DataElements.dll" ] || printf -- '-r:%s ' "$ROOT/llm/peach/$PROTO/DataElements/out/${PROTO_UPPER}DataElements.dll") \
     -target:library \
     -warnaserror \
     -out:"$ROOT/llm/peach/$PROTO/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll"
@@ -37,6 +38,7 @@ chmod u+rwx "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated \
     -v "$ROOT/llm/peach/$PROTO/fixer_test_logs:/logs" pdli/llm-peach:sdk \
     sh -c "cp /generated/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll ./Plugins && \
+    if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \
     cp /generated/datamodel.xml ./ && \
     mono Peach.LLM.Validations.Fixer.exe"
 

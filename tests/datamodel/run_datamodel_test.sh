@@ -31,5 +31,11 @@ fi
 mkdir -p "$LOG_DIR"
 chmod u+rwx "$LOG_DIR"
 
-docker run --rm -i -v "$DATAMODEL_PATH:/test/datamodel.xml:ro" -v "$SEED_DIR:/seeds:ro" -v "$LOG_DIR:/logs" pdli/llm-peach:sdk \
-  mono Peach.LLM.Validations.DataModel.exe /test/datamodel.xml "$DATAMODEL_NAME" /seeds
+CUSTOM_DLL="$ROOT/llm/peach/$PROTO/DataElements/out/$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')DataElements.dll"
+DOCKER_ARGS=(-v "$DATAMODEL_PATH:/test/datamodel.xml:ro" -v "$SEED_DIR:/seeds:ro" -v "$LOG_DIR:/logs")
+if [ -f "$CUSTOM_DLL" ]; then
+  DOCKER_ARGS+=(-v "$CUSTOM_DLL:/custom-data-elements.dll:ro")
+fi
+
+docker run --rm -i "${DOCKER_ARGS[@]}" pdli/llm-peach:sdk sh -c \
+  'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll ./Plugins/; fi; exec mono Peach.LLM.Validations.DataModel.exe /test/datamodel.xml "$1" /seeds' sh "$DATAMODEL_NAME"

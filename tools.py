@@ -9,7 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from langchain_core.tools import tool
+from langchain_core.tools import BaseTool, tool
 from langchain_core.retrievers import BaseRetriever
 
 from log import console, file_logger
@@ -333,19 +333,55 @@ def validate_peach_xml(xml_path: str) -> str:
             "on PATH. Install libxml2/xmllint before generating a DataModel."
         )
     else:
-        result = subprocess.run(
-            ["xmllint", "--noout", "--schema", str(schema), str(document)],
-            capture_output=True,
-            text=True,
-        )
-        diagnostics = (result.stdout + result.stderr).strip()
-        if result.returncode == 0:
-            response = f"PASS: {document} conforms to {schema}."
-        else:
+        custom_names: set[str] = set()
+        response = ""
+        for parent in (document.parent, *document.parents):
+            manifest = parent / "DataElements" / "manifest.json"
+            if not manifest.is_file():
+                continue
+            try:
+                entries = json.loads(manifest.read_text(encoding="utf-8"))
+                custom_names = {
+                    item["element_name"]
+                    for item in entries
+                    if isinstance(item, dict)
+                    and isinstance(item.get("element_name"), str)
+                }
+            except (OSError, json.JSONDecodeError):
+                custom_names = set()
+            break
+        try:
+            parsed_root = ET.parse(document).getroot()
+            used_custom = {
+                node.tag.rsplit("}", 1)[-1]
+                for node in parsed_root.iter()
+                if node.tag.rsplit("}", 1)[-1] in custom_names
+            }
+        except ET.ParseError as error:
+            response = f"FAIL: XML is not well formed: {error}"
+            used_custom = set()
+        if response.startswith("FAIL:"):
+            pass
+        elif used_custom:
             response = (
-                f"FAIL: {document} does not conform to {schema}.\n"
-                f"{diagnostics[-8000:]}"
+                "PASS: XML is well formed. Static XSD validation is deferred for "
+                "generated plugin element(s): " + ", ".join(sorted(used_custom)) +
+                ". Runtime DataModel validation must load the custom plugin DLL."
             )
+        else:
+            result = subprocess.run(
+                ["xmllint", "--noout", "--schema", str(schema), str(document)],
+                capture_output=True,
+                text=True,
+            )
+            diagnostics = (result.stdout + result.stderr).strip()
+            if result.returncode == 0:
+                response = f"PASS: {document} conforms to {schema}."
+            else:
+                response = (
+                    f"FAIL: {document} does not conform to {schema}.\n"
+                    f"{diagnostics[-8000:]}"
+                )
     console.log(
         f"[{'green' if response.startswith('PASS:') else 'yellow'}]"
         f"Peach XSD validator: {response.splitlines()[0]}[/]"
@@ -483,7 +519,11 @@ def validate_datamodel_family(
         )
         if state.get("status") == "PASS":
             return "PASS: this family already passed; no additional validation is needed."
-        validation_number = int(state["validations"]) + 1
+        completed_validations = state.get("validations")
+        if type(completed_validations) is not int:
+            state["status"] = "CONTRACT_ERROR"
+            return "ERROR: family validation state has an invalid validation count."
+        validation_number = completed_validations + 1
         if validation_number > 4:
             state["status"] = "REPAIR_LIMIT_REACHED"
             return (
@@ -584,7 +624,7 @@ TOOL RESPONSE:
 from dotnet_tools import search_class, build_dotnet_dll, validate_data
 
 
-def get_tools(target: str, protocol: str) -> list:
+def get_tools(target: str, protocol: str) -> list[BaseTool]:
     """Build file tools with target- and protocol-specific path policies."""
     if target == "aflnet":
         return [save_and_verify_code, read_file, append_and_verify_code]
@@ -596,7 +636,8 @@ def get_tools(target: str, protocol: str) -> list:
     read_files = (
         _PROJECT_ROOT / "peach" / "README.md",
         _PROJECT_ROOT / "peach" / "peach.txt",
-        _PROJECT_ROOT / "prompts" / "peach_datamodel_example.xml",
+        _PROJECT_ROOT / "examples" / "peach_datamodel_example.xml",
+        _PROJECT_ROOT / "examples" / "ExampleEscapedUInt.cs",
         _PROJECT_ROOT / "tests" / "peach_fixer" / "example.cs",
     )
 

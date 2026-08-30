@@ -459,6 +459,24 @@ def ask_select_types(packet_types: list[str], protocol: str) -> list[str]:
     return selected
 
 
+def ask_generate_custom_data_elements(protocol: str, element_names: list[str]) -> bool:
+    """Require explicit approval before generating protocol-specific DOM elements."""
+    console.print()
+    console.print(
+        f"[bold yellow]Peach cannot safely represent these {protocol} wire types "
+        f"with its current elements: {', '.join(element_names)}[/bold yellow]"
+    )
+    choice = questionary.select(
+        "Generate and compile the proposed custom Peach DOM elements?",
+        choices=[
+            "Generate custom elements",
+            "Stop without generating",
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+    return choice == "Generate custom elements"
+
+
 def ask_regenerate(what: str, protocol: str) -> bool:
     """Ask whether to regenerate existing generated code.
 

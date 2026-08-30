@@ -54,7 +54,8 @@ usage_tracking.py        # TokenUsageTracker callback; accumulates prompt/comple
 log.py                   # Dual logger: rich Console for user, file_logger for tool_usage.log (reset each run).
 pipeline/base.py         # BasePipeline: step orchestration loop, call_agent(), token tracking, state save.
 pipeline/aflnet.py       # 9-step C pipeline (see steps below).
-pipeline/peach.py        # 10-step C# pipeline (see steps below); uses ThreadPoolExecutor for parallelism.
+pipeline/peach.py        # Lightweight PeachPipeline composition root and step ordering.
+pipeline/peach_steps/    # Peach implementations split by discovery, DataModel, mutator, fixer, and compilation steps.
 peach_gen.sh             # Compiles Peach mutators/fixers, generates Pit XML configs and Docker images.
 setup.sh                 # Prerequisite setup: for peach, pulls Docker SDK image and extracts DLLs into peach/sdk/.
 process_peach_txt.py     # Filters peach/peach.txt to keep only Analyzer/DataElement/Relation/Transformer sections.

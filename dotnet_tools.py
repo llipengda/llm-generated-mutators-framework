@@ -1,6 +1,7 @@
 import clr
 import os
 import sys
+from pathlib import Path
 
 from System.Reflection import BindingFlags, MemberTypes  # type: ignore
 
@@ -215,6 +216,17 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
 
     reference_dir = "./peach/sdk/"
     refs = [f"-r:{os.path.join(reference_dir, f)}" for f in os.listdir(reference_dir) if f.endswith(".dll")]
+    source_path = os.path.abspath(source_file_or_dir)
+    output_path = os.path.abspath(output_dll)
+    search_path = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+    for parent in [search_path, *list(Path(search_path).parents)]:
+        custom_dir = Path(parent) / "DataElements" / "out"
+        if not custom_dir.is_dir():
+            continue
+        for custom_dll in sorted(custom_dir.glob("*DataElements.dll")):
+            if str(custom_dll.resolve()) != output_path:
+                refs.append(f"-r:{custom_dll}")
+        break
     if not refs:
         console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh peach` first to prepare the SDK. [/red][/dim]")
         sys.exit(1)

@@ -50,13 +50,26 @@ LLM_GEN_PATH="$ROOT/llm/peach/${PROTO}"
 
 cd "$LLM_GEN_PATH"
 
+CUSTOM_REFERENCE=""
+if compgen -G "./DataElements/*.cs" > /dev/null; then
+    mkdir -p ./DataElements/out
+    mcs -sdk:4.5 ./DataElements/*.cs \
+        $(printf -- '-r:%s ' $ROOT/peach/sdk/*.dll) \
+        -target:library \
+        -warnaserror \
+        -out:./DataElements/out/${PROTO_UPPER}DataElements.dll
+    CUSTOM_REFERENCE="-r:./DataElements/out/${PROTO_UPPER}DataElements.dll"
+fi
+
 mcs -sdk:4 ./Mutators/*.cs \
     $(printf -- '-r:%s ' $ROOT/peach/sdk/*.dll) \
+    $CUSTOM_REFERENCE \
     -target:library \
     -out:./Mutators/out/${PROTO_UPPER}Mutators.dll
 
 mcs -sdk:4 ./Fixers/*.cs \
     $(printf -- '-r:%s ' $ROOT/peach/sdk/*.dll) \
+    $CUSTOM_REFERENCE \
     -target:library \
     -out:./Fixers/out/${PROTO_UPPER}Fixers.dll
 
@@ -175,6 +188,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
     cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/
 CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /peach/output/linux_x86_64_release/bin/pit.llm.xml && \
@@ -190,6 +204,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
     cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/
 CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /peach/output/linux_x86_64_release/bin/pit.llm.random.xml && \
@@ -205,6 +220,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
     cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/
 CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /peach/output/linux_x86_64_release/bin/pit.llm-only.xml && \
@@ -220,6 +236,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
     cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/ && \\
     cp Fixers/out/${PROTO_UPPER}Fixers.dll /peach/output/linux_x86_64_release/bin/Plugins/
@@ -236,6 +253,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ && \\
     cp Mutators/out/${PROTO_UPPER}Mutators.dll /peach/output/linux_x86_64_release/bin/Plugins/ && \\
     cp Fixers/out/${PROTO_UPPER}Fixers.dll /peach/output/linux_x86_64_release/bin/Plugins/
@@ -252,6 +270,7 @@ ENV HOST= \\
     PORT= \\
     PEACH_ARGS=
 COPY . .
+RUN if [ -f DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp DataElements/out/${PROTO_UPPER}DataElements.dll /peach/output/linux_x86_64_release/bin/Plugins/; fi
 RUN cp *.xml /peach/output/linux_x86_64_release/bin/ 
 CMD ["bash", "-c", "sed -i \"s/##HOST##/\${HOST}/g; s/##PORT##/\${PORT}/g\" /peach/output/linux_x86_64_release/bin/pit.peach.xml && \
     ls -l /peach/output/linux_x86_64_release/bin/Plugins/ && \
