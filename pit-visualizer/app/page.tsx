@@ -48,6 +48,8 @@ const KIND_META: Record<string, { label: string; icon: typeof Box; color: string
   DataModel: { label: "DataModel", icon: Layers3, color: "blue", description: "可复用的协议数据模型。" },
   Block: { label: "Block", icon: Box, color: "slate", description: "按照 wire order 组织字段的容器。" },
   Number: { label: "Number", icon: Hash, color: "amber", description: "固定宽度的数值字段。" },
+  Flags: { label: "Flags", icon: Braces, color: "amber", description: "由多个位字段组成的固定宽度标志组。" },
+  Flag: { label: "Flag", icon: CircleDot, color: "amber", description: "标志组中的位字段。" },
   String: { label: "String", icon: Type, color: "green", description: "ASCII、UTF-8 或 UTF-16 字符串字段。" },
   Blob: { label: "Blob", icon: Braces, color: "violet", description: "原始二进制数据。" },
   Choice: { label: "Choice", icon: GitBranch, color: "cyan", description: "在多个候选数据结构之间选择。" },
@@ -102,17 +104,51 @@ function matchesDiagnosticLocation(element: Element, locations: XmlLocation[]) {
 function containsDiagnosticLocation(element: Element, byName: Map<string, Element>, locations: XmlLocation[], stack = new Set<string>()): boolean {
   if (matchesDiagnosticLocation(element, locations)) return true;
   const ref = element.getAttribute("ref");
-  if (ref) {
-    if (stack.has(ref)) return false;
-    const target = byName.get(ref);
-    if (!target) return false;
-    const next = new Set(stack); next.add(ref);
-    return children(target).some((child) => containsDiagnosticLocation(child, byName, locations, next));
-  }
-  return children(element).some((child) => containsDiagnosticLocation(child, byName, locations, stack));
+  if (ref && stack.has(ref)) return false;
+  const next = new Set(stack);
+  if (ref) next.add(ref);
+  return resolvedChildren(element, byName, stack).some((child) => containsDiagnosticLocation(child, byName, locations, next));
 }
 
 function children(node: Element) { return Array.from(node.children); }
+function dataChildren(node: Element) { return children(node).filter((child) => child.localName !== "Relation"); }
+
+// Peach resolves a ref as a clone of the referenced element, then applies
+// inline children with matching names as overrides. Keep the real override
+// elements in the result so selecting one still edits the source XML.
+const inheritedBaseByOverride = new WeakMap<Element, Element>();
+function resolvedChildren(field: Element, byName: Map<string, Element>, stack = new Set<string>()): Element[] {
+  const own = dataChildren(field);
+  const ref = field.getAttribute("ref");
+  let base: Element[] = [];
+
+  if (ref && !stack.has(ref)) {
+    const target = byName.get(ref);
+    if (target) {
+      const next = new Set(stack);
+      next.add(ref);
+      base = resolvedChildren(target, byName, next);
+    }
+  } else if (!ref) {
+    const inheritedBase = inheritedBaseByOverride.get(field);
+    if (inheritedBase) base = resolvedChildren(inheritedBase, byName, stack);
+  }
+
+  if (base.length === 0) return own;
+  if (own.length === 0) return base;
+
+  const used = new Set<Element>();
+  const merged = base.map((baseChild) => {
+    const baseName = baseChild.getAttribute("name");
+    if (!baseName) return baseChild;
+    const override = own.find((candidate) => !used.has(candidate) && candidate.getAttribute("name") === baseName);
+    if (!override) return baseChild;
+    used.add(override);
+    inheritedBaseByOverride.set(override, baseChild);
+    return override;
+  });
+  return [...merged, ...own.filter((child) => !used.has(child))];
+}
 function nameOf(el: Element) { return el.getAttribute("name") || el.getAttribute("ref") || el.localName; }
 function parsePit(xml: string) {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
@@ -272,26 +308,20 @@ function findPacketStructure(doc: XMLDocument) {
 function packetTypesOf(entry: Element, byName: Map<string, Element>) {
   const visit = (field: Element, stack: Set<string>): Element[] | null => {
     if (field.localName === "Choice") {
-      const options = children(field).filter((child) => child.localName !== "Relation");
+      const options = resolvedChildren(field, byName, stack);
       return options.length > 0 ? options : null;
     }
     const ref = field.getAttribute("ref");
-    if (ref) {
-      if (stack.has(ref)) return null;
-      const target = byName.get(ref);
-      if (!target) return null;
-      const next = new Set(stack);
-      next.add(ref);
-      const result = visit(target, next);
-      if (result) return result;
-    }
-    for (const child of children(field).filter((item) => item.localName !== "Relation")) {
-      const result = visit(child, stack);
+    if (ref && stack.has(ref)) return null;
+    const next = new Set(stack);
+    if (ref) next.add(ref);
+    for (const child of resolvedChildren(field, byName, stack)) {
+      const result = visit(child, next);
       if (result) return result;
     }
     return null;
   };
-  return visit(entry, new Set([entry.getAttribute("name") || "packet_array"])) || children(entry);
+  return visit(entry, new Set([entry.getAttribute("name") || "packet_array"])) || resolvedChildren(entry, byName);
 }
 
 function relationSummary(field: Element) {
@@ -312,15 +342,11 @@ function addLengths(parts: LengthInfo[]): LengthInfo {
 
 function lengthOf(element: Element, byName: Map<string, Element>, stack = new Set<string>()): LengthInfo {
   const ref = element.getAttribute("ref");
-  if (ref) {
-    if (stack.has(ref)) return { minBits: 0, maxBits: null };
-    const target = byName.get(ref);
-    if (!target) return { minBits: 0, maxBits: null };
-    const next = new Set(stack); next.add(ref);
-    return lengthOf(target, byName, next);
-  }
+  if (ref && stack.has(ref)) return { minBits: 0, maxBits: null };
+  const next = new Set(stack);
+  if (ref) next.add(ref);
   if (element.localName === "Relation") return { minBits: 0, maxBits: 0 };
-  if (element.localName === "Number") {
+  if (["Number", "Flags", "Flag"].includes(element.localName)) {
     const bits = Number(element.getAttribute("size"));
     return Number.isFinite(bits) && bits > 0 ? { minBits: bits, maxBits: bits } : { minBits: 0, maxBits: null };
   }
@@ -333,7 +359,7 @@ function lengthOf(element: Element, byName: Map<string, Element>, stack = new Se
   }
   if (["String", "Blob"].includes(element.localName)) return { minBits: 0, maxBits: null };
 
-  const childLengths = children(element).filter((child) => child.localName !== "Relation").map((child) => lengthOf(child, byName, stack));
+  const childLengths = resolvedChildren(element, byName, stack).map((child) => lengthOf(child, byName, next));
   let result: LengthInfo;
   if (element.localName === "Choice" && childLengths.length) {
     result = {
@@ -355,7 +381,7 @@ function lengthOf(element: Element, byName: Map<string, Element>, stack = new Se
 function fixedLength(element: Element, byName: Map<string, Element>): { value: number; unit: "BIT" | "BYTE" } | null {
   const info = lengthOf(element, byName);
   if (info.maxBits === null || info.minBits !== info.maxBits || info.minBits <= 0) return null;
-  if (element.localName === "Number" && element.hasAttribute("size")) return { value: Number(element.getAttribute("size")), unit: "BIT" };
+  if (["Number", "Flags", "Flag"].includes(element.localName) && element.hasAttribute("size")) return { value: Number(element.getAttribute("size")), unit: "BIT" };
   if (element.hasAttribute("length")) return { value: Number(element.getAttribute("length")), unit: "BYTE" };
   if (element.localName === "String" && element.hasAttribute("value")) return { value: info.minBits / 8, unit: "BYTE" };
   return info.minBits % 8 === 0 ? { value: info.minBits / 8, unit: "BYTE" } : { value: info.minBits, unit: "BIT" };
@@ -394,7 +420,7 @@ function escapeTokenText(value: string) {
 function tokenValueLabel(field: Element) {
   if (field.getAttribute("token") !== "true" || !field.hasAttribute("value")) return null;
   const value = field.getAttribute("value") || "";
-  return field.localName === "Number" ? value : `"${escapeTokenText(value)}"`;
+  return ["Number", "Flag"].includes(field.localName) ? value : `"${escapeTokenText(value)}"`;
 }
 
 function occurrenceRange(field: Element) {
@@ -407,19 +433,15 @@ function occurrenceRange(field: Element) {
 
 function estimateVisualWeight(field: Element, byName: Map<string, Element>, stack = new Set<string>(), depth = 0): number {
   const ref = field.getAttribute("ref");
-  if (ref) {
-    if (stack.has(ref)) return 1;
-    const target = byName.get(ref);
-    if (!target) return 1;
-    const nextStack = new Set(stack); nextStack.add(ref);
-    return estimateVisualWeight(target, byName, nextStack, depth);
-  }
-  const nested = children(field).filter((child) => child.localName !== "Relation");
+  if (ref && stack.has(ref)) return 1;
+  const nextStack = new Set(stack);
+  if (ref) nextStack.add(ref);
+  const nested = resolvedChildren(field, byName, stack);
   if (nested.length === 0) return 1;
-  if (field.localName === "Choice") return estimateVisualWeight(nested[0], byName, stack, depth) + .2;
-  if (nested.length === 1 && !field.getElementsByTagNameNS("*", "Relation").length) return estimateVisualWeight(nested[0], byName, stack, depth) + .15;
+  if (field.localName === "Choice") return estimateVisualWeight(nested[0], byName, nextStack, depth) + .2;
+  if (nested.length === 1 && !field.getElementsByTagNameNS("*", "Relation").length) return estimateVisualWeight(nested[0], byName, nextStack, depth) + .15;
   if (depth >= 2) return 1.15;
-  const weights = nested.map((child) => estimateVisualWeight(child, byName, stack, depth + 1));
+  const weights = nested.map((child) => estimateVisualWeight(child, byName, nextStack, depth + 1));
   if (weights.length > 3) {
     const columns = [0, 0];
     weights.forEach((weight) => { const target = columns[0] <= columns[1] ? 0 : 1; columns[target] += weight; });
@@ -530,8 +552,8 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
   const ref = field.getAttribute("ref");
   const target = ref ? byName.get(ref) : null;
   const circular = Boolean(ref && stack.has(ref));
-  const ownChildren = children(field).filter((child) => child.localName !== "Relation");
-  const nested = target && !circular ? children(target) : ownChildren;
+  const ownChildren = dataChildren(field);
+  const nested = circular ? ownChildren : resolvedChildren(field, byName, stack);
   const nextStack = new Set(stack);
   if (ref) nextStack.add(ref);
   const isChoice = field.localName === "Choice";
@@ -596,9 +618,7 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
             const ancestorOccurrence = occurrenceRange(ancestor.field);
             const ancestorCondition = ancestor.field.localName === "Optional" ? `if ${ancestor.field.getAttribute("src") || "expression"}` : null;
             const ancestorDetails = [ancestorOccurrence?.label, ancestorCondition].filter(Boolean) as string[];
-            const ancestorRef = ancestor.field.getAttribute("ref");
-            const ancestorTarget = ancestorRef ? byName.get(ancestorRef) : null;
-            const ancestorChoices = ancestor.field.localName === "Choice" ? children(ancestorTarget || ancestor.field).filter((child) => child.localName !== "Relation") : [];
+            const ancestorChoices = ancestor.field.localName === "Choice" ? resolvedChildren(ancestor.field, byName) : [];
             const ancestorChoiceIndex = Math.min(choiceSelections[ancestor.renderKey] ?? 0, Math.max(0, ancestorChoices.length - 1));
             return <span className="merged-segment" key={ancestor.renderKey}>
               <button type="button" data-render-key={ancestor.renderKey} data-field-name={ancestor.field.getAttribute("name") || ""} title={`编辑 ${nameOf(ancestor.field)}${ancestorCondition ? ` · ${ancestorCondition}` : ""}`} onClick={(event) => { event.stopPropagation(); onSelect(ancestor.field); }}>{ancestorOccurrence && <Layers3 className="merged-array-icon" size={12} />}{nameOf(ancestor.field)}{ancestorDetails.map((detail) => <em key={detail}>{detail}</em>)}</button>
@@ -630,15 +650,13 @@ function InlineField({ field, byName, stack, onSelect, activeRelation, onRelatio
           {verticalColumns(visibleNested, ({ child }) => estimateVisualWeight(child, byName, nextStack, depth + 1)).map((column, columnIndex) => <div className="flow-column" key={`column-${columnIndex}`}>{column.map(({ child, index }) => <div className="flow-item" style={{ order: index }} key={`${child.localName}-${nameOf(child)}-${index}`}><InlineField field={child} byName={byName} stack={nextStack} onSelect={onSelect} activeRelation={activeRelation} onRelationChange={onRelationChange} choiceSelections={choiceSelections} onChoiceChange={onChoiceChange} expandedFields={expandedFields} onToggleExpanded={onToggleExpanded} diagnosticLocations={diagnosticLocations} renderKey={`${nestedContainerKey}/${index}`} depth={depth + 1} /></div>)}</div>)}
         </AdaptiveFieldGrid>
       )}
-      {target && !circular && <div className="inline-ref-label"><Link2 size={10} />{ref} · inline 展开</div>}
+      {target && !circular && <div className="inline-ref-label"><Link2 size={10} />{ref} · inline 展开{ownChildren.length > 0 ? ` · ${ownChildren.length} 项重写` : ""}</div>}
     </div>
   );
 }
 
 function resolvedTreeChildren(field: Element, byName: Map<string, Element>, stack: Set<string>) {
-  const ref = field.getAttribute("ref");
-  const target = ref && !stack.has(ref) ? byName.get(ref) : null;
-  return children(target || field).filter((child) => child.localName !== "Relation");
+  return resolvedChildren(field, byName, stack);
 }
 
 type TopologyNodeData = {
@@ -758,8 +776,7 @@ function ProtocolNodeCanvas({ field, byName, onEdit, activeRelation, onRelationC
   const Icon = meta.icon;
   const length = fixedLength(field, byName);
   const ref = field.getAttribute("ref");
-  const target = ref ? byName.get(ref) : null;
-  const nested = children(target || field).filter((child) => child.localName !== "Relation");
+  const nested = resolvedChildren(field, byName);
   const visibleFields = nested.length > 0 ? nested : [field];
   const rootStack = new Set<string>();
   if (field.localName === "DataModel" && field.getAttribute("name")) rootStack.add(field.getAttribute("name")!);

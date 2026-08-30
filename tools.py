@@ -15,6 +15,46 @@ from langchain_core.retrievers import BaseRetriever
 from log import console, file_logger
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _resolve_tool_path(
+    filepath: str,
+    *,
+    allowed_roots: tuple[Path, ...] = (),
+    allowed_files: tuple[Path, ...] = (),
+    operation: str,
+) -> Path:
+    """Resolve filepath and enforce a symlink-safe allowlist."""
+    candidate = Path(filepath)
+    if not candidate.is_absolute():
+        candidate = _PROJECT_ROOT / candidate
+    resolved = candidate.resolve()
+
+    # Exact-file entries must themselves be regular paths, not symlinks that
+    # redirect an allowlisted filename to an arbitrary target.
+    if any(resolved == allowed.absolute() for allowed in allowed_files):
+        return resolved
+    for root in allowed_roots:
+        try:
+            resolved.relative_to(root.resolve())
+            return resolved
+        except ValueError:
+            continue
+
+    allowed = [str(path.resolve()) for path in (*allowed_roots, *allowed_files)]
+    raise PermissionError(
+        f"{operation} access denied for {filepath!r}; allowed paths: "
+        + ", ".join(allowed)
+    )
+
+
+def _peach_output_dir(protocol: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", protocol):
+        raise ValueError(f"Unsafe protocol name: {protocol!r}")
+    return _PROJECT_ROOT / "llm" / "peach" / protocol.lower()
+
+
 _family_validation_lock = threading.Lock()
 _family_validation_runs: dict[str, dict[str, object]] = {}
 
@@ -98,11 +138,56 @@ TOOL RESPONSE:
         return f"ERROR: Failed to write or check file. {str(e)}"
 
 
+def _scoped_read_file(
+    filepath: str,
+    *,
+    line_count: int = -1,
+    start_line: int = 1,
+    allowed_roots: tuple[Path, ...],
+    allowed_files: tuple[Path, ...],
+) -> str:
+    """Read a file after enforcing the supplied allowlist."""
+    console.log(f"[dim]Tool: Reading file {filepath} (lines {start_line}+)[/dim]")
+
+    file_logger.log(
+f"""
+TOOL CALL: read_file
+    filepath: {filepath}
+    line_count: {line_count}
+    start_line: {start_line}
+"""
+    )
+    try:
+        safe_path = _resolve_tool_path(
+            filepath,
+            allowed_roots=allowed_roots,
+            allowed_files=allowed_files,
+            operation="Read",
+        )
+        if safe_path.is_dir():
+            files = os.listdir(safe_path)
+            response = f"Directory listing for {filepath}:\n" + "\n".join(files)
+            file_logger.log(
+f"""
+TOOL RESPONSE:
+{response}
+""")
+            return response
+        with safe_path.open("r", encoding="utf-8") as f:
+            if line_count == -1:
+                return f.read()
+
+            lines = f.readlines()
+            selected_lines = lines[start_line - 1 : start_line - 1 + line_count]
+            return "".join(selected_lines)
+    except Exception as e:
+        return f"ERROR: Could not read file {filepath}. {str(e)}"
+
+
 @tool("Read_File")
 def read_file(filepath: str, *, line_count: int = -1, start_line: int = 1) -> str:
     """Read a file and return its content."""
     console.log(f"[dim]Tool: Reading file {filepath} (lines {start_line}+)[/dim]")
-
     file_logger.log(
 f"""
 TOOL CALL: read_file
@@ -115,34 +200,38 @@ TOOL CALL: read_file
         if os.path.isdir(filepath):
             files = os.listdir(filepath)
             response = f"Directory listing for {filepath}:\n" + "\n".join(files)
-            file_logger.log(
-f"""
-TOOL RESPONSE:
-{response}
-""")
+            file_logger.log(f"\nTOOL RESPONSE:\n{response}\n")
             return response
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, "r", encoding="utf-8") as source:
             if line_count == -1:
-                return f.read()
-
-            lines = f.readlines()
-            selected_lines = lines[start_line - 1 : start_line - 1 + line_count]
-            return "".join(selected_lines)
-    except Exception as e:
-        return f"ERROR: Could not read file {filepath}. {str(e)}"
+                return source.read()
+            lines = source.readlines()
+            return "".join(lines[start_line - 1 : start_line - 1 + line_count])
+    except Exception as error:
+        return f"ERROR: Could not read file {filepath}. {error}"
 
 
-@tool("Read_File_With_Line_Numbers")
-def read_file_with_line_numbers(
-    filepath: str, *, line_count: int = -1, start_line: int = 1
+def _read_file_with_line_numbers(
+    filepath: str,
+    *,
+    line_count: int = -1,
+    start_line: int = 1,
+    allowed_roots: tuple[Path, ...],
+    allowed_files: tuple[Path, ...],
 ) -> str:
-    """Read a text file with stable 1-based source line numbers."""
+    """Read an allowlisted text file with stable 1-based line numbers."""
     console.log(
         f"[dim]Tool: Reading numbered file {filepath} "
         f"(lines {start_line}+)[/dim]"
     )
     try:
-        with open(filepath, "r", encoding="utf-8") as source:
+        safe_path = _resolve_tool_path(
+            filepath,
+            allowed_roots=allowed_roots,
+            allowed_files=allowed_files,
+            operation="Read",
+        )
+        with safe_path.open("r", encoding="utf-8") as source:
             lines = source.readlines()
         first = max(1, start_line)
         selected = lines[first - 1 :] if line_count == -1 else lines[
@@ -192,9 +281,8 @@ TOOL RESPONSE:
     except Exception as e:
         return f"ERROR: Could not append to file {filepath}. {str(e)}"
     
-@tool("Write_File")
-def write_file(filepath: str, content: str) -> str:
-    """Write content to a file."""
+def _write_file(filepath: str, content: str, *, output_root: Path) -> str:
+    """Write content to a file inside output_root."""
     console.log(f"[dim]Tool: Writing to file {filepath}...[/dim]")
     file_logger.log(
 f"""
@@ -204,9 +292,12 @@ TOOL CALL: write_file
 """
     )
     try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        safe_path = _resolve_tool_path(
+            filepath, allowed_roots=(output_root,), operation="Write"
+        )
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with safe_path.open("w", encoding="utf-8") as f:
             f.write(content)
 
         response = f"SUCCESS: Content written to {filepath}."
@@ -492,14 +583,56 @@ TOOL RESPONSE:
 
 from dotnet_tools import search_class, build_dotnet_dll, validate_data
 
-tools = {
-    "aflnet": [
-        save_and_verify_code,
-        read_file,
-        append_and_verify_code
-    ],
-    "peach": [
-        read_file,
+
+def get_tools(target: str, protocol: str) -> list:
+    """Build file tools with target- and protocol-specific path policies."""
+    if target == "aflnet":
+        return [save_and_verify_code, read_file, append_and_verify_code]
+    if target != "peach":
+        raise ValueError(f"Unknown target: {target!r}")
+
+    output_root = _peach_output_dir(protocol)
+    read_roots = (output_root,)
+    read_files = (
+        _PROJECT_ROOT / "peach" / "README.md",
+        _PROJECT_ROOT / "peach" / "peach.txt",
+        _PROJECT_ROOT / "prompts" / "peach_datamodel_example.xml",
+        _PROJECT_ROOT / "tests" / "peach_fixer" / "example.cs",
+    )
+
+    @tool("Read_File")
+    def scoped_read_file(
+        filepath: str, *, line_count: int = -1, start_line: int = 1
+    ) -> str:
+        """Read a file from the paths allowed for the current pipeline."""
+        return _scoped_read_file(
+            filepath,
+            line_count=line_count,
+            start_line=start_line,
+            allowed_roots=read_roots,
+            allowed_files=read_files,
+        )
+
+    @tool("Read_File_With_Line_Numbers")
+    def read_file_with_line_numbers(
+        filepath: str, *, line_count: int = -1, start_line: int = 1
+    ) -> str:
+        """Read an allowed file with stable 1-based source line numbers."""
+        return _read_file_with_line_numbers(
+            filepath,
+            line_count=line_count,
+            start_line=start_line,
+            allowed_roots=read_roots,
+            allowed_files=read_files,
+        )
+
+    @tool("Write_File")
+    def write_file(filepath: str, content: str) -> str:
+        """Write a file in the current Peach protocol output directory."""
+        return _write_file(filepath, content, output_root=output_root)
+
+    return [
+        scoped_read_file,
         read_file_with_line_numbers,
         write_file,
         validate_peach_xml,
@@ -509,4 +642,3 @@ tools = {
         build_dotnet_dll,
         # validate_data
     ]
-}

@@ -22,6 +22,39 @@ from ui import (
 )
 
 
+_DATAMODEL_MODELING_GUARDRAILS = """
+DataModel token and generalization rules:
+- `token="true"` is allowed when, and only when, the RFC requires one exact
+  wire value and matching that value is needed to crack the correct model or
+  Choice branch. Typical valid cases are protocol magic/literals, packet type
+  or opcode discriminators, and reserved bits or fixed flags that the RFC says
+  MUST have one value. A fixed protocol version may be a token only when this
+  model intentionally supports exactly that version.
+- Every token must have an explicit `value` justified by RFC evidence. Put it
+  on the smallest discriminating scalar/string in the packet-specific model.
+  Do not tokenize a container or a larger byte region merely because it happens
+  to distinguish the supplied samples.
+- Do NOT use `token="true"` for lengths/counts, identifiers, sequence numbers,
+  timestamps, checksums, payload data, optional content, variable flags, or an
+  enum/version field with multiple valid values. If several exact alternatives
+  require distinct cracking branches, model the alternatives explicitly and
+  tokenize only each branch's true discriminator. A token is not a substitute
+  for Relation, Optional, repetition, or a semantic constraint.
+- The RFC defines the accepted wire-language; seeds are only examples and
+  regression inputs. The DataModel must accept valid unseen packets, including
+  other legal values, lengths, counts, option combinations, repetitions, and
+  payload sizes for every requested packet type.
+- Never copy a seed-observed value into `value`/`token`, infer a fixed size or
+  occurrence bound from the largest sample, remove an RFC-defined optional or
+  alternate branch because no seed exercises it, or replace known structure
+  with Blob just to make current seeds crack.
+- During repair, fix the general RFC-level structural rule causing the failure
+  and preserve all valid variants. Passing the supplied seeds is necessary but
+  not sufficient; reject any repair that merely special-cases seed bytes,
+  filenames, observed lengths, or the current corpus distribution.
+"""
+
+
 def _env_float(key: str, default: float) -> float:
     val = os.environ.get(key)
     if val is None:
@@ -61,7 +94,9 @@ class PeachPipeline(BasePipeline):
                 "You are an expert in binary protocol parsing and Peach Pit "
                 "DataModels. Read the DataModel and validator logs, identify a "
                 "small number of actionable root causes, and use RFC_Search only "
-                "when protocol semantics need confirmation. Write only the "
+                "when protocol semantics need confirmation. Treat seeds as "
+                "failure evidence, never as the protocol's complete grammar. "
+                "Write only the "
                 "requested diagnosis JSON report; never modify other files."
             ),
         )
@@ -83,7 +118,8 @@ class PeachPipeline(BasePipeline):
                 "You repair Peach Pit DataModels strictly from a completed "
                 "diagnosis report. Read only that report and the current "
                 "DataModel, then write only the repaired DataModel. Do not "
-                "inspect validator output, failure logs, or RFC sources."
+                "inspect validator output, failure logs, or RFC sources. Never "
+                "special-case seed values or narrow the RFC-valid input space."
             ),
         )
         self.datamodel_autofix_agent_graph = build_agent_graph(
@@ -197,6 +233,8 @@ class PeachPipeline(BasePipeline):
         attributes, relations, and syntax. This is a lightweight
         interface-planning task; do not generate XML and do not propose any
         element type or construct that is absent from peach.txt.
+
+        {_DATAMODEL_MODELING_GUARDRAILS}
 
         Use RFC_Search to identify common wire primitives, shared headers, shared
         option/property structures, packet discriminators, and closely related
@@ -356,6 +394,8 @@ class PeachPipeline(BasePipeline):
             <DataModel name="{self.protocol_lower}_packet_t">, or
             <DataModel name="{self.protocol_lower}_packet_array">.
 
+            {_DATAMODEL_MODELING_GUARDRAILS}
+
             Every DataModel referenced by `ref` must be defined earlier in this
             fragment. Order shared definitions by dependency and never create a
             cyclic DataModel reference.
@@ -425,7 +465,9 @@ class PeachPipeline(BasePipeline):
             fragment, make the smallest correction, and call the tool again. You
             may repair at most THREE times. The tool enforces this limit. Stop
             immediately on PASS or REPAIR_LIMIT_REACHED. Never modify shared.xml
-            during family repair.
+            during family repair. Treat a failing seed as a counterexample to a
+            general model rule, not as a template: never repair by pinning its
+            bytes, length, count, option set, or repetition count.
             """
             UI.dim(
                 f"Starting family {group['id']} generation with "
@@ -455,6 +497,8 @@ class PeachPipeline(BasePipeline):
             "{self.protocol_lower}_<normalized_packet_type>_packet_t" for every
             assigned type. Do not define a model whose name or wire-level meaning
             belongs to another family; cross-family models belong in shared.xml.
+
+            {_DATAMODEL_MODELING_GUARDRAILS}
 
             Write one well-formed standalone <Peach> XML document containing
             only this family's <DataModel> definitions to "{group_path}". Do not
@@ -646,6 +690,8 @@ class PeachPipeline(BasePipeline):
                 and wire-level field semantics. Modify only the manifest and the
                 listed fragment files. Do not create datamodel.xml yourself.
 
+                {_DATAMODEL_MODELING_GUARDRAILS}
+
                 Integration rules:
                 - A model used by more than one family belongs in shared.xml.
                   Add it to shared_models, add it to each consuming shared_refs,
@@ -779,6 +825,8 @@ class PeachPipeline(BasePipeline):
         and payload structure. Do not rely on prior protocol knowledge when the
         RFC can answer the question.
 
+        {_DATAMODEL_MODELING_GUARDRAILS}
+
         The output MUST follow all of these format and naming requirements:
 
         1. Document envelope
@@ -814,8 +862,10 @@ class PeachPipeline(BasePipeline):
         3. Packet decomposition
            - When the protocol has a common header, define it once and reference
              it from every packet as `<Block name="fixed_header" ...>`.
-           - Specialize discriminator and other packet-constant header fields
-             inside that referencing Block with exact `value` and `token="true"`.
+           - Inside that referencing Block, specialize only RFC-mandated exact
+             discriminator/fixed fields with `value` and `token="true"`, following
+             the token rules above. Leave variable header fields untokenized even
+             if every supplied seed happens to contain the same value.
            - Put all bytes covered by a body/remaining-length field inside one
              `<Block name="msg_body">`. Inside it, use
              `<Block name="variable_header" ...>` and
@@ -926,6 +976,15 @@ class PeachPipeline(BasePipeline):
         3. Identify at most three root causes. Ignore cascading Choice token
            mismatches and repeated symptoms.
         4. Use RFC_Search only when a wire-format fact must be confirmed.
+
+        {_DATAMODEL_MODELING_GUARDRAILS}
+
+        A validator log proves that a particular seed failed; it does not prove
+        that the seed's observed value, size, option set, or packet layout is the
+        only valid one. Before recommending a new token or any narrowing change,
+        confirm the exact invariant with RFC_Search. In each proposed fix, state
+        the general protocol rule being restored; do not propose a seed-specific
+        constant or exception.
 
         Use Write_File to write exactly this compact JSON object in Chinese to
         "{report_path}":
@@ -1043,7 +1102,16 @@ class PeachPipeline(BasePipeline):
         source. Do NOT call RFC_Search. The diagnosis report is the sole source
         of failure evidence for this repair.
 
-        **CRITICAL**: Simplifying the DataModel is NOT allowed.
+        {_DATAMODEL_MODELING_GUARDRAILS}
+
+        Because this repair agent cannot consult the RFC, add `token="true"` only
+        when the diagnosis explicitly identifies the field as an exact
+        RFC-mandated constant or branch discriminator. Never derive a token or
+        bound from example bytes in the report. If a proposed edit conflicts
+        with these invariants, preserve the broader RFC-valid model and report
+        the conflict instead of applying a corpus-specific workaround.
+
+        **CRITICAL**: Simplifying or corpus-specializing the DataModel is NOT allowed.
         """
             if hint:
                 prompt += (
