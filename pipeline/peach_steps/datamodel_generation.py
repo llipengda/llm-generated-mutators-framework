@@ -1,806 +1,528 @@
 import json
-import os
 from pathlib import Path
+import subprocess
 
 from agent import build_agent_graph
-from datamodel_split import assemble_datamodel, load_manifest, write_manifest
+from datamodel_dsl import (
+    compile_dsl_subprocess,
+    load_manifest,
+    normalize_symbol,
+    write_manifest,
+    write_root_module,
+)
+from peach_dsl.compiler import DSLValidationError, validate_dsl_dependencies
 from pipeline.peach_steps.common import (
+    _DATAMODEL_DSL_SOURCE_STYLE,
     _DATAMODEL_MODELING_GUARDRAILS,
     _env_int,
     PeachStepMixin,
 )
-from tools import get_family_validation_result, reset_family_validation_session
-from ui import UI, ask_before_step
+from tools import validate_peach_xml
+from ui import UI, ask_before_step, ask_reuse_generated_component
 
 
 class DatamodelGenerationSteps(PeachStepMixin):
-    def _should_split_datamodel_generation(self, packet_types: list[str]) -> bool:
-        mode = os.environ.get("LLM_PEACH_DATAMODEL_SPLIT", "auto").strip().lower()
-        if mode in {"1", "true", "yes", "always"}:
-            return True
-        if mode in {"0", "false", "no", "never"}:
-            return False
-        threshold = max(1, _env_int("LLM_PEACH_DATAMODEL_SPLIT_THRESHOLD", 6))
-        return len(packet_types) >= threshold
-
-    def _generate_split_datamodel(self, packet_types: list[str]) -> None:
-        from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-
-        custom_element_context = self._custom_data_element_context()
-        output_dir = Path("./llm/peach") / self.protocol_lower
-        fragment_dir = output_dir / "datamodel_fragments"
-        manifest_path = fragment_dir / "schema_manifest.json"
-        seed_manifest_path = fragment_dir / "seed_classification.json"
-        shared_path = fragment_dir / "shared.xml"
-        shared_ready_path = fragment_dir / "shared.xml.ready"
-        group_size = max(1, _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4))
-        workers = max(1, _env_int("LLM_PEACH_DATAMODEL_WORKERS", 4))
-        assembly_retries = max(
-            0, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2)
-        )
-        fragment_dir.mkdir(parents=True, exist_ok=True)
-        shared_ready_path.unlink(missing_ok=True)
-
-        planner_action, planner_extra = ask_before_step(
-            "Step 2.1a: Datamodel Schema Planning"
-            + (" (existing result available)" if manifest_path.is_file() else ""),
-            has_previous=False,
-        )
-        classifier_action, classifier_extra = ask_before_step(
-            "Step 2.1b: Seed Classification"
-            + (" (existing result available)" if seed_manifest_path.is_file() else ""),
-            has_previous=False,
-        )
-        if "exit" in {planner_action, classifier_action}:
-            raise RuntimeError("split DataModel preparation stopped by user")
-        run_planner_task = planner_action == "continue"
-        run_classifier_task = classifier_action == "continue"
-
-        if run_planner_task:
-            manifest_path.unlink(missing_ok=True)
-        elif manifest_path.is_file():
-            UI.dim(f"Schema planning skipped; reusing {manifest_path}.")
-        else:
+    @staticmethod
+    def _packet_type_additions(
+        previous: list[str], repaired: list[str]
+    ) -> list[str]:
+        """Return newly modeled types while rejecting repair-time removals."""
+        repaired_keys = {packet.casefold() for packet in repaired}
+        removed = [
+            packet for packet in previous if packet.casefold() not in repaired_keys
+        ]
+        if removed:
             raise RuntimeError(
-                "schema planning was skipped, but no existing schema manifest "
-                f"is available at {manifest_path}"
+                "DataModel repair may add packet types but must not remove existing "
+                "types: " + ", ".join(removed)
             )
+        previous_keys = {packet.casefold() for packet in previous}
+        return [
+            packet for packet in repaired if packet.casefold() not in previous_keys
+        ]
 
-        if run_classifier_task:
-            seed_manifest_path.unlink(missing_ok=True)
-        elif seed_manifest_path.is_file():
-            UI.dim(f"Seed classification skipped; reusing {seed_manifest_path}.")
-        else:
-            UI.dim(
-                "Seed classification skipped with no existing result; early "
-                "family validation will be skipped."
+    @staticmethod
+    def _reuse_existing_dsl_component(path: Path, component_name: str) -> bool:
+        if not path.is_file():
+            return False
+
+        UI.dim(f"Validating existing {component_name}: {path}")
+        try:
+            validate_dsl_dependencies(path)
+        except (DSLValidationError, OSError, ValueError) as error:
+            UI.warn(
+                f"Existing {component_name} failed validation and will be "
+                f"regenerated: {error}"
             )
+            return False
 
-        selected_tasks = []
-        if run_planner_task:
-            selected_tasks.append("schema planning")
-        if run_classifier_task:
-            selected_tasks.append("seed classification")
-        if selected_tasks:
-            UI.dim(
-                f"Starting {' and '.join(selected_tasks)} for "
-                f"{len(packet_types)} packet types."
+        if ask_reuse_generated_component(component_name, str(path)):
+            UI.success(f"Reusing validated {component_name}: {path}")
+            return True
+
+        UI.dim(f"Regenerating {component_name}: {path}")
+        return False
+
+    def _prepare_dsl_contract(
+        self, packet_types: list[str], dsl_dir: Path, group_size: int
+    ) -> dict:
+        manifest_path = dsl_dir / "schema_manifest.json"
+        report_path, _, _ = self._data_type_paths()
+        custom_prefix = normalize_symbol(self.protocol_lower)
+        planning_available = manifest_path.is_file() and report_path.is_file()
+        if planning_available:
+            try:
+                self._load_data_type_analysis(report_path)
+                _, planning_warning = load_manifest(
+                    manifest_path, self.protocol_lower, packet_types, group_size
+                )
+                if planning_warning:
+                    raise ValueError(planning_warning)
+            except ValueError as error:
+                planning_available = False
+                UI.dim(f"Ignoring stale combined DSL plan: {error}")
+        planner_action, planner_extra = ask_before_step(
+            "Step 2.1: DSL Type Analysis & Schema Planning"
+            + (" (existing result available)" if planning_available else ""),
+            has_previous=False,
+        )
+        if planner_action == "exit":
+            raise RuntimeError("DSL DataModel preparation stopped by user")
+        run_planner = planner_action == "continue"
+        if not run_planner and not planning_available:
+            raise RuntimeError(
+                "DSL planning was skipped without an existing manifest and type analysis"
             )
 
         planner_prompt = f"""
-        Plan the decomposition of a complete Peach Pit DataModel for the
-        {self.protocol_name} protocol and these packet types: {packet_types}.
+        In one coordinated task, audit DSL type support and plan a split Peach DSL
+        DataModel for {self.protocol_name} packet types:
+        {packet_types}
 
-        {custom_element_context}
+        First read "./docs/peach-dsl.md" completely. It is the authoritative DSL
+        language and capability reference. Use RFC_Search to identify every basic
+        wire type together with shared structures, discriminators, length/count
+        rules, and packet families. The type audit and schema plan must agree: every
+        dsl_type in the plan must be justified by the audit. Preserve every known
+        RFC-defined length/count relationship in the relevant field's wire_contract
+        so the generation agents can model it explicitly with DSL references,
+        bounded blocks, arrays, or supported field expressions.
 
-        FIRST, use Read_File to read "./peach/peach.txt" completely. Treat it as
-        the authoritative catalog of supported Peach elements, custom elements,
-        attributes, relations, and syntax. This is a lightweight
-        interface-planning task; do not generate XML and do not propose any
-        element type or construct that is absent from peach.txt or the approved
-        custom DataElement contract above.
+        Judge DSL support only from the documented DSL. Do not inspect peach.txt,
+        Peach classes, generated XML, or runtime internals. Classify a type as
+        supported when documented DSL declarations or compositions express its
+        complete wire language; unsupported only when protocol-specific scalar
+        parsing/serialization requires ExtendedType; uncertain when evidence is
+        incomplete. Resolve dependencies first: once one scalar is represented by
+        ExtendedType, assess containing structures using ordinary Block, Array,
+        Optional, and Union.
 
-        {_DATAMODEL_MODELING_GUARDRAILS}
+        The types array is a catalog of UNIQUE wire encodings, not a catalog of
+        fields, aliases, semantic roles, or usage sites. Emit one item for each
+        distinct parsing and serialization algorithm. When several protocol fields
+        use the same encoding, describe those uses in that one item's evidence;
+        never emit separate type items for them. In particular, one custom_type
+        contract must appear in exactly one unsupported item.
 
-        Use RFC_Search to identify common wire primitives, shared headers, shared
-        option/property structures, packet discriminators, and closely related
-        packet families. Group all packet types into families of at most
-        {group_size} types so those families can be generated independently.
-        Any wire element or semantic DataModel used by packet types in more than
-        one family MUST be declared as a shared model; family tasks must never
-        independently define the same model name.
+        For every unsupported scalar, recommend exactly one ExtendedType whose DSL
+        symbol and element name both start with the protocol prefix
+        "{custom_prefix}". Its value type must be int, float, bool, str, or bytes.
+        Example naming form: {custom_prefix}VarInt =
+        ExtendedType[int]("{custom_prefix}VarInt"). Never recommend an unprefixed
+        custom name or an ExtendedType of list, dict, or Schema.
 
-        Write exactly one JSON object to "{manifest_path}" using Write_File:
+        Write the type audit to "{report_path}" with exactly this JSON shape:
         {{
           "protocol": "{self.protocol_lower}",
-          "shared_models": [
-            {{"name": "model_name", "purpose": "wire-level responsibility",
-                "fields": [{{"name": "field_name",
-                "peach_element": "exact peach.txt or approved custom element",
-                "wire_contract": "ordered encoding responsibility"}}]}}
-          ],
-          "packet_groups": [
-            {{"id": "ascii_lower_snake_case_id",
-              "packet_types": ["exact values from the requested list"],
-              "shared_refs": ["shared model names this family may reference"],
-              "rfc_queries": ["focused evidence queries for this family"]}}
-          ]
-        }}
-
-        Every requested packet type must occur exactly once. Shared model names
-        are an immutable interface contract for the parallel generation tasks.
-        Every peach_element and planned construct must be supported by peach.txt
-        or the approved custom contract; never invent another protocol-specific
-        type. If no specialized approved type exists, plan a composition of
-        documented primitive elements instead.
-        Keep the plan concise. Do not write any other file.
-        """
-        seed_classifier_prompt = f"""
-        Classify every binary seed in "{self.seed_dir}" for the
-        {self.protocol_name} protocol. Requested packet types: {packet_types}.
-
-        First call Inspect_Seed_Directory for that directory. Use RFC_Search to
-        identify the packet discriminator and framing/length rules. Walk the
-        entire byte sequence of each seed: a seed is `single_packet=true` only
-        when exactly one complete packet consumes the whole file. Do not infer
-        packet count from the filename alone.
-
-        Write exactly one JSON object to "{seed_manifest_path}":
-        {{
-          "protocol": "{self.protocol_lower}",
-          "seeds": [{{
-            "file": "relative/path.raw",
-            "packet_count": 1,
-            "packet_types": ["exact requested packet type"],
-            "single_packet": true,
+          "analysis_basis": "peach-dsl-plan-v7",
+          "packet_types": {json.dumps(packet_types)},
+          "types": [{{
+            "wire_type": "precise protocol type name",
+            "encoding": "complete wire encoding and validity bounds",
+            "rfc_evidence": "section and concise evidence",
+            "status": "supported | unsupported | uncertain",
+            "dsl_evidence": "exact documented DSL declarations checked",
+            "recommended_dsl": "exact DSL declaration or prefixed ExtendedType",
             "confidence": "high | medium | low",
-            "evidence": "discriminator and framing evidence"
+            "custom_type": null
           }}]
         }}
 
-        Include every inspected seed exactly once. If framing is ambiguous, use
-        low confidence and set single_packet=false. Do not write any other file.
-        """
+        For an unsupported item only, replace custom_type null with:
+        {{"symbol": "{custom_prefix}DescriptiveName",
+          "element_name": "{custom_prefix}DescriptiveName",
+          "value_type": "int | float | bool | str | bytes"}}.
+        Supported and uncertain items must keep custom_type null.
 
-        def run_planner() -> None:
-            planner_agent = build_agent_graph(
+        Include every primitive, including conventional supported types. Then group
+        packet types into families of at most {group_size} items and write the
+        DataModel plan to "{manifest_path}" with exactly this JSON shape:
+        {{
+          "protocol": "{self.protocol_lower}",
+          "shared_models": [{{
+            "symbol": "PublicCamelCaseSymbol",
+            "purpose": "wire responsibility",
+            "fields": [{{"name": "field_name", "dsl_type": "DSL construct",
+                        "wire_contract": "ordered encoding responsibility"}}]
+          }}],
+          "packet_groups": [{{
+            "id": "lower_snake_case",
+            "description": "brief whole-group description covering its family role, common outer framing, and packet structure",
+            "packet_types": ["exact requested packet type"],
+            "shared_refs": [{{
+              "symbol": "shared DSL symbol or prefixed custom type symbol",
+              "usage": "exact packet models, fields, or enclosing structures where this symbol is used"
+            }}],
+            "rfc_queries": ["focused evidence query"],
+            "packet_models": [{{
+              "packet_type": "exact requested packet type",
+              "symbol": "PublicCamelCasePacketSymbol"
+            }}]
+          }}]
+        }}
+
+        Every packet type must appear exactly once and all symbols must be globally
+        unique valid Python identifiers. Every planned Python identifier, including
+        symbols and field names, must avoid Python keywords. Do not specify
+        choice_name, runtime names, or Pit model names; the compiler derives them.
+        Each packet group description must give its generation agent the whole
+        family context, including common outer framing, discriminators, variable
+        headers, payloads, and the group's role in the protocol, so it cannot lose
+        outer structure while modeling a local detail.
+
+        shared_refs contains one object per DSL dependency, never runtime names.
+        Its symbol may name a declaration in shared_models or a protocol-prefixed
+        custom type from the type audit, such as "{custom_prefix}VarInt". Its usage
+        must say concretely which packet model(s), field(s), or enclosing structure
+        use that symbol. Include no speculative or unused reference, and omit no
+        dependency described by the group. A structure used by multiple families
+        belongs in shared_models. Write both requested JSON files in this single
+        planning task. Do not generate Python, C#, XML, or any other file.
+        """
+        if run_planner:
+            manifest_path.unlink(missing_ok=True)
+            report_path.unlink(missing_ok=True)
+            agent = build_agent_graph(
                 retriever=self.retriever,
                 target="peach",
                 config=self.agent_config,
                 tool_names={"Read_File", "RFC_Search", "Write_File"},
+                read_files=(Path("docs/peach-dsl.md"),),
             )
             self.call_agent(
                 planner_prompt
-                + (f"\n\nAdditional user instruction:\n{planner_extra}" if planner_extra else ""),
-                "Step 2.1: Datamodel Schema Planning",
-                agent_graph=planner_agent,
+                + (f"\nAdditional user instruction:\n{planner_extra}" if planner_extra else ""),
+                "Step 2.1: DSL Type Analysis & Schema Planning",
+                agent_graph=agent,
             )
 
-        def run_seed_classifier() -> None:
-            try:
-                classifier_agent = build_agent_graph(
-                    retriever=self.retriever,
-                    target="peach",
-                    config=self.agent_config,
-                    tool_names={
-                        "Inspect_Seed_Directory",
-                        "RFC_Search",
-                        "Write_File",
-                    },
-                )
-                self.call_agent(
-                    seed_classifier_prompt
-                    + (
-                        f"\n\nAdditional user instruction:\n{classifier_extra}"
-                        if classifier_extra
-                        else ""
-                    ),
-                    "Step 2.1: Seed Classification",
-                    agent_graph=classifier_agent,
-                )
-            except Exception as error:
-                UI.warn(
-                    "Seed classification failed; family validation will be "
-                    f"skipped, but full validation is preserved: {error}"
-                )
-
-        preparation_tasks = []
-        if run_planner_task:
-            preparation_tasks.append(run_planner)
-        if run_classifier_task:
-            preparation_tasks.append(run_seed_classifier)
-        if preparation_tasks:
-            with ThreadPoolExecutor(max_workers=len(preparation_tasks)) as executor:
-                planning_futures = [
-                    executor.submit(task) for task in preparation_tasks
-                ]
-                for future in as_completed(planning_futures):
-                    future.result()
-            UI.dim("Selected DataModel preparation tasks completed.")
-
         manifest, warning = load_manifest(
-            manifest_path,
-            self.protocol_lower,
-            packet_types,
-            group_size,
+            manifest_path, self.protocol_lower, packet_types, group_size
         )
         if warning:
             write_manifest(manifest_path, manifest)
             raise ValueError(
-                "schema planner did not produce a valid manifest; a diagnostic "
-                f"fallback manifest was saved: {warning}"
+                "DSL planner produced an invalid manifest; a diagnostic fallback "
+                f"was saved: {warning}"
             )
+        if not report_path.is_file():
+            raise RuntimeError(
+                f"combined DSL planning did not produce type analysis: {report_path}"
+            )
+        report = self._load_data_type_analysis(report_path)
+        self._finalize_data_type_support(report)
+        return manifest
 
-        classified_seeds = self._load_single_packet_seeds(
-            seed_manifest_path, packet_types
-        )
-        classified_count = sum(len(paths) for paths in classified_seeds.values())
-        UI.dim(
-            f"Seed classification selected {classified_count} high-confidence "
-            "single-packet seed(s) for early family validation."
-        )
+    def _generate_dsl_modules(
+        self,
+        manifest: dict,
+        dsl_dir: Path,
+    ) -> None:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        custom_element_context = self._custom_data_element_context()
         manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
+        shared_path = dsl_dir / "shared_model.py"
+        for probe_path in dsl_dir.glob("_probe*.py"):
+            probe_path.unlink(missing_ok=True)
+        (dsl_dir / "shared.py").unlink(missing_ok=True)
 
-        def generate_shared() -> None:
-            shared_path.unlink(missing_ok=True)
-            UI.dim(f"Generating shared DataModels at {shared_path}.")
+        def generate_shared() -> Path:
+            shared_path.write_text("from peach_dsl import *\n", encoding="utf-8")
             prompt = f"""
-            Generate only the shared portion of a Peach Pit for
-            {self.protocol_name}. The immutable schema contract is:
-
+            Generate only the shared Peach DSL schemas for {self.protocol_name}.
+            Contract:
             {manifest_json}
 
             {custom_element_context}
 
-            Read "./examples/peach_datamodel_example.xml" and
-            "./peach/peach.txt" before writing. Use RFC_Search to confirm every
-            shared field and encoding. Write one well-formed standalone <Peach>
-            XML document to "{shared_path}". It must contain exactly one
-            <Defaults> followed only by reusable primitives and shared
-            <DataModel> definitions. Do not define packet-specific models,
-            <DataModel name="{self.protocol_lower}_packet_t">, or
-            <DataModel name="{self.protocol_lower}_packet_array">.
+            Use Read_Shared_DSL_Context to read "./docs/peach-dsl.md", the type
+            analysis, schema manifest, and current shared module as needed. This
+            tool intentionally cannot read Peach XML, C#, examples, packet-family
+            modules, or arbitrary project files. Read the DSL guide completely and
+            follow it exactly. Use RFC_Search to confirm every shared field. Use
+            Write_Shared_DSL to write "{shared_path}" with `from peach_dsl import
+            *`, then define every contracted shared symbol exactly once. Also
+            declare every protocol-prefixed ExtendedType from the type analysis
+            that appears in shared_refs. Do not specify runtime model names or
+            invent a naming decorator. Do not define packet models, packet union,
+            ROOT, or family-local structures.
 
             {_DATAMODEL_MODELING_GUARDRAILS}
 
-            Every DataModel referenced by `ref` must be defined earlier in this
-            fragment. Order shared definitions by dependency and never create a
-            cyclic DataModel reference.
+            {_DATAMODEL_DSL_SOURCE_STYLE}
 
-            Honor the shared model names in the contract exactly. Do not write
-            prose, Markdown, TODOs, or any other file.
-
-            After writing, call Validate_Peach_XML on "{shared_path}". If it
-            returns FAIL, use its line-specific XSD diagnostics to correct this
-            fragment and validate again. Make at most three XSD repair attempts
-            and finish only after PASS. An ERROR means validator infrastructure
-            is unavailable and must be reported; do not claim validation passed.
+            Do not perform I/O or import any non-DSL module. Call
+            Validate_Peach_DSL_Module after writing, repair at most three times,
+            and finish only after PASS. Never write XML.
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
                 target="peach",
                 config=self.agent_config,
                 tool_names={
-                    "Read_File",
-                    "RFC_Search",
-                    "Write_File",
-                    "Validate_Peach_XML",
+                    "Read_Shared_DSL_Context", "RFC_Search", "Write_Shared_DSL",
+                    "Validate_Peach_DSL_Module",
                 },
             )
-            self.call_agent(
-                prompt,
-                "Step 2.2: Shared Datamodel Generation",
-                agent_graph=agent,
-            )
+            self.call_agent(prompt, "Step 2.2: Shared DSL Generation", agent_graph=agent)
+            unexpected_probes = sorted(dsl_dir.glob("_probe*.py"))
+            if unexpected_probes:
+                raise RuntimeError(
+                    "shared DSL generation created forbidden probe modules: "
+                    + ", ".join(path.name for path in unexpected_probes)
+                )
             if not shared_path.is_file():
-                raise RuntimeError(f"shared DataModel was not generated: {shared_path}")
-            shared_ready_path.touch()
-            UI.success(f"Shared DataModels generated: {shared_path}")
+                raise RuntimeError(f"shared DSL was not generated: {shared_path}")
+            validate_dsl_dependencies(shared_path)
+            return shared_path
 
-        def generate_group(group: dict, index: int) -> Path:
-            group_path = fragment_dir / f"packet_{group['id']}.xml"
-            group_path.unlink(missing_ok=True)
-            seed_paths = [
-                path
-                for packet_type in group["packet_types"]
-                for path in classified_seeds.get(packet_type, [])
-            ]
-            reset_family_validation_session(str(group_path))
-            validation_instructions = ""
-            tool_names = {
-                "Read_File",
-                "RFC_Search",
-                "Write_File",
-                "Validate_Peach_XML",
-            }
-            if seed_paths:
-                tool_names.add("Validate_DataModel_Family")
-                validation_instructions = f"""
-            After writing the fragment, validate it yourself by calling
-            Validate_DataModel_Family with:
-            - protocol: "{self.protocol_lower}"
-            - group_id: "{group['id']}"
-            - seed_files: {json.dumps([str(path) for path in seed_paths])}
-            - fragment_dir: "{fragment_dir}"
-            - output_dir: "{output_dir}"
-
-            The validation tool checks for shared.xml and waits when shared
-            generation is still running. If it returns WAITING, do not edit or
-            count a repair: call it again. If it returns BLOCKED_SHARED, stop
-            family repair and defer the shared problem to integration repair. If
-            it returns FAIL, read the reported logs, diagnose the family
-            fragment, make the smallest correction, and call the tool again. You
-            may repair at most THREE times. The tool enforces this limit. Stop
-            immediately on PASS or REPAIR_LIMIT_REACHED. Never modify shared.xml
-            during family repair. Treat a failing seed as a counterexample to a
-            general model rule, not as a template: never repair by pinning its
-            bytes, length, count, option set, or repetition count.
-            """
-            UI.dim(
-                f"Starting family {group['id']} generation with "
-                f"{len(seed_paths)} early-validation seed(s)."
-            )
+        def generate_family(group: dict, index: int) -> Path:
+            family_path = dsl_dir / f"family_{group['id']}.py"
+            family_path.unlink(missing_ok=True)
             prompt = f"""
-            Generate the packet-specific Peach DataModels for one independent
-            {self.protocol_name} packet family.
+            Generate one Peach DSL packet family for {self.protocol_name}.
+            Read "./docs/peach-dsl.md" completely.
 
-            Complete immutable schema contract:
+            Complete immutable contract:
             {manifest_json}
-
-            {custom_element_context}
 
             Assigned family:
             {json.dumps(group, ensure_ascii=False, indent=2)}
 
-            Before generating XML, use Read_File to read BOTH
-            "./examples/peach_datamodel_example.xml" and "./peach/peach.txt".
-            Follow peach.txt as the authoritative list and syntax of supported
-            Peach elements; the approved custom contract is the only permitted
-            exception. Never invent another element or attribute.
-            Use RFC_Search separately for every assigned packet type and confirm
-            discriminator, field order, bit widths/endianness, length encoding,
-            optional conditions, repetitions, and payload structure. References
-            outside this fragment may target only shared model names declared by
-            the contract. Define all family-local component models and exactly
-            one packet model named
-            "{self.protocol_lower}_<normalized_packet_type>_packet_t" for every
-            assigned type. Do not define a model whose name or wire-level meaning
-            belongs to another family; cross-family models belong in shared.xml.
+            {custom_element_context}
+
+            Treat the assigned family's description and every shared_refs usage as
+            a required whole-model checklist. Use RFC_Search separately for each
+            assigned packet. Confirm exact
+            discriminator, wire order, sizes/endianness, length/count relations,
+            optional conditions, repetition and payload structure. Write only
+            "{family_path}". Import exact referenced symbols from shared_model;
+            define every Python symbol from packet_models exactly once. The compiler
+            derives runtime model names; do not express them with a DSL decorator.
+            Do not define shared models, packet union, packet array, or ROOT.
 
             {_DATAMODEL_MODELING_GUARDRAILS}
 
-            Write one well-formed standalone <Peach> XML document containing
-            only this family's <DataModel> definitions to "{group_path}". Do not
-            include <Defaults>, shared model definitions, packet_union, or
-            packet_array. Do not write prose, Markdown, TODOs, or any other file.
+            {_DATAMODEL_DSL_SOURCE_STYLE}
 
-            Within this fragment, and in the final assembled file, every
-            DataModel referenced by `ref` MUST be defined before the DataModel
-            that references it. Write local component definitions in dependency
-            order. Cyclic DataModel references are forbidden.
-
-            Immediately after writing "{group_path}", call Validate_Peach_XML
-            on it. If XSD validation fails, repair only this fragment from the
-            reported line-specific errors and retry, with at most three XSD
-            repair attempts. Do not call Validate_DataModel_Family until
-            Validate_Peach_XML returns PASS. If the XSD tool returns ERROR,
-            report the infrastructure problem and never claim the XML is valid.
-            {validation_instructions}
+            Call Validate_Peach_DSL_Module after writing and use Apply_Patch to
+            repair type or syntax failures, at most three times. Never modify
+            shared_model.py or write XML.
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
                 target="peach",
                 config=self.agent_config,
-                tool_names=tool_names,
+                tool_names={
+                    "Read_File", "RFC_Search", "Write_File", "Apply_Patch",
+                    "Validate_Peach_DSL_Module",
+                },
+                read_files=(
+                    Path("docs/peach-dsl.md"),
+                    shared_path,
+                    family_path,
+                ),
             )
             self.call_agent(
                 prompt,
-                f"Step 2.2.{index + 1}: Datamodel Family {group['id']}",
+                f"Step 2.2.{index + 1}: DSL Family {group['id']}",
                 agent_graph=agent,
             )
-            if not group_path.is_file():
-                raise RuntimeError(f"family fragment was not generated: {group_path}")
-            if seed_paths:
-                result = get_family_validation_result(str(group_path))
-                status = str(result.get("status"))
-                raw_validations = result.get("validations", 0)
-                validations = (
-                    raw_validations
-                    if isinstance(raw_validations, int)
-                    else int(raw_validations)
-                    if isinstance(raw_validations, str) and raw_validations.isdigit()
-                    else 0
-                )
-                if status == "PASS":
-                    UI.success(
-                        f"Family {group['id']} passed early validation after "
-                        f"{validations} validation run(s)."
-                    )
-                else:
-                    UI.warn(
-                        f"Family {group['id']} early validation ended with "
-                        f"status={status}, runs={validations}; final validation "
-                        "and repair remain enabled."
-                    )
-            else:
-                UI.dim(
-                    f"Family {group['id']} has no eligible single-packet seeds; "
-                    "early validation skipped."
-                )
-            return group_path
+            if not family_path.is_file():
+                raise RuntimeError(f"family DSL was not generated: {family_path}")
+            validate_dsl_dependencies(family_path)
+            return family_path
 
-        packet_groups = manifest["packet_groups"]
-        max_workers = min(workers, len(packet_groups) + 1)
-        UI.dim(
-            f"Launching shared generation and {len(packet_groups)} family "
-            f"generation task(s) with {max_workers} worker(s)."
-        )
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures: list[Future[None] | Future[Path]] = [
-                executor.submit(generate_shared)
+        workers = max(1, _env_int("LLM_PEACH_DATAMODEL_WORKERS", 6))
+        if not self._reuse_existing_dsl_component(
+            shared_path, "shared DSL model"
+        ):
+            generate_shared()
+
+        pending_families = []
+        for index, group in enumerate(manifest["packet_groups"]):
+            family_path = dsl_dir / f"family_{group['id']}.py"
+            component_name = f"DSL family {group['id']}"
+            if not self._reuse_existing_dsl_component(family_path, component_name):
+                pending_families.append((group, index))
+
+        if not pending_families:
+            return
+
+        with ThreadPoolExecutor(
+            max_workers=min(workers, len(pending_families))
+        ) as executor:
+            futures = [
+                executor.submit(generate_family, group, index)
+                for group, index in pending_families
             ]
-            for index, group in enumerate(packet_groups):
-                futures.append(executor.submit(generate_group, group, index))
             for future in as_completed(futures):
                 future.result()
-        UI.dim("All shared and family generation tasks completed; assembling fragments.")
 
-        manifest = self._assemble_split_with_repair(
-            packet_types=packet_types,
-            manifest=manifest,
-            manifest_path=manifest_path,
-            shared_path=shared_path,
-            fragment_dir=fragment_dir,
-            output_dir=output_dir,
-            group_size=group_size,
-            assembly_retries=assembly_retries,
-        )
-        UI.success(
-            f"Assembled {len(manifest['packet_groups'])} packet-family fragments "
-            f"into {output_dir / 'datamodel.xml'}."
-        )
-
-    def _load_single_packet_seeds(
-        self, seed_manifest_path: Path, packet_types: list[str]
-    ) -> dict[str, list[Path]]:
-        try:
-            classification = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
-            entries = classification["seeds"]
-            if not isinstance(entries, list):
-                raise TypeError("seeds must be a list")
-        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
-            UI.warn(f"Seed classification unavailable; skipping family validation: {error}")
-            return {}
-
-        known_types = {packet_type.casefold(): packet_type for packet_type in packet_types}
-        seed_root = Path(self.seed_dir).resolve()
-        classified: dict[str, list[Path]] = {}
-        seen: set[Path] = set()
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            entry_types = entry.get("packet_types")
-            if (
-                entry.get("single_packet") is not True
-                or entry.get("packet_count") != 1
-                or str(entry.get("confidence", "")).lower() != "high"
-                or not isinstance(entry_types, list)
-                or len(entry_types) != 1
-            ):
-                UI.dim(
-                    f"Skipping seed {entry.get('file', '')} due to "
-                    f"{'single_packet' if entry.get('single_packet') is not True else ''}"
-                    f"{'packet_count' if entry.get('packet_count') != 1 else ''}"
-                    f"{'confidence' if str(entry.get('confidence', '')).lower() != 'high' else ''}"
-                    f"{'packet_types' if not isinstance(entry_types, list) or len(entry_types) != 1 else ''}"
-                )
-                continue
-            type_key = str(entry_types[0]).casefold()
-            if type_key not in known_types:
-                continue
-            relative = Path(str(entry.get("file", "")))
-            seed_path = (seed_root / relative).resolve()
-            try:
-                seed_path.relative_to(seed_root)
-            except ValueError:
-                continue
-            if not seed_path.is_file() or seed_path in seen:
-                continue
-            seen.add(seed_path)
-            classified.setdefault(known_types[type_key], []).append(seed_path)
-        return classified
-
-    def _assemble_split_with_repair(
+    def _compile_with_repair(
         self,
-        *,
         packet_types: list[str],
         manifest: dict,
-        manifest_path: Path,
-        shared_path: Path,
-        fragment_dir: Path,
+        dsl_dir: Path,
         output_dir: Path,
         group_size: int,
-        assembly_retries: int,
     ) -> dict:
-        custom_element_context = self._custom_data_element_context()
-        for attempt in range(assembly_retries + 1):
-            packet_groups = manifest["packet_groups"]
-            packet_paths = [
-                fragment_dir / f"packet_{group['id']}.xml"
-                for group in packet_groups
-            ]
+        manifest_path = dsl_dir / "schema_manifest.json"
+        retries = max(0, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2))
+        for attempt in range(retries + 1):
+            root_path = write_root_module(dsl_dir, self.protocol_lower, manifest)
+            error = "unknown DSL integration error"
+            output_path = output_dir / "datamodel.xml"
+            UI.dim(
+                "Compiling DSL root to Peach XML "
+                f"({attempt + 1}/{retries + 1}): {root_path} -> {output_path}"
+            )
             try:
-                assemble_datamodel(
-                    protocol=self.protocol_lower,
-                    packet_types=packet_types,
-                    shared_fragment=shared_path,
-                    packet_fragments=packet_paths,
-                    output_path=output_dir / "datamodel.xml",
-                    expected_shared_models=[
-                        str(model["name"])
-                        for model in manifest["shared_models"]
-                    ],
-                )
-                break
-            except (OSError, ValueError) as error:
-                if attempt >= assembly_retries:
-                    raise RuntimeError(
-                        "split DataModel assembly still fails after "
-                        f"{assembly_retries} integration repair attempts: {error}"
-                    ) from error
-
-                UI.warning_rule(
-                    "Step 2.3: Datamodel Integration Repair "
-                    f"{attempt + 1}/{assembly_retries}"
-                )
-                repair_prompt = f"""
-                Repair the generated {self.protocol_name} DataModel fragments so
-                they can be assembled without discarding the split design.
-
-                {custom_element_context}
-
-                Assembly error:
-                {error}
-
-                Read these files before editing:
-                - "{manifest_path}"
-                - "{shared_path}"
-                {os.linesep.join(f'- "{path}"' for path in packet_paths)}
-
-                Preserve every packet type, packet-group id, packet assignment,
-                and wire-level field semantics. Modify only the manifest and the
-                listed fragment files. Do not create datamodel.xml yourself.
-
-                {_DATAMODEL_MODELING_GUARDRAILS}
-
-                Integration rules:
-                - A model used by more than one family belongs in shared.xml.
-                  Add it to shared_models, add it to each consuming shared_refs,
-                  keep one canonical definition, and remove local duplicates.
-                - If equal names intentionally represent different wire formats,
-                  rename them with family-specific names and update all refs.
-                - Every external ref from a packet fragment must resolve to a
-                  model declared and defined in shared.xml.
-                - Keep exactly one Defaults in shared.xml and none in packet
-                  fragments. Do not define packet_union or packet_array.
-                - In every fragment and in the assembled output, a referenced
-                  DataModel must appear before the DataModel that references it.
-                  Reorder definitions as needed; cyclic refs are forbidden.
-                - Make the smallest changes required by the reported error.
-
-                Use RFC_Search only if choosing a canonical wire definition
-                requires protocol evidence. Finish only after writing all needed
-                corrections with Write_File. Then call Validate_Peach_XML on
-                shared.xml and every packet fragment listed above. Repair any
-                XSD violations and revalidate, with at most three XSD repair
-                attempts per file. Finish only when every file returns PASS; an
-                ERROR must be reported as validator infrastructure failure.
-                """
-                repair_agent = build_agent_graph(
-                    retriever=self.retriever,
-                    target="peach",
-                    config=self.agent_config,
-                    tool_names={
-                        "Read_File",
-                        "RFC_Search",
-                        "Write_File",
-                        "Validate_Peach_XML",
-                    },
-                )
-                self.call_agent(
-                    repair_prompt,
-                    f"Step 2.3.{attempt + 1}: Datamodel Integration Repair",
-                    agent_graph=repair_agent,
-                )
-                manifest, warning = load_manifest(
-                    manifest_path,
-                    self.protocol_lower,
-                    packet_types,
-                    group_size,
-                )
-                if warning:
-                    raise RuntimeError(
-                        "integration repair produced an invalid schema manifest: "
-                        f"{warning}"
+                with UI.status("Compiling DSL root to Peach XML..."):
+                    result = compile_dsl_subprocess(root_path, output_path)
+            except subprocess.TimeoutExpired as timeout_error:
+                result = None
+                error = f"DSL compiler timed out after {timeout_error.timeout} seconds"
+                UI.error(error)
+            if result is not None and result.returncode == 0:
+                compiler_output = (result.stdout + result.stderr).strip()
+                if compiler_output:
+                    UI.dim(f"DSL XML compiler output:\n{compiler_output}")
+                UI.dim(f"Validating compiled Peach XML: {output_path}")
+                xsd_result = str(
+                    validate_peach_xml.invoke(
+                        {"xml_path": str(output_path)},
+                        config={"callbacks": [self.tool_usage_logger]},
                     )
+                )
+                if xsd_result.startswith("PASS:"):
+                    UI.success(f"DSL compiled to {output_path}")
+                    return manifest
+                error = xsd_result
+                UI.error(f"Compiled Peach XML validation failed:\n{error}")
+            elif result is not None:
+                error = (result.stdout + result.stderr).strip()
+                UI.error(f"DSL XML compilation failed:\n{error}")
+            if attempt >= retries:
+                raise RuntimeError(
+                    f"DSL integration still fails after {retries} repair attempts: {error}"
+                )
+            modules = [dsl_dir / "shared_model.py"] + [
+                dsl_dir / f"family_{group['id']}.py" for group in manifest["packet_groups"]
+            ]
+            prompt = f"""
+            Repair the split {self.protocol_name} Peach DSL after this integration
+            compiler error:
+            {error}
+
+            Read "./docs/peach-dsl.md", "{manifest_path}", "{root_path}", and:
+            {chr(10).join(f'- "{path}"' for path in modules)}
+
+            Preserve every packet assignment and RFC wire semantic. Change only
+            schema_manifest.json, shared_model.py, and family modules; root.py and
+            datamodel.xml are derived and must not be edited. Shared structures
+            used by multiple families belong in shared_model.py. Keep DSL symbols
+            globally unique. Make the smallest correction with Apply_Patch when
+            editing an existing file, then call
+            Validate_Peach_DSL_Module on each changed module. Never write XML.
+
+            {_DATAMODEL_DSL_SOURCE_STYLE}
+            """
+            agent = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.agent_config,
+                tool_names={
+                    "Read_File", "RFC_Search", "Write_File", "Apply_Patch",
+                    "Validate_Peach_DSL_Module"
+                },
+                read_files=(Path("docs/peach-dsl.md"), manifest_path, root_path, *modules),
+            )
+            self.call_agent(
+                prompt,
+                f"Step 2.3.{attempt + 1}: DSL Integration Repair",
+                agent_graph=agent,
+            )
+            manifest, warning = load_manifest(
+                manifest_path, self.protocol_lower, packet_types, group_size
+            )
+            if warning:
+                raise RuntimeError(f"integration repair produced an invalid manifest: {warning}")
         return manifest
 
-    def repair_datamodel_assembly(self) -> None:
-        """Repair and assemble existing fragments without regenerating them."""
+    def repair_datamodel_assembly(
+        self, *, allow_packet_type_additions: bool = False
+    ) -> None:
         output_dir = Path("./llm/peach") / self.protocol_lower
-        fragment_dir = output_dir / "datamodel_fragments"
-        manifest_path = fragment_dir / "schema_manifest.json"
-        shared_path = fragment_dir / "shared.xml"
+        dsl_dir = output_dir / "datamodel_dsl"
+        manifest_path = dsl_dir / "schema_manifest.json"
         try:
-            raw_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            raw_groups = raw_manifest["packet_groups"]
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             packet_types = [
                 str(packet)
-                for group in raw_groups
+                for group in raw["packet_groups"]
                 for packet in group["packet_types"]
             ]
         except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
-            raise RuntimeError(
-                f"cannot load split DataModel manifest {manifest_path}: {error}"
-            ) from error
-
+            raise RuntimeError(f"cannot load DSL manifest {manifest_path}: {error}") from error
+        previous_packet_types = self.state.get("packet_types") or []
+        added: list[str] = []
+        if allow_packet_type_additions:
+            added = self._packet_type_additions(previous_packet_types, packet_types)
         group_size = max(
-            max((len(group.get("packet_types", [])) for group in raw_groups), default=1),
+            max((len(group.get("packet_types", [])) for group in raw["packet_groups"]), default=1),
             _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4),
         )
         manifest, warning = load_manifest(
-            manifest_path,
-            self.protocol_lower,
-            packet_types,
-            group_size,
+            manifest_path, self.protocol_lower, packet_types, group_size
         )
         if warning:
-            raise RuntimeError(f"invalid schema manifest: {warning}")
-        retries = max(1, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2))
-        manifest = self._assemble_split_with_repair(
-            packet_types=packet_types,
-            manifest=manifest,
-            manifest_path=manifest_path,
-            shared_path=shared_path,
-            fragment_dir=fragment_dir,
-            output_dir=output_dir,
-            group_size=group_size,
-            assembly_retries=retries,
-        )
-        UI.success(
-            f"Repaired and assembled {len(manifest['packet_groups'])} packet-family "
-            f"fragments into {output_dir / 'datamodel.xml'}."
-        )
+            raise RuntimeError(f"invalid DSL manifest: {warning}")
+        self._compile_with_repair(packet_types, manifest, dsl_dir, output_dir, group_size)
+        if allow_packet_type_additions and packet_types != previous_packet_types:
+            self.state["packet_types"] = packet_types
+            if added:
+                UI.success(
+                    "Added packet type(s) during DataModel repair: "
+                    + ", ".join(added)
+                )
+        self.state["datamodel_format"] = "peach-dsl-v1"
+        self.save_state()
 
     def step_2_datamodel_generation(self):
-        UI.title("Step 2: Datamodel Generation")
-        custom_element_context = self._custom_data_element_context()
-
+        UI.title("Step 2: Peach DSL DataModel Generation")
         packet_types = self.state.get("packet_types") or []
         if not packet_types:
-            UI.warn(
-                "Warning: packet_types is empty (Step 1 may have been skipped). Step 2 will still run."
-            )
-
-        if packet_types and self._should_split_datamodel_generation(packet_types):
-            UI.dim(
-                "Using adaptive split generation: one schema plan followed by "
-                "parallel shared and packet-family generation."
-            )
-            self._generate_split_datamodel(packet_types)
-            return
-
-        step2_prompt = f"""
-        Generate one complete Peach Pit file that precisely models every requested
-        {self.protocol_name} packet type: {packet_types}.
-
-        {custom_element_context}
-
-        Before generating anything, use "Read_File" to read BOTH:
-        - "./examples/peach_datamodel_example.xml" for the required document shape,
-          decomposition, and naming style. It is a structural example, not a
-          complete MQTT model; never copy its protocol facts and never omit a
-          requested packet merely because the example omits it.
-        - "./peach/peach.txt" for the supported Peach XML elements and their syntax.
-
-        Use "RFC_Search" separately for EACH requested packet type. Confirm its
-        discriminator, fixed fields, field order, bit widths/endianness, length
-        encoding, optional-field conditions, repeated-field termination/count,
-        and payload structure. Do not rely on prior protocol knowledge when the
-        RFC can answer the question.
-
-        {_DATAMODEL_MODELING_GUARDRAILS}
-
-        The output MUST follow all of these format and naming requirements:
-
-        1. Document envelope
-           - Emit exactly one XML document with the XML declaration, one <Peach>
-             root using the namespaces shown in the reference, one <Defaults>,
-             and then all <DataModel> definitions.
-           - Keep definitions in dependency order: reusable protocol primitives,
-             shared headers, packet-specific components, packet models, union,
-             then packet array. Every ref must resolve to a definition in the
-             same file; no forward placeholder or "similar structures" omission.
-
-        2. Identifier spelling
-           - Let `<proto>` mean `{self.protocol_lower}`. All generated DataElement
-             names and ordinary DataModel names must use ASCII lower_snake_case.
-             Normalize packet types to lower_snake_case; do not preserve spaces,
-             hyphens, mixed case, or RFC display capitalization in identifiers.
-           - Name packet models `<proto>_<packet_type>_packet_t`.
-           - Name packet-specific component models
-             `<proto>_<packet_type>_<component>_t`, for example
-             `<proto>_connect_variable_header_t` and
-             `<proto>_connect_payload_t`.
-           - Name shared structural models `<proto>_<purpose>_t`, for example
-             `<proto>_fixed_header_t`.
-           - A reusable protocol primitive may use
-             `<PROTOCOL_UPPER>_<DescriptiveType>` as in `MQTT_String`; use this
-             exception consistently and only for actual reusable primitives.
-           - Use semantic lower_snake_case field names from the RFC. Use the
-             suffix `_length` for a length field, `_count` for a count field,
-             and `_optional` for an <Optional> wrapper. Do not use generic names
-             such as field1, data1, block1, or reserved padding unless that is
-             truly the wire field's meaning.
-
-        3. Packet decomposition
-           - When the protocol has a common header, define it once and reference
-             it from every packet as `<Block name="fixed_header" ...>`.
-           - Inside that referencing Block, specialize only RFC-mandated exact
-             discriminator/fixed fields with `value` and `token="true"`, following
-             the token rules above. Leave variable header fields untokenized even
-             if every supplied seed happens to contain the same value.
-           - Put all bytes covered by a body/remaining-length field inside one
-             `<Block name="msg_body">`. Inside it, use
-             `<Block name="variable_header" ...>` and
-             `<Block name="payload" ...>` when those concepts exist. Preserve
-             exact wire order at every nesting level.
-           - Model every meaningful field explicitly. A catch-all <Blob> is only
-             allowed for RFC-defined opaque bytes or a payload whose internal
-             format the RFC genuinely does not define. It must not replace known
-             headers, properties, entries, flags, or length/count fields.
-
-        4. Sizes, conditions, and repetitions
-           - Put `<Relation type="size" of="target"/>` inside the field that
-             encodes target's byte length. `of` must name the exact sibling or
-             otherwise valid Peach-relative target and the target must exist.
-           - Use the protocol's real length encoding (Number, MqttVarInt, etc.);
-             do not force all lengths to 16-bit Numbers.
-           - Use <Optional> with an exact `src` path and XML-escaped `expression`
-             for conditionally present fields. In XML attributes write bitwise
-             AND as `&amp;`. Use `<Block minOccurs="0" maxOccurs="1">` only when
-             optionality has no representable controlling condition.
-           - Represent repeated wire items with a named plural container and a
-             named singular item. Set minOccurs/maxOccurs or a count/size Relation
-             according to the RFC; do not flatten multiple items into one Blob.
-           - Set Number size, signedness, and endian exactly. Defaults may supply
-             common values, but override them wherever the protocol differs.
-
-        5. Required top-level models
-           - Define `<DataModel name="{self.protocol_lower}_packet_t">` containing
-             exactly one `<Choice name="packet_union">`. Add one branch per
-             requested packet type, named with the normalized packet type and
-             referencing its `<proto>_<packet_type>_packet_t` model.
-           - Define the final `<DataModel name="{self.protocol_lower}_packet_array">`
-             with `<Block name="packets" minOccurs="1" maxOccurs="100">` and an
-             inner `<Block ref="{self.protocol_lower}_packet_t"/>`, matching the
-             reference exactly.
-
-        6. Completeness check before writing
-           - Verify that every requested packet type has one packet DataModel and
-             one packet_union branch, every ref/relation/src target resolves, all
-             identifiers obey the naming scheme, XML special characters are
-             escaped, and the XML is well formed.
-           - Do not output prose, Markdown fences, TODOs, ellipses, or placeholder
-             definitions in the file.
-
-        Use "Write_File" to save only the finished XML to
-        "./llm/peach/{self.protocol_lower}/datamodel.xml".
-        Then call Validate_Peach_XML on that file. If it returns FAIL, correct
-        the line-specific XSD violations and validate again, with at most three
-        XSD repair attempts. Finish only after PASS. If it returns ERROR, report
-        the validator infrastructure failure and do not claim the XML is valid.
-        """
-
-        self.call_agent(step2_prompt, "Step 2: Datamodel Generation")
+            raise RuntimeError("packet_types is empty; run Step 1 before DSL generation")
+        output_dir = Path("./llm/peach") / self.protocol_lower
+        dsl_dir = output_dir / "datamodel_dsl"
+        dsl_dir.mkdir(parents=True, exist_ok=True)
+        group_size = max(1, _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4))
+        manifest = self._prepare_dsl_contract(packet_types, dsl_dir, group_size)
+        self._generate_dsl_modules(manifest, dsl_dir)
+        self._compile_with_repair(
+            packet_types, manifest, dsl_dir, output_dir, group_size
+        )
+        self.state["datamodel_format"] = "peach-dsl-v1"
+        self.save_state()

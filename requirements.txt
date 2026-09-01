@@ -11,4 +11,5 @@ questionary==2.1.1
 rich==14.3.1
 faiss-cpu==1.13.2
 pypdf==6.8.0
+pyright==1.1.411
 pythonnet==3.0.5

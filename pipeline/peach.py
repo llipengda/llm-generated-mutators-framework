@@ -26,13 +26,28 @@ class PeachPipeline(
 ):
     def __init__(self):
         super().__init__()
+        state_changed = False
+        if self.state.get("peach_step_layout") != "combined-dsl-plan-v1":
+            previous_index = self.state.get("current_step_index", 0)
+            if previous_index >= 2:
+                self.state["current_step_index"] = previous_index - 1
+            elif previous_index >= 1:
+                self.state["current_step_index"] = 1
+            self.state["peach_step_layout"] = "combined-dsl-plan-v1"
+            state_changed = True
         if (
-            self.state.get("current_step_index", 0) >= 1
-            and not self.state.get("data_type_analysis")
+            self.state.get("current_step_index", 0) >= 2
+            and (
+                self.state.get("datamodel_format") != "peach-dsl-v1"
+                or self.state.get("data_type_analysis", {}).get("analysis_basis")
+                != "peach-dsl-plan-v7"
+            )
         ):
-            # Step 1.5 was inserted before DataModel generation. A legacy resume
-            # must pass through it and regenerate the model under the new contract.
+            # Runs created before combined planning must regenerate their editable
+            # DSL and prefixed ExtendedType contract before validation or codegen.
             self.state["current_step_index"] = 1
+            state_changed = True
+        if state_changed:
             self.save_state()
         peach_model = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
         self.agent_config = AgentConfig(
@@ -49,11 +64,14 @@ class PeachPipeline(
             system_prompt=(
                 "You are an expert in binary protocol parsing and Peach Pit "
                 "DataModels. Read the DataModel and validator logs, identify a "
-                "small number of actionable root causes, and use RFC_Search only "
+                "all distinct actionable root causes supported by the evidence, "
+                "and use RFC_Search only "
                 "when protocol semantics need confirmation. Treat seeds as "
                 "failure evidence, never as the protocol's complete grammar. "
                 "Write only the "
-                "requested diagnosis JSON report; never modify other files."
+                "requested diagnosis JSON report; never modify other files. "
+                "root.py is derived and must never be proposed as an editable "
+                "location."
             ),
         )
         self.diagnosis_agent_graph = build_agent_graph(
@@ -71,28 +89,34 @@ class PeachPipeline(
             temperature=self.agent_config.temperature,
             model=peach_model,
             system_prompt=(
-                "You repair Peach Pit DataModels strictly from a completed "
-                "diagnosis report. Read only that report and the current "
-                "DataModel, then write only the repaired DataModel. Do not "
-                "inspect validator output, failure logs, or RFC sources. Never "
-                "special-case seed values or narrow the RFC-valid input space."
+                "You repair Peach DSL DataModels from a completed diagnosis "
+                "report. Use Apply_Patch for localized repairs, and when the "
+                "report explicitly "
+                "diagnoses a missing RFC packet type, add its manifest contract "
+                "and family DSL module. Consult the RFC only to model such a new "
+                "packet type; never inspect validator output or failure logs. "
+                "Never edit root.py because it is a derived host-generated file. "
+                "Never special-case seed values or narrow the RFC-valid input "
+                "space."
             ),
         )
         self.datamodel_autofix_agent_graph = build_agent_graph(
             retriever=self.retriever,
             target="peach",
             config=autofix_config,
-            tool_names={"Read_File", "Write_File", "Validate_Peach_XML"},
+            tool_names={
+                "Read_File",
+                "RFC_Search",
+                "Write_File",
+                "Apply_Patch",
+                "Validate_Peach_DSL_Module",
+            },
         )
 
     @override
     def steps(self):
         steps = [
             ("Step 1: Packet Types Extraction", self.step_1_packet_types_extraction),
-            (
-                "Step 1.5: Peach Basic Data Type Support",
-                self.step_1_5_data_type_support,
-            ),
             ("Step 2: Datamodel Generation", self.step_2_datamodel_generation),
             (
                 "Step 3: Datamodel Validation & Fix",

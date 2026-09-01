@@ -34,32 +34,47 @@ class PeachStepMixin:
     fix_verify_loop: Callable[..., bool]
 
     _data_type_paths: Callable[[], tuple[Path, Path, Path]]
+    _load_data_type_analysis: Callable[[Path], dict]
+    _finalize_data_type_support: Callable[[dict], None]
     _custom_data_element_context: Callable[[], str]
+    repair_datamodel_assembly: Callable[..., None]
 
 
 _DATAMODEL_MODELING_GUARDRAILS = """
-DataModel token and generalization rules:
-- `token="true"` is allowed when, and only when, the RFC requires one exact
+DataModel structural, fixed-value, and generalization rules:
+- Model RFC-defined length and count relationships whenever the documented DSL
+  can express them. Connect a length/count field to the data it governs with
+  `Blob[length]`, `String[length]`, `Block[length]`, `Array[element, count]`, or
+  a supported field expression as appropriate. Prefer these relationships over
+  an unrelated scalar plus an unbounded `Blob` or `Array`; do not leave a known
+  relationship implicit merely because the supplied seeds still crack.
+- Small, deterministic, side-effect-free helper functions may be defined at
+  module scope when they reduce repeated declarations or substantially shorten
+  the generated DSL. Do not define them as members of a `Schema` class. Give
+  their parameters and return values Pyright-compatible type annotations.
+  Helpers may construct DSL declarations, but must not perform I/O, mutate global
+  state, dynamically evaluate code, or import non-DSL modules.
+- DSL `fixed(value)` is allowed when, and only when, the RFC requires one exact
   wire value and matching that value is needed to crack the correct model or
   Choice branch. Typical valid cases are protocol magic/literals, packet type
   or opcode discriminators, and reserved bits or fixed flags that the RFC says
   MUST have one value. A fixed protocol version may be a token only when this
   model intentionally supports exactly that version.
-- Every token must have an explicit `value` justified by RFC evidence. Put it
+- Every fixed value must be justified by RFC evidence. Put it
   on the smallest discriminating scalar/string in the packet-specific model.
   Do not tokenize a container or a larger byte region merely because it happens
   to distinguish the supplied samples.
-- Do NOT use `token="true"` for lengths/counts, identifiers, sequence numbers,
+- Do NOT use `fixed(...)` for lengths/counts, identifiers, sequence numbers,
   timestamps, checksums, payload data, optional content, variable flags, or an
   enum/version field with multiple valid values. If several exact alternatives
   require distinct cracking branches, model the alternatives explicitly and
-  tokenize only each branch's true discriminator. A token is not a substitute
-  for Relation, Optional, repetition, or a semantic constraint.
+  fix only each branch's true discriminator. A fixed value is not a substitute
+  for a length reference, Optional, repetition, or a semantic constraint.
 - The RFC defines the accepted wire-language; seeds are only examples and
   regression inputs. The DataModel must accept valid unseen packets, including
   other legal values, lengths, counts, option combinations, repetitions, and
   payload sizes for every requested packet type.
-- Never copy a seed-observed value into `value`/`token`, infer a fixed size or
+- Never copy a seed-observed value into `fixed(...)`, infer a fixed size or
   occurrence bound from the largest sample, remove an RFC-defined optional or
   alternate branch because no seed exercises it, or replace known structure
   with Blob just to make current seeds crack.
@@ -67,6 +82,22 @@ DataModel token and generalization rules:
   and preserve all valid variants. Passing the supplied seeds is necessary but
   not sufficient; reject any repair that merely special-cases seed bytes,
   filenames, observed lengths, or the current corpus distribution.
+"""
+
+
+_DATAMODEL_DSL_SOURCE_STYLE = """
+DSL source style rules:
+- Keep generated DSL modules compact and code-focused. Do not write module,
+  class, or helper-function docstrings; section banners; separator lines; RFC
+  summaries; or multi-line explanatory comment blocks.
+- Omit comments for declarations whose meaning is already clear from the symbol,
+  field name, DSL type, or fixed value.
+- When a non-obvious field needs clarification, add at most one short end-of-line
+  comment directly after that field declaration, using `field = DSL(...)  # ...`.
+  Keep the comment on the same physical line as the field and state only the
+  essential wire-format fact.
+- Do not place standalone comments before or after fields. Prefer clear names and
+  concise DSL declarations over prose.
 """
 
 

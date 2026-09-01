@@ -7,7 +7,7 @@ LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to p
 - Python 3.10+
 - [Docker](https://docs.docker.com/get-docker/) — for Peach SDK setup and fuzzing images
 - [Mono](https://www.mono-project.com/) — `mono` and `mcs` for compiling and running C# code
-- `xmllint` (libxml2) — validates generated Peach XML against `peach/peach.xsd`
+- `xmllint` (libxml2) — validates DSL-compiled Peach XML against `peach/peach.xsd`
 - Node.js `>=22.13.0` and npm — only required for the bundled Pit visualizer
 
 Python packages (see `requirements.txt`):
@@ -35,13 +35,10 @@ LLM_TEMPERATURE=                         # Sampling temperature
 # LLM_PEACH_MODEL=
 # LLM_PEACH_TEMPERATURE=
 
-# Peach DataModel generation (optional)
-# LLM_PEACH_DATAMODEL_SPLIT=auto       # auto, always, or never
-# LLM_PEACH_DATAMODEL_SPLIT_THRESHOLD=6
+# Peach DSL DataModel generation (optional)
 # LLM_PEACH_DATAMODEL_GROUP_SIZE=4
-# LLM_PEACH_DATAMODEL_WORKERS=4
+# LLM_PEACH_DATAMODEL_WORKERS=6
 # LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES=2
-# Family agents have a hard limit of 3 repair attempts during early validation.
 
 # --- Embedding (RAG) ---
 LLM_EMBEDDING_MODEL=    # Embedding model for RFC vector store
@@ -74,7 +71,7 @@ This step requires Docker and Mono. It:
 - Pulls `pdli/llm-peach:sdk` (linux/amd64)
 - Extracts essential DLLs into `peach/sdk/` (Peach.Core, NLog, NUnit, etc.)
 - Generates `peach/README.md` — the LLM-Peach SDK API reference used by the LLM during code generation
-- Generates `peach/peach.txt` — the Peach XML element reference, filtered to Analyzer/DataElement/Relation/Transformer sections
+- Generates `peach/peach.txt` — the Peach capability reference used during custom DataElement discovery
 
 ## Quickstart
 
@@ -85,23 +82,25 @@ python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
 - If you do nothing, it auto-continues after ~60 seconds.
 - The RFC can be a `.pdf` or a text file.
+- The generated DataModel source uses the DSL language described in
+  [`docs/peach-dsl.md`](docs/peach-dsl.md).
 
-### Re-run split DataModel assembly
+### Recompile split DataModel DSL
 
-Validate the manifest and fragments without replacing the current
+Validate the manifest and DSL modules without replacing the current
 `datamodel.xml`:
 
 ```bash
-.venv/bin/python datamodel_split.py <protocol> --check
+.venv/bin/python -m datamodel_dsl <protocol> --check
 ```
 
-Run the actual assembly after resolving reported conflicts:
+Run the actual compilation after resolving reported conflicts:
 
 ```bash
-.venv/bin/python datamodel_split.py <protocol>
+.venv/bin/python -m datamodel_dsl <protocol>
 ```
 
-Ask the integration repair agent to fix existing fragments and then assemble
+Ask the integration repair agent to fix existing DSL modules and then compile
 them, without rerunning schema planning or packet generation:
 
 ```bash
@@ -109,18 +108,18 @@ python3 main.py --protocol <protocol> --seed-dir <seed-dir> \
   --rfc-path <rfc-file> --target peach --repair-datamodel-assembly
 ```
 
-The command reports missing fragments/models, undeclared references, unexpected
-top-level XML elements, and every duplicate DataModel together with its source
-files. Use `--fragment-dir` or `--output` to override the default paths.
+The command runs strict Pyright syntax/type checking, then reports invalid DSL,
+missing symbols/models, and duplicate DataModel names. Use `--dsl-dir` or
+`--output` to override paths. DSL execution is currently local; it is explicitly
+scheduled to move into a hardened, network-disabled Docker compiler container.
 
 ## Pipeline steps
 
 | Step | Description |
 |------|-------------|
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
-| 1.5. Peach Basic Data Type Support | Uses one bounded analysis call and a locally compacted Peach capability catalog to classify protocol wire primitives as supported, unsupported, or uncertain. Uncertain results pause for manual review. Unsupported results are shown with evidence and require explicit approval before one custom DOM generation/compile call. Generation uses the repository-owned, compile-tested `examples/ExampleEscapedUInt.cs` API example and is not given sibling-project DOM implementations as references. Saved analysis is reused on retry. |
-| 2. Datamodel Generation | Generates a **Peach Pit XML** file (`datamodel.xml`). In split mode, schema planning and binary-safe seed classification each have an independent run/skip prompt; skipped tasks reuse their existing JSON when available, while selected tasks still run concurrently. Shared/family generators must read `peach.txt`; each eligible family agent calls its validation tool, waits for `shared.xml`, and may repair its own fragment at most three times. Deterministic assembly places every referenced DataModel before its consumer, rejects cycles, can run two integration repairs, and never falls back to single-agent generation. |
-| 3. Datamodel Validation & Fix | Parses seed files through the datamodel, re-serializes, and compares byte-for-byte. On failure, a read-only diagnosis agent returns a short summary and at most three actionable issues; the pipeline saves the report. The auto-fix agent then reads only that diagnosis and the current DataModel. Up to 3 auto-retries, then interactive fallback. |
+| 2. Datamodel Planning & Generation | One planning call audits whether the DSL supports every protocol primitive and produces the split DataModel manifest from the same RFC evidence. Unsupported scalars require explicit approval and receive protocol-prefixed `ExtendedType` names. `shared_model.py` is generated and Pyright-checked first; family modules are then generated in parallel and Pyright-checked before one integrated compilation. |
+| 3. Datamodel Validation & Fix | Parses seeds through the compiled Pit and compares re-serialized bytes. The DSL mechanically converts every Peach report node to compact DSL-path text in `datamodel_error_report.txt`; it performs no root-cause selection. A diagnosis agent analyzes that text and produces a repair plan; the auto-fix agent edits only DSL and recompiles. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
 | 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Each iteration: clone → mutate → serialize → re-parse. Failures trigger LLM fixes. |
 | Final Compilation | Compiles all `.cs` files into a single `{PROTO}.dll`. |
@@ -129,17 +128,18 @@ files. Use `--fragment-dir` or `--output` to override the default paths.
 
 ```
 llm/peach/<proto>/
-├── data_type_analysis.json             # RFC/Peach primitive compatibility report
+├── data_type_analysis.json             # RFC/DSL primitive compatibility report
 ├── DataElements/                       # Approved protocol-specific Peach DOM plugins
 │   ├── manifest.json                   # Wire type → Pit element/class mapping
 │   └── out/<PROTO>DataElements.dll     # Plugin loaded by validators and images
-├── datamodel.xml                       # Peach Pit XML datamodel
-├── datamodel_fragments/
+├── datamodel.xml                       # Derived Peach runtime artifact; never edit
+├── datamodel_error_report.txt          # Compact Peach failures converted to DSL paths
+├── datamodel_diagnosis.json            # LLM root-cause and repair plan
+├── datamodel_dsl/
 │   ├── schema_manifest.json            # Shared-model and packet-family contract
-│   ├── seed_classification.json        # Binary-safe seed packet classification
-│   ├── shared.xml                      # Shared DataModels
-│   └── packet_<family>.xml             # Independently generated family fragments
-├── datamodel_family_validation/        # Early single-packet family models/logs
+│   ├── shared_model.py                 # Shared schemas and custom type declarations
+│   ├── family_<family>.py              # Independently generated packet schemas
+│   └── root.py                         # Deterministically generated entry module
 ├── <PROTO>.dll                         # Final compiled DLL
 ├── dm_test_logs/                       # DataModel test logs (deleted on pass)
 ├── Mutators/
@@ -168,9 +168,12 @@ Mutator sanity:
 ## Pit visualizer
 
 The repository includes **Pit Studio**, a browser-based Peach Pit visualizer
-and editor. It renders the generated packet model as a protocol canvas or
-topology tree, supports editing and exporting Pit XML, and can highlight the
+and editor. It renders the compiled packet model as a protocol canvas or
+topology tree, supports inspecting/exporting Pit XML, and can highlight the
 root cause from a diagnosis JSON generated by `datamodel_diagnoser.py`.
+
+`datamodel.xml` is derived from the DSL. Edits exported from Pit Studio are not
+source changes and will be overwritten by the next DSL compilation.
 
 ```bash
 cd pit-visualizer

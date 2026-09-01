@@ -170,7 +170,6 @@ def search_class(query: str) -> str:
     Returns:
         str: A formatted string with class details and member signatures.
     """
-    console.log(f"[dim]Tool: Searching for class matching '{query}'...[/dim]")
     file_logger.log(
 f"""TOOL CALL: search_class
     query: {query}
@@ -230,10 +229,6 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
     if not refs:
         console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh peach` first to prepare the SDK. [/red][/dim]")
         sys.exit(1)
-
-    console.log(
-        f"[dim]Tool: Compiling C# files from '{source_file_or_dir}' into '{output_dll}'...[/dim]"
-    )
 
     if not csharp_files:
         return "Error: No C# source files found in the specified directory."

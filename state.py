@@ -1,6 +1,6 @@
 import json
 import os
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from ui import UI
 
@@ -12,6 +12,8 @@ class PipelineState(TypedDict):
     token_usage_total: dict[str, int]
     token_usage_by_step: dict[str, dict[str, int]]
     current_step_index: int
+    datamodel_format: NotRequired[str]
+    peach_step_layout: NotRequired[str]
 
 
 def new_usage_bucket() -> dict[str, int]:

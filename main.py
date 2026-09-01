@@ -11,7 +11,7 @@ from config import build_config_from_args, load_env
     "--repair-datamodel-assembly",
     is_flag=True,
     default=False,
-    help="Repair and assemble existing Peach DataModel fragments without regenerating them.",
+    help="Repair and compile existing Peach DataModel DSL modules without regenerating them.",
 )
 def main(
     protocol: str,
@@ -24,21 +24,21 @@ def main(
     build_config_from_args(protocol, seed_dir, list(rfc_paths), fixer=fixer)
     load_env()
 
+    if repair_datamodel_assembly and target != "peach":
+        raise click.UsageError("--repair-datamodel-assembly requires --target peach")
+
     if target == "aflnet":
         from pipeline.aflnet import AFLNetPipeline
         pipeline = AFLNetPipeline()
     elif target == "peach":
         from pipeline.peach import PeachPipeline
         pipeline = PeachPipeline()
+        if repair_datamodel_assembly:
+            pipeline.repair_datamodel_assembly()
+            return
     else:
         raise ValueError(f"Unknown target: {target}")
 
-    if repair_datamodel_assembly:
-        if target != "peach":
-            raise click.UsageError("--repair-datamodel-assembly requires --target peach")
-        pipeline.repair_datamodel_assembly()
-        return
-    
     pipeline()
 
 if __name__ == "__main__":

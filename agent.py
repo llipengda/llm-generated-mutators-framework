@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Collection, Mapping, Literal
 
 from langchain.agents import create_agent
@@ -74,13 +75,17 @@ def build_agent_graph(
     config: AgentConfig | None = None,
     target: Literal["aflnet", "peach"] = "aflnet",
     tool_names: Collection[str] | None = None,
+    read_files: Collection[Path | str] | None = None,
 ):
     if config is None:
         config = AgentConfig()
 
     llm = ChatOpenAI(temperature=config.temperature, model=config.model)
     rfc_search = make_rfc_search(retriever)
-    available_tools = [rfc_search] + get_tools(target, get_protocol_name())
+    selected_read_files = None if read_files is None else tuple(read_files)
+    available_tools = [rfc_search] + get_tools(
+        target, get_protocol_name(), read_files=selected_read_files
+    )
     if tool_names is None:
         selected_tools = available_tools
     else:

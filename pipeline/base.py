@@ -24,6 +24,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.retrievers import BaseRetriever
 from usage_tracking import TokenUsageTracker
+from log import ToolUsageLogger
 
 class BasePipeline:
     protocol_lower: str
@@ -93,6 +94,7 @@ class BasePipeline:
         self.config = config
         self.state = state
         self._state_lock = threading.Lock()
+        self.tool_usage_logger = ToolUsageLogger(self.protocol_lower)
 
 
     def __call__(self):
@@ -148,7 +150,7 @@ class BasePipeline:
         tracker = TokenUsageTracker()
         local_config: RunnableConfig = {
             **self.config,
-            "callbacks": [tracker],
+            "callbacks": [tracker, self.tool_usage_logger],
         }
         tracker.start_step(step_title)
         response = run_agent_step(

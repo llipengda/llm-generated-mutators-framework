@@ -40,7 +40,7 @@ class FixerSteps(PeachStepMixin):
         prompt = f"""
         For each constraint extracted of {self.protocol_name}, you need to:
 
-        1. Read the Datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+        1. List "./llm/peach/{self.protocol_lower}/datamodel_dsl" and read its shared_model.py and family modules as the DataModel source of truth.
         2. Check if the constraint is already guaranteed by the structure of the datamodel. 
             Hint: Check the Relation and Optional elements. 
             A note for `Optional` DataElement If the expression evaluates to true, the Optional field must be present. However, the presence of the field does not imply that the expression is true.
@@ -123,7 +123,7 @@ class FixerSteps(PeachStepMixin):
 
             You must ensure there are NO syntax errors and the code compiles successfully.
 
-            Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            Use "Read_File" to list "./llm/peach/{self.protocol_lower}/datamodel_dsl" and read the relevant shared_model.py and family modules. Do not edit the derived datamodel.xml.
             Use the "Read_File" tool to read the README of llm-peach SDK in "./peach/README.md".
             Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the fixers.
             Use the "Write_File" tool to save the generated fixer code to "./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixers_part_{index}.cs".
@@ -280,7 +280,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             For {self.protocol_lower}, write NUnit test functions for validating EACH fixer constraint below.
 
             For EACH constraint and its corresponding fixer function:
-            1. Generate a Peach DataElement that **violates** the constraint. The generated structure should be based on the datamodel in "./llm/peach/{self.protocol_lower}/datamodel.xml", and should be a packet_array containing a single packet that violates the constraint.
+            1. Generate a Peach DataElement that **violates** the constraint. Base its structure on the DSL modules in "./llm/peach/{self.protocol_lower}/datamodel_dsl", and make it a packet_array containing one violating packet.
             2. Apply the fixer function to the violating DataElement.
             3. Assert that after the fixer is applied, the DataElement now **complies** with the constraint.
             You should generate at least one test function per constraint, but you can generate more if there are multiple ways to violate the constraint or if the constraint has multiple components.
@@ -300,7 +300,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             4. You must ensure there are NO syntax errors and the code compiles successfully.
             5. You must NOT read the Fixer functions. You should treat the Fixers as a black box and only focus on testing the constraints. 
 
-            Use the "Read_File" tool to read the datamodel generated in "./llm/peach/{self.protocol_lower}/datamodel.xml".
+            Use "Read_File" to list "./llm/peach/{self.protocol_lower}/datamodel_dsl" and read the relevant shared_model.py and family modules. Do not edit the derived datamodel.xml.
             Use the "Write_File" tool to save the generated test code to "./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs".
             Use the "Build_DotNet_DLL" tool to compile the test file. Ensure it compiles successfully without syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Fixers/Validations/out/{self.protocol_upper}FixerTest_part_{index}.dll".
             """
@@ -397,7 +397,8 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
         2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
         3. Use the "Read_File" tool to read the corresponding file(s).
         4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur at runtime.
-        5. Use the "Write_File" tool to update the file(s) with the fix.
+        5. Use "Apply_Patch" for localized fixes. Use "Write_File" only if a
+           complete file genuinely needs to be replaced.
         6. Use the "Build_DotNet_DLL" tool to recompile:
            - The fixers DLL at "./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers.dll"
            - The test DLL at "./llm/peach/{self.protocol_lower}/Fixers/Validations/out/{self.protocol_upper}FixerTests.dll"

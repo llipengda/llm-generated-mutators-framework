@@ -88,21 +88,29 @@ The LLM-only mode attempts to:
 - state which semantic conclusions cannot be proven from the supplied logs;
 - provide a focused re-test for confirming or rejecting each hypothesis.
 
-When Step 3 runs inside the Peach pipeline, diagnosis is executed by a
-read-only pipeline agent. It calls `Read_File` for the current DataModel, lists
-the validator log directory, and calls `Read_File` for every failure log. It can
-then call `RFC_Search` to confirm protocol semantics before ranking root causes.
-Finally, it calls `Write_File` itself to save the completed structured diagnosis
-to `datamodel_diagnosis.json`; the pipeline does not write the report on the
-agent's behalf. This keeps diagnosis on the pipeline's model, tool-calling,
-memory, and token-usage path; the standalone CLI remains available for offline
-use.
+When Step 3 runs inside the Peach pipeline, the DSL first evaluates `root.py`
+in an isolated process. It mechanically parses every validator log, preserves
+the complete cracking-tree hierarchy, converts Peach node kinds to DSL node
+types, and binds runtime nodes to DSL paths. It does not select root causes, remove
+cascading failures, rank evidence, or resolve source candidates. The compact,
+line-oriented result is written to `datamodel_error_report.txt`.
+
+A read-only diagnosis agent analyzes the converted report instead of the raw
+logs. It groups symptoms, selects every distinct supported root cause, resolves
+all editable DSL source locations needed for each repair, and can call
+`RFC_Search` to confirm protocol semantics. It does not inspect or propose edits
+to the derived `root.py` or `datamodel.xml` artifacts. Each issue uses a
+`locations` array so one root cause can require changes in multiple modules; no
+fixed issue-count limit or Peach `pit_path` is used. It then calls `Write_File`
+to save the root-cause and repair plan to
+`datamodel_diagnosis.json`. The standalone diagnoser CLI remains available for
+offline use.
 
 Before starting diagnosis, the pipeline checks for an existing
 `datamodel_diagnosis.json` and asks whether to reuse it. The auto-fix agent uses
-only the selected diagnosis report and the current DataModel; validator stdout,
-failure logs, seeds, and RFC retrieval are intentionally excluded from the
-repair context.
+only the selected diagnosis report and referenced DSL modules; validator stdout,
+raw failure logs, seeds, RFC retrieval, and direct XML editing are intentionally
+excluded from the repair context.
 
 ## Limits
 
