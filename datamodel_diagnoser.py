@@ -14,9 +14,18 @@ import os
 import re
 import sys
 import xml.parsers.expat
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import (
+    Iterable,
+    Literal,
+    Mapping,
+    NotRequired,
+    Protocol,
+    Sequence,
+    TypedDict,
+    cast,
+)
 
 
 TREE_RE = re.compile(
@@ -99,6 +108,104 @@ class XmlNode:
                 return node.name
             node = node.parent
         return None
+
+
+class XmlLocationData(TypedDict):
+    line: int
+    tag: str
+    name: str | None
+    model: str | None
+    attributes: dict[str, str]
+
+
+class DiagnosticData(TypedDict):
+    code: str
+    severity: str
+    confidence: float
+    message: str
+    evidence: list[str]
+    log_lines: list[int]
+    xml_locations: list[XmlLocationData]
+
+
+class SeedReport(TypedDict):
+    log: str
+    seed: str
+    diagnostics: list[DiagnosticData]
+
+
+class CrossLogSummary(TypedDict):
+    code: str
+    severity: str
+    confidence: float
+    xml_locations: list[XmlLocationData]
+    seeds: list[str]
+
+
+class LlmXmlLocation(TypedDict, total=False):
+    line: int | str
+    element: str
+
+
+class LlmRootCause(TypedDict):
+    id: str
+    title: str
+    classification: str
+    confidence: float
+    reasoning: str
+    category: NotRequired[str]
+    affected_seeds: NotRequired[list[str]]
+    xml_locations: NotRequired[list[LlmXmlLocation]]
+    evidence: NotRequired[list[str]]
+    suggested_fix: NotRequired[str | None]
+    verification: NotRequired[str]
+
+
+class LlmAnalysis(TypedDict):
+    summary: str
+    root_causes: list[LlmRootCause]
+    priority_order: list[str]
+    uncertainties: list[str]
+    causal_relationships: NotRequired[list[dict[str, object]]]
+
+
+class LlmJudgmentOk(TypedDict):
+    status: Literal["ok"]
+    model: str
+    usage: dict[str, int]
+    analysis: LlmAnalysis
+
+
+class LlmJudgmentError(TypedDict):
+    status: Literal["error"]
+    model: str
+    error: str
+
+
+LlmJudgment = LlmJudgmentOk | LlmJudgmentError
+
+
+class DiagnosisReport(TypedDict):
+    diagnosis_mode: Literal["heuristic", "llm"]
+    datamodel: str | None
+    logs_analyzed: int
+    cross_log_summary: list[CrossLogSummary]
+    reports: list[SeedReport]
+    static_diagnostics: list[DiagnosticData]
+    log_files: NotRequired[list[str]]
+    llm_judgment: NotRequired[LlmJudgment]
+
+
+class LlmResponse(Protocol):
+    @property
+    def content(self) -> str | list[str | Mapping[str, object]]: ...
+
+    @property
+    def usage_metadata(self) -> Mapping[str, object] | None: ...
+
+
+class LlmInvoker(Protocol):
+    def invoke(self, messages: list[tuple[str, str]]) -> LlmResponse: ...
 
 
 class XmlIndex:
@@ -464,6 +571,7 @@ class LogAnalysis:
             length_event = self._nearest_length_field(line_number)
             endian = self._endianness_evidence(length_event, wanted, remaining)
             if endian:
+                assert length_event is not None
                 diagnostics.append(
                     Diagnostic(
                         code="probable_endianness_mismatch",
@@ -781,23 +889,49 @@ def collect_logs(paths: Sequence[Path]) -> list[Path]:
     return sorted(logs)
 
 
+def _location_data(location: XmlLocation) -> XmlLocationData:
+    return {
+        "line": location.line,
+        "tag": location.tag,
+        "name": location.name,
+        "model": location.model,
+        "attributes": dict(location.attributes),
+    }
+
+
+def _diagnostic_data(diagnostic: Diagnostic) -> DiagnosticData:
+    return {
+        "code": diagnostic.code,
+        "severity": diagnostic.severity,
+        "confidence": diagnostic.confidence,
+        "message": diagnostic.message,
+        "evidence": list(diagnostic.evidence),
+        "log_lines": list(diagnostic.log_lines),
+        "xml_locations": [
+            _location_data(location) for location in diagnostic.xml_locations
+        ],
+    }
+
+
 def analyze(
     log_paths: Sequence[Path], datamodel: Path | None, include_static: bool = True
-) -> dict[str, object]:
+) -> DiagnosisReport:
     xml_index = XmlIndex(datamodel) if datamodel else None
     logs = collect_logs(log_paths)
-    reports = []
+    reports: list[SeedReport] = []
     for log_path in logs:
         analysis = LogAnalysis(log_path, xml_index)
         reports.append(
             {
                 "log": str(log_path),
                 "seed": analysis.seed,
-                "diagnostics": [asdict(item) for item in analysis.diagnose()],
+                "diagnostics": [
+                    _diagnostic_data(item) for item in analysis.diagnose()
+                ],
             }
         )
     static = (
-        [asdict(item) for item in xml_index.static_diagnostics()]
+        [_diagnostic_data(item) for item in xml_index.static_diagnostics()]
         if xml_index and include_static
         else []
     )
@@ -813,7 +947,7 @@ def analyze(
 
 def prepare_llm_report(
     log_paths: Sequence[Path], datamodel: Path | None
-) -> dict[str, object]:
+) -> DiagnosisReport:
     """Collect inputs for LLM-only diagnosis without running heuristics."""
     logs = collect_logs(log_paths)
     return {
@@ -827,11 +961,11 @@ def prepare_llm_report(
     }
 
 
-def _cross_log_summary(reports: list[dict[str, object]]) -> list[dict[str, object]]:
-    groups: dict[tuple[object, ...], dict[str, object]] = {}
+def _cross_log_summary(reports: list[SeedReport]) -> list[CrossLogSummary]:
+    groups: dict[tuple[object, ...], CrossLogSummary] = {}
     for report in reports:
-        seed = str(report["seed"])
-        for diagnostic in report["diagnostics"]:  # type: ignore[index]
+        seed = report["seed"]
+        for diagnostic in report["diagnostics"]:
             if diagnostic["severity"] == "summary":
                 continue
             locations = diagnostic["xml_locations"]
@@ -856,7 +990,7 @@ def _cross_log_summary(reports: list[dict[str, object]]) -> list[dict[str, objec
                 },
             )
             group["confidence"] = max(
-                float(group["confidence"]), float(diagnostic["confidence"])
+                group["confidence"], diagnostic["confidence"]
             )
             if seed not in group["seeds"]:
                 group["seeds"].append(seed)
@@ -864,8 +998,8 @@ def _cross_log_summary(reports: list[dict[str, object]]) -> list[dict[str, objec
     repeated.sort(
         key=lambda group: (
             -len(group["seeds"]),
-            -float(group["confidence"]),
-            str(group["code"]),
+            -group["confidence"],
+            group["code"],
         )
     )
     return repeated
@@ -882,15 +1016,15 @@ the requested schema."""
 
 
 def add_llm_judgment(
-    report: dict[str, object],
+    report: DiagnosisReport,
     datamodel: Path | None,
     *,
     model_name: str | None = None,
     temperature: float = 0.0,
     language: str = "zh-CN",
     max_input_chars: int = 50000,
-    llm: Any | None = None,
-) -> dict[str, object]:
+    llm: LlmInvoker | None = None,
+) -> DiagnosisReport:
     """Ask an LLM to diagnose directly from raw logs and the complete Pit context.
 
     ``llm`` is injectable so this layer can be tested without making a network
@@ -928,11 +1062,14 @@ def add_llm_judgment(
 
         if not os.environ.get("OPENAI_API_KEY"):
             raise RuntimeError("OPENAI_API_KEY is required when --llm is used")
-        llm = ChatOpenAI(
-            model=resolved_model,
-            temperature=temperature,
-            max_retries=2,
-        ).bind(response_format={"type": "json_object"})
+        llm = cast(
+            LlmInvoker,
+            ChatOpenAI(
+                model=resolved_model,
+                temperature=temperature,
+                max_retries=2,
+            ).bind(response_format={"type": "json_object"}),
+        )
 
     response = llm.invoke(
         [
@@ -941,8 +1078,7 @@ def add_llm_judgment(
         ]
     )
     content = _message_text(response)
-    analysis = _parse_llm_json(content)
-    _validate_llm_analysis(analysis)
+    analysis = _validate_llm_analysis(_parse_llm_json(content))
     report["llm_judgment"] = {
         "status": "ok",
         "model": resolved_model,
@@ -962,7 +1098,7 @@ def _default_llm_model() -> str:
 
 
 def _build_llm_prompt(
-    report: dict[str, object],
+    report: DiagnosisReport,
     datamodel: Path | None,
     language: str,
     max_input_chars: int,
@@ -1030,21 +1166,19 @@ DATAMODEL XML:
 """
 
 
-def _report_log_paths(report: dict[str, object]) -> list[Path]:
+def _report_log_paths(report: DiagnosisReport) -> list[Path]:
     paths = report.get("log_files")
-    if isinstance(paths, list):
-        return [Path(str(path)) for path in paths]
+    if paths is not None:
+        return [Path(path) for path in paths]
 
     result: list[Path] = []
-    reports = report.get("reports")
-    if isinstance(reports, list):
-        for item in reports:
-            if isinstance(item, dict) and item.get("log"):
-                result.append(Path(str(item["log"])))
+    for item in report["reports"]:
+        if item["log"]:
+            result.append(Path(item["log"]))
     return result
 
 
-def _raw_log_context(report: dict[str, object], max_chars: int) -> str:
+def _raw_log_context(report: DiagnosisReport, max_chars: int) -> str:
     rendered: list[str] = []
     used = 0
     for path in _report_log_paths(report):
@@ -1088,7 +1222,7 @@ def _numbered_file_context(path: Path | None, max_chars: int) -> str:
 
 
 def _compact_llm_report(
-    report: dict[str, object], max_chars: int
+    report: DiagnosisReport, max_chars: int
 ) -> dict[str, object]:
     compact: dict[str, object] = {
         "logs_analyzed": report["logs_analyzed"],
@@ -1098,7 +1232,7 @@ def _compact_llm_report(
     }
     seeds: list[dict[str, object]] = []
     omitted = 0
-    for item in report["reports"]:  # type: ignore[index]
+    for item in report["reports"]:
         diagnostics = []
         for diagnostic in item["diagnostics"]:
             if diagnostic["severity"] == "summary":
@@ -1135,7 +1269,7 @@ def _compact_llm_report(
 
 def _selected_xml_context(
     datamodel: Path | None,
-    report: dict[str, object],
+    report: DiagnosisReport,
     max_chars: int,
     radius: int = 5,
 ) -> str:
@@ -1144,17 +1278,17 @@ def _selected_xml_context(
     source_lines = datamodel.read_text(errors="replace").splitlines()
     selected: set[int] = set()
 
-    def add_locations(diagnostics: Iterable[dict[str, object]]) -> None:
+    def add_locations(diagnostics: Iterable[DiagnosticData]) -> None:
         for diagnostic in diagnostics:
-            for location in diagnostic.get("xml_locations", []):  # type: ignore[union-attr]
+            for location in diagnostic["xml_locations"]:
                 line = int(location["line"])
                 selected.update(
                     range(max(1, line - radius), min(len(source_lines), line + radius) + 1)
                 )
 
-    for item in report["reports"]:  # type: ignore[index]
+    for item in report["reports"]:
         add_locations(item["diagnostics"])
-    add_locations(report["static_diagnostics"])  # type: ignore[arg-type]
+    add_locations(report["static_diagnostics"])
 
     rendered: list[str] = []
     previous = 0
@@ -1169,8 +1303,8 @@ def _selected_xml_context(
     return "\n".join(rendered)
 
 
-def _message_text(response: Any) -> str:
-    content = getattr(response, "content", response)
+def _message_text(response: LlmResponse) -> str:
+    content = response.content
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -1178,8 +1312,10 @@ def _message_text(response: Any) -> str:
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                parts.append(block["text"])
+            elif isinstance(block, Mapping):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
         return "".join(parts)
     return str(content)
 
@@ -1195,10 +1331,10 @@ def _parse_llm_json(content: str) -> dict[str, object]:
         raise RuntimeError(f"LLM returned invalid JSON: {error}") from error
     if not isinstance(parsed, dict):
         raise RuntimeError("LLM response must be a JSON object")
-    return parsed
+    return cast(dict[str, object], parsed)
 
 
-def _validate_llm_analysis(analysis: dict[str, object]) -> None:
+def _validate_llm_analysis(analysis: dict[str, object]) -> LlmAnalysis:
     required = {"summary", "root_causes", "priority_order", "uncertainties"}
     missing = required.difference(analysis)
     if missing:
@@ -1209,15 +1345,31 @@ def _validate_llm_analysis(analysis: dict[str, object]) -> None:
         raise RuntimeError("LLM JSON field 'summary' must be a string")
     if not isinstance(analysis["root_causes"], list):
         raise RuntimeError("LLM JSON field 'root_causes' must be a list")
-    for index, cause in enumerate(analysis["root_causes"]):
+    for key in ("priority_order", "uncertainties"):
+        value = analysis[key]
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) for item in value
+        ):
+            raise RuntimeError(f"LLM JSON field '{key}' must be a string list")
+    root_causes = analysis["root_causes"]
+    assert isinstance(root_causes, list)
+    for index, cause in enumerate(root_causes):
         if not isinstance(cause, dict):
             raise RuntimeError(f"root_causes[{index}] must be an object")
         for key in ("id", "title", "classification", "confidence", "reasoning"):
             if key not in cause:
                 raise RuntimeError(f"root_causes[{index}] is missing '{key}'")
+        for key in ("id", "title", "classification", "reasoning"):
+            if not isinstance(cause[key], str):
+                raise RuntimeError(f"root_causes[{index}].{key} must be a string")
+        confidence_value = cause["confidence"]
+        if not isinstance(confidence_value, (int, float, str)):
+            raise RuntimeError(
+                f"root_causes[{index}].confidence must be numeric"
+            )
         try:
-            confidence = float(cause["confidence"])
-        except (TypeError, ValueError) as error:
+            confidence = float(confidence_value)
+        except ValueError as error:
             raise RuntimeError(
                 f"root_causes[{index}].confidence must be numeric"
             ) from error
@@ -1225,11 +1377,43 @@ def _validate_llm_analysis(analysis: dict[str, object]) -> None:
             raise RuntimeError(
                 f"root_causes[{index}].confidence must be between 0 and 1"
             )
+        cause["confidence"] = confidence
+
+        for key in ("affected_seeds", "evidence"):
+            value = cause.get(key)
+            if value is not None and (
+                not isinstance(value, list)
+                or not all(isinstance(item, str) for item in value)
+            ):
+                raise RuntimeError(
+                    f"root_causes[{index}].{key} must be a string list"
+                )
+        locations = cause.get("xml_locations")
+        if locations is not None:
+            if not isinstance(locations, list) or not all(
+                isinstance(location, dict)
+                and isinstance(location.get("line"), (int, str))
+                and isinstance(location.get("element"), str)
+                for location in locations
+            ):
+                raise RuntimeError(
+                    f"root_causes[{index}].xml_locations must contain line/element objects"
+                )
+        for key in ("category", "verification"):
+            value = cause.get(key)
+            if value is not None and not isinstance(value, str):
+                raise RuntimeError(f"root_causes[{index}].{key} must be a string")
+        suggested_fix = cause.get("suggested_fix")
+        if suggested_fix is not None and not isinstance(suggested_fix, str):
+            raise RuntimeError(
+                f"root_causes[{index}].suggested_fix must be a string or null"
+            )
+    return cast(LlmAnalysis, analysis)
 
 
-def _response_usage(response: Any) -> dict[str, int]:
-    usage = getattr(response, "usage_metadata", None)
-    if not isinstance(usage, dict):
+def _response_usage(response: LlmResponse) -> dict[str, int]:
+    usage = response.usage_metadata
+    if usage is None:
         return {}
     result: dict[str, int] = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
@@ -1239,7 +1423,7 @@ def _response_usage(response: Any) -> dict[str, int]:
     return result
 
 
-def render_text(report: dict[str, object]) -> str:
+def render_text(report: DiagnosisReport) -> str:
     output = [
         f"DataModel diagnosis: {report['logs_analyzed']} log(s)",
         f"DataModel: {report['datamodel'] or '<not provided>'}",
@@ -1261,11 +1445,11 @@ def render_text(report: dict[str, object]) -> str:
                     f"'{location['name'] or '<anonymous>'}'"
                 )
     llm_judgment = report.get("llm_judgment")
-    if isinstance(llm_judgment, dict):
+    if llm_judgment is not None:
         output.extend(_render_llm_judgment(llm_judgment))
     if llm_only:
         return "\n".join(output) + "\n"
-    for item in report["reports"]:  # type: ignore[index]
+    for item in report["reports"]:
         diagnostics = item["diagnostics"]
         output.append(f"\n== {item['seed']} ==")
         if not diagnostics:
@@ -1310,45 +1494,39 @@ def render_text(report: dict[str, object]) -> str:
     return "\n".join(output) + "\n"
 
 
-def _render_llm_judgment(judgment: dict[str, object]) -> list[str]:
+def _render_llm_judgment(judgment: LlmJudgment) -> list[str]:
     output = ["\n== LLM root-cause judgment =="]
-    if judgment.get("status") != "ok":
-        output.append(f"  [ERROR] {judgment.get('error', 'LLM judgment failed')}")
+    if judgment["status"] == "error":
+        output.append(f"  [ERROR] {judgment['error']}")
         return output
 
-    output.append(f"  Model: {judgment.get('model', '<unknown>')}")
-    usage = judgment.get("usage")
-    if isinstance(usage, dict) and usage:
+    output.append(f"  Model: {judgment['model']}")
+    usage = judgment["usage"]
+    if usage:
         output.append(
             "  Usage: "
             + ", ".join(f"{key}={value}" for key, value in usage.items())
         )
-    analysis = judgment.get("analysis")
-    if not isinstance(analysis, dict):
-        output.append("  [ERROR] Missing structured analysis")
-        return output
-    output.append(f"  Summary: {analysis.get('summary', '')}")
-    priority = analysis.get("priority_order")
-    if isinstance(priority, list) and priority:
+    analysis = judgment["analysis"]
+    output.append(f"  Summary: {analysis['summary']}")
+    priority = analysis["priority_order"]
+    if priority:
         output.append("  Priority: " + " -> ".join(str(item) for item in priority))
-    for cause in analysis.get("root_causes", []) or []:
-        if not isinstance(cause, dict):
-            continue
-        confidence = int(round(float(cause.get("confidence", 0)) * 100))
+    for cause in analysis["root_causes"]:
+        confidence = int(round(cause["confidence"] * 100))
         output.append(
-            f"\n  [{cause.get('id', '?')}] {cause.get('title', '<untitled>')} "
-            f"({cause.get('classification', 'uncertain')}, {confidence}%)"
+            f"\n  [{cause['id']}] {cause['title']} "
+            f"({cause['classification']}, {confidence}%)"
         )
-        output.append(f"    - Reasoning: {cause.get('reasoning', '')}")
+        output.append(f"    - Reasoning: {cause['reasoning']}")
         seeds = cause.get("affected_seeds")
         if isinstance(seeds, list) and seeds:
             output.append("    - Seeds: " + ", ".join(str(seed) for seed in seeds))
-        for location in cause.get("xml_locations", []) or []:
-            if isinstance(location, dict):
-                output.append(
-                    f"    - XML line {location.get('line', '?')}: "
-                    f"{location.get('element', '<unknown>')}"
-                )
+        for location in cause.get("xml_locations", []):
+            output.append(
+                f"    - XML line {location.get('line', '?')}: "
+                f"{location.get('element', '<unknown>')}"
+            )
         suggested_fix = cause.get("suggested_fix")
         if suggested_fix:
             output.append(f"    - Candidate fix: {suggested_fix}")

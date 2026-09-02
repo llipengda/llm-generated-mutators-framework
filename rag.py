@@ -8,6 +8,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from pydantic import SecretStr
+
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
@@ -109,17 +111,13 @@ def build_retriever(rfc_paths: list[str]):
             embedding_model = os.environ.get(
                 "LLM_EMBEDDING_MODEL", "text-embedding-ada-002"
             )
-            embedding_kwargs: dict[str, object] = {"model": embedding_model}
-
             embedding_base_url = os.environ.get("LLM_EMBEDDING_BASE_URL")
-            if embedding_base_url:
-                embedding_kwargs["openai_api_base"] = embedding_base_url
-
             embedding_api_key = os.environ.get("LLM_EMBEDDING_API_KEY")
-            if embedding_api_key:
-                embedding_kwargs["openai_api_key"] = embedding_api_key
-
-            embeddings = OpenAIEmbeddings(**embedding_kwargs)
+            embeddings = OpenAIEmbeddings(
+                model=embedding_model,
+                base_url=embedding_base_url,
+                api_key=SecretStr(embedding_api_key) if embedding_api_key else None,
+            )
 
             all_exist = all(os.path.exists(p) for p in rfc_paths)
             if cache_root is not None and all_exist:

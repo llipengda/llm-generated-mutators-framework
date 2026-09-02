@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from typing import Callable, Protocol, TypedDict
 
 from agent import AgentConfig
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
 from state import PipelineState
 
@@ -27,16 +30,28 @@ class PeachStepMixin:
     agent_config: AgentConfig
     diagnosis_agent_config: AgentConfig
     datamodel_autofix_agent_config: AgentConfig
+    tool_usage_logger: BaseCallbackHandler
 
     call_agent: Callable[..., AgentResponse]
     save_state: Callable[[], None]
     fix_verify_loop: Callable[..., bool]
 
-    _data_type_paths: Callable[[], tuple[Path, Path, Path]]
-    _load_data_type_analysis: Callable[[Path], dict]
-    _finalize_data_type_support: Callable[[dict], None]
-    _custom_data_element_context: Callable[[], str]
-    repair_datamodel_assembly: Callable[..., None]
+    def _data_type_paths(self) -> tuple[Path, Path, Path]:
+        raise NotImplementedError
+
+    def _load_data_type_analysis(self, report_path: Path) -> dict:
+        raise NotImplementedError
+
+    def _finalize_data_type_support(self, report: dict) -> None:
+        raise NotImplementedError
+
+    def _custom_data_element_context(self) -> str:
+        raise NotImplementedError
+
+    def repair_datamodel_assembly(
+        self, *, allow_packet_type_additions: bool = False
+    ) -> None:
+        raise NotImplementedError
 
 
 _DATAMODEL_MODELING_GUARDRAILS = """

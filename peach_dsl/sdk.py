@@ -1208,6 +1208,15 @@ class BlockField:
         name = self.name or "?"
         return f"BlockField({name!r}, length={self._length!r})"
 
+    @property
+    def length_spec(self) -> Length | None:
+        """Return the block bound without exposing it as a nested DSL field."""
+        return self._length
+
+    @length_spec.setter
+    def length_spec(self, value: Length | None) -> None:
+        self._length = value
+
 
 class _SchemaInstance:
     """Concrete Schema reference with scalar or nested-Schema overrides."""
@@ -1690,11 +1699,7 @@ def _normalize_block_member(member: BlockMemberInput | Override) -> SchemaMember
             "has no base field type; use a Field, Schema, Block, Array, Optional, "
             "or Union value"
         )
-    if isinstance(member, SchemaMeta):
-        return cast(type[Schema], member)()
-    raise TypeError(
-        f"unsupported direct Block member type: {type(member).__name__}"
-    )
+    return cast(type[Schema], member)()
 
 
 SchemaMember = (
@@ -1791,8 +1796,8 @@ def _bind_schema_member_references(
             }
         )
     elif isinstance(member, BlockField):
-        if member._length is not None:
-            member._length = _bind_nested_length(member._length, bindings)
+        if member.length_spec is not None:
+            member.length_spec = _bind_nested_length(member.length_spec, bindings)
         member.fields = MappingProxyType(
             {
                 name: _bind_schema_member_references(child, bindings)
@@ -2005,7 +2010,7 @@ BlockMemberInput = (
     | SchemaMeta
 )
 
-UnionInput = type[Schema] | Schema | AnyField | BlockField
+UnionInput = type[Schema] | _SchemaInstance | AnyField | BlockField
 
 
 @dataclass(frozen=True, slots=True)
@@ -2963,7 +2968,7 @@ def _append_extracted_union(
             _append_extracted_block(
                 choice,
                 alternative_name,
-                cast(BlockField, alternative_raw),
+                alternative_raw,
                 cast(SchemaResult, alternative_result),
                 path + (name,),
                 relations,
@@ -3832,8 +3837,8 @@ def _evaluate_concrete_schema(
                         cast(type[Schema], type(override)), override.overrides, defaults
                     ),
                     length=(
-                        _evaluate_length(member._length, overrides)
-                        if member._length is not None
+                        _evaluate_length(member.length_spec, overrides)
+                        if member.length_spec is not None
                         else None
                     ),
                 )
@@ -3925,8 +3930,8 @@ def _evaluate_block(
         "Block",
         MappingProxyType(fields),
         length=(
-            _evaluate_length(block._length, block.overrides)
-            if block._length is not None
+            _evaluate_length(block.length_spec, block.overrides)
+            if block.length_spec is not None
             else None
         ),
     )
