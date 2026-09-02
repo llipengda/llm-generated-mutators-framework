@@ -256,7 +256,8 @@ f"""TOOL CALL: build_dotnet_dll
         else:
             result = f"Success: Compiled DLL: {output_dll}"
     else:
-        result = f"Compilation failed:\n{(res.stderr) if res else 'Unknown error'}"
+        diagnostics = (res.stdout + res.stderr).strip()
+        result = f"Compilation failed:\n{diagnostics or 'Unknown error'}"
     file_logger.log(
 f"""TOOL RESPONSE:
 {result}

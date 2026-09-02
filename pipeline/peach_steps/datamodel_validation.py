@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 import subprocess
-from typing import Any
 
+from agent import build_agent_graph
 from peach_dsl.error_report import convert_reports_subprocess
 from pipeline.peach_steps.common import (
     PeachStepMixin,
@@ -12,87 +12,33 @@ from pipeline.peach_steps.common import (
 from ui import UI, ask_reuse_diagnosis
 
 
-def _validate_diagnosis_report(
-    candidate: Any, dsl_dir: Path
-) -> dict[str, object]:
-    if (
-        not isinstance(candidate, dict)
-        or candidate.get("status") != "ok"
-        or not isinstance(candidate.get("summary"), str)
-        or not isinstance(candidate.get("issues"), list)
-    ):
-        raise RuntimeError("Diagnosis agent wrote an invalid JSON schema")
+_PEACH_DSL_GUIDE = Path(__file__).resolve().parents[2] / "docs" / "peach-dsl.md"
 
-    for issue_index, issue in enumerate(candidate["issues"]):
-        if (
-            not isinstance(issue, dict)
-            or not all(
-                isinstance(issue.get(key), str)
-                for key in ("cause", "evidence", "fix")
-            )
-        ):
-            raise RuntimeError(
-                f"Diagnosis issue {issue_index + 1} has an invalid JSON schema"
-            )
 
-        locations = issue.get("locations")
-        if not isinstance(locations, list) or not locations:
-            raise RuntimeError(
-                f"Diagnosis issue {issue_index + 1} must have at least one location"
-            )
+def _datamodel_repair_read_files(
+    dsl_dir: Path, *additional_files: Path
+) -> tuple[Path, ...]:
+    """Return the exact files a Step 3 diagnosis or repair agent may read."""
+    editable_modules = sorted(dsl_dir.glob("family_*.py"))
+    candidates = (
+        _PEACH_DSL_GUIDE,
+        dsl_dir / "schema_manifest.json",
+        dsl_dir / "shared_model.py",
+        *editable_modules,
+        *additional_files,
+    )
+    return tuple(dict.fromkeys(path.resolve() for path in candidates))
 
-        action = issue.get("action", "modify_existing")
-        if action not in {"modify_existing", "add_packet_type"}:
-            raise RuntimeError(
-                f"Diagnosis issue {issue_index + 1} has an invalid action"
-            )
-        issue["action"] = action
-        if action == "add_packet_type" and (
-            not isinstance(issue.get("packet_type"), str)
-            or not issue["packet_type"].strip()
-        ):
-            raise RuntimeError(
-                f"Diagnosis issue {issue_index + 1} does not name the packet type to add"
-            )
 
-        for location_index, location in enumerate(locations):
-            if (
-                not isinstance(location, dict)
-                or type(location.get("dsl_line")) is not int
-                or location["dsl_line"] < 1
-                or not all(
-                    isinstance(location.get(key), str) and location[key].strip()
-                    for key in ("dsl_file", "dsl_path")
-                )
-            ):
-                raise RuntimeError(
-                    f"Diagnosis issue {issue_index + 1} location "
-                    f"{location_index + 1} has an invalid JSON schema"
-                )
-
-            dsl_file = Path(location["dsl_file"])
-            if not dsl_file.is_absolute():
-                dsl_file = Path.cwd() / dsl_file
-            resolved_file = dsl_file.resolve()
-            try:
-                resolved_file.relative_to(dsl_dir.resolve())
-            except ValueError as error:
-                raise RuntimeError(
-                    f"Diagnosis issue {issue_index + 1} location "
-                    f"{location_index + 1} points outside datamodel_dsl"
-                ) from error
-            if resolved_file == (dsl_dir / "root.py").resolve():
-                raise RuntimeError(
-                    f"Diagnosis issue {issue_index + 1} location "
-                    f"{location_index + 1} points to derived root.py"
-                )
-            if dsl_file.suffix != ".py":
-                raise RuntimeError(
-                    f"Diagnosis issue {issue_index + 1} location "
-                    f"{location_index + 1} does not point to a DSL module"
-                )
-
-    return candidate
+def _datamodel_diagnosis_read_files(
+    dsl_dir: Path, *additional_files: Path
+) -> tuple[Path, ...]:
+    """Return diagnosis inputs, including the generated root as read-only context."""
+    return _datamodel_repair_read_files(
+        dsl_dir,
+        dsl_dir / "root.py",
+        *additional_files,
+    )
 
 
 class DatamodelValidationSteps(PeachStepMixin):
@@ -131,6 +77,7 @@ class DatamodelValidationSteps(PeachStepMixin):
             "summary": "Diagnosis has not completed.",
             "issues": [],
         }
+        diagnosis_completed = False
 
         try:
             report_path.unlink(missing_ok=True)
@@ -163,7 +110,11 @@ class DatamodelValidationSteps(PeachStepMixin):
         Diagnose the failed {self.protocol_name} Peach DataModel.
         Validator summary: {validator_summary}
 
-        1. Read "{converted_report_path}" first. It is a compact, mechanical
+        **FIRST ACTION**: Use "Read_File" to read
+        "{_PEACH_DSL_GUIDE}" completely before inspecting the failure report or
+        proposing any repair.
+
+        1. Read "{converted_report_path}". It is a compact, mechanical
            conversion of every Peach cracking tree. Indentation preserves the
            complete parent-child hierarchy; each node carries its DSL type,
            bound DSL path, state, offsets, size, and value. Nested ERROR lines
@@ -175,10 +126,12 @@ class DatamodelValidationSteps(PeachStepMixin):
            paths to select the relevant shared_model.py or family_<id>.py files.
            Use Read_File_With_Line_Numbers on those DSL modules and confirm the
            final editable file and line for every proposed repair.
-        4. Do not read datamodel.xml or root.py. Both are derived artifacts and
-           the converted report already contains the relevant evaluated
-           structure. root.py is generated by the host, is never an editable
-           repair target, and must never appear in a diagnosis location.
+        4. You may read "{dsl_dir / 'root.py'}" to understand the complete
+           host-generated assembly and how the editable schemas are composed.
+           root.py is strictly read-only: do not write, modify, patch, validate,
+           or propose changes to it, and never use it as a diagnosis location.
+           Do not read datamodel.xml; it is also a derived artifact, and the
+           converted report already contains its relevant evaluated structure.
         5. Identify every distinct root cause supported by the evidence. Do not
            target a fixed number of issues and do not merge independent causes
            merely to limit the issue count. Use RFC_Search only when a
@@ -202,6 +155,12 @@ class DatamodelValidationSteps(PeachStepMixin):
         confirm the exact invariant with RFC_Search. In each proposed fix, state
         the general protocol rule being restored; do not propose a seed-specific
         fixed value or exception.
+
+        Special Common Problems:
+        1. The packet is encrypted.
+           Recommend: add a new packet type with a single Blob field for the encrypted payload.
+           The new packet type must be added to schema_manifest.json and a new family_<id>.py module must be created.
+           The family should be placed as the last family in schema_manifest.json.
 
         Use Write_File to write exactly this compact JSON object in English to
         "{report_path}":
@@ -230,20 +189,34 @@ class DatamodelValidationSteps(PeachStepMixin):
         Write no other file. After Write_File succeeds, your final response may
         only briefly confirm that the report was saved; do not print the JSON.
         """
+            diagnosis_agent_graph = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.diagnosis_agent_config,
+                tool_names={
+                    "Read_File",
+                    "Read_File_With_Line_Numbers",
+                    "RFC_Search",
+                    "Write_File",
+                },
+                read_files=_datamodel_diagnosis_read_files(
+                    dsl_dir, converted_report_path
+                ),
+            )
             self.call_agent(
                 prompt,
                 "Step 3: Datamodel Failure Diagnosis",
-                agent_graph=self.diagnosis_agent_graph,
+                agent_graph=diagnosis_agent_graph,
             )
-            candidate = json.loads(report_path.read_text(encoding="utf-8"))
-            report = _validate_diagnosis_report(candidate, dsl_dir)
+            diagnosis = report_path.read_text(encoding="utf-8")
+            diagnosis_completed = True
         except Exception as error:
             UI.warn(f"Datamodel LLM diagnosis failed: {error}")
             report["error"] = str(error)
             report_path.unlink(missing_ok=True)
+            diagnosis = json.dumps(report, indent=2, ensure_ascii=False)
 
-        diagnosis = json.dumps(report, indent=2, ensure_ascii=False)
-        if report.get("status") == "ok":
+        if diagnosis_completed:
             UI.success(f"Datamodel diagnosis saved to {report_path}.")
         UI.panel(
             diagnosis,
@@ -251,9 +224,9 @@ class DatamodelValidationSteps(PeachStepMixin):
             border_style="cyan",
             expand=True,
         )
-        if report.get("status") != "ok":
+        if not diagnosis_completed:
             raise RuntimeError(
-                "DataModel diagnosis agent did not write a valid diagnosis report"
+                "DataModel diagnosis agent did not write a diagnosis report"
             )
         return diagnosis
 
@@ -270,24 +243,29 @@ class DatamodelValidationSteps(PeachStepMixin):
                 self.protocol_lower
             )
             if reuse_diagnosis:
-                try:
-                    _validate_diagnosis_report(
-                        json.loads(diagnosis_path.read_text(encoding="utf-8")),
-                        diagnosis_path.parent / "datamodel_dsl",
-                    )
-                except Exception as error:
-                    UI.warn(
-                        "Existing diagnosis does not follow the current "
-                        f"multi-location schema; regenerating it: {error}"
-                    )
-                    reuse_diagnosis = False
-                else:
-                    UI.success(
-                        f"Reusing existing diagnosis from {diagnosis_path}."
-                    )
+                UI.success(
+                    f"Reusing existing diagnosis from {diagnosis_path}."
+                )
             if not reuse_diagnosis:
                 UI.warning_rule("Step 3: Diagnosing Datamodel Failure")
                 self.diagnose_datamodel_failure(test_output)
+
+            dsl_dir = diagnosis_path.parent / "datamodel_dsl"
+            autofix_agent_graph = build_agent_graph(
+                retriever=self.retriever,
+                target="peach",
+                config=self.datamodel_autofix_agent_config,
+                tool_names={
+                    "Read_File",
+                    "RFC_Search",
+                    "Write_File",
+                    "Apply_Patch",
+                    "Validate_Peach_DSL_Module",
+                },
+                read_files=_datamodel_repair_read_files(
+                    dsl_dir, diagnosis_path
+                ),
+            )
 
             UI.warning_rule("Step 3: Applying Datamodel Auto-fix")
             prompt = f"""
@@ -296,6 +274,8 @@ class DatamodelValidationSteps(PeachStepMixin):
         uses action `add_packet_type`.
 
         **FIRST ACTION**: Use "Read_File" to read
+        "{_PEACH_DSL_GUIDE}" completely.
+        **SECOND ACTION**: Use "Read_File" to read
         "./llm/peach/{self.protocol_lower}/datamodel_diagnosis.json".
         Treat its `issues` array, in order, as the complete repair plan. For a
         `modify_existing` issue, use every entry in `locations` and its
@@ -312,8 +292,8 @@ class DatamodelValidationSteps(PeachStepMixin):
            single issue may require edits in several files: handle every listed
            location and save every affected editable DSL module.
         4. For `modify_existing`, save only the repaired DSL module(s). For
-           `add_packet_type`, read "./docs/peach-dsl.md" completely, use
-           RFC_Search to confirm the new packet's general wire format, then add
+           `add_packet_type`, use RFC_Search to confirm the new packet's general
+           wire format, then add
            one packet contract to schema_manifest.json and create or update its
            family_<id>.py module. Preserve every existing packet assignment,
            symbol, and model. Prefer a new family with a unique lower_snake_case
@@ -354,7 +334,7 @@ class DatamodelValidationSteps(PeachStepMixin):
             self.call_agent(
                 prompt,
                 "Step 3: Datamodel Validation & Fix",
-                agent_graph=self.datamodel_autofix_agent_graph,
+                agent_graph=autofix_agent_graph,
             )
             # Validate the manifest, regenerate the derived root, compile the
             # complete DSL, and expose additions to all downstream steps.

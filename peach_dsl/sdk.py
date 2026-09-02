@@ -9,7 +9,7 @@ import hashlib
 import inspect
 import re
 from types import MappingProxyType
-from typing import Callable, Generic, Literal, Self, TypeVar, cast, overload
+from typing import Callable, Generic, Literal, Self, TypeVar, cast, get_args, overload
 from xml.etree import ElementTree as ET
 
 
@@ -596,7 +596,7 @@ def _count_expr_fields(operand: ExprOperand) -> int:
     return 1 if isinstance(operand, (Field, MemberRef)) else 0
 
 
-ScalarValue = int | float | bool | str | bytes
+ScalarValue = int | float | str | bytes
 AnyField = Field[ScalarValue]
 FieldOverride = T | Fixed[T] | Field[T]
 PeachAttributeValue = int | float | bool | str
@@ -606,13 +606,20 @@ FixedInput = T | Fixed[T]
 
 def _fixed(value: FixedInput[T] | None) -> Fixed[T] | None:
     if isinstance(value, Fixed):
-        return cast(Fixed[T], value)
+        fixed_value = cast(Fixed[T], value)
+        if isinstance(fixed_value.value, bool):
+            raise TypeError(
+                "bool is not a supported Peach DSL scalar value; use 0 or 1"
+            )
+        return fixed_value
     return None
 
 
 def _default_value(value: FixedInput[T] | None) -> T | None:
     if value is None or isinstance(value, Fixed):
         return None
+    if isinstance(value, bool):
+        raise TypeError("bool is not a supported Peach DSL scalar value; use 0 or 1")
     return value
 
 
@@ -729,6 +736,11 @@ class ExtendedType(Generic[ExtendedValue]):
         /,
         **attributes: PeachAttributeValue,
     ) -> Field[ExtendedValue]:
+        if get_args(getattr(self, "__orig_class__", None)) == (bool,):
+            raise TypeError(
+                "bool is not a supported Peach DSL scalar value type; "
+                "use a numeric ExtendedType and 0/1 values"
+            )
         return Field(
             self.name,
             constant=_fixed(value),
@@ -3196,12 +3208,13 @@ def _collect_peach_length_relation(
         reference = length
     elif isinstance(length, ExprResult):
         reference = _peach_expr_reference(length)
-        relation_attributes = MappingProxyType(
-            {
-                "expressionGet": _format_peach_relation_expr(length, relation_type),
-                "expressionSet": _format_peach_relation_inverse(length, relation_type),
-            }
-        )
+        attributes = {
+            "expressionGet": _format_peach_relation_expr(length, relation_type),
+        }
+        inverse = _format_peach_relation_inverse(length, relation_type)
+        if inverse is not None:
+            attributes["expressionSet"] = inverse
+        relation_attributes = MappingProxyType(attributes)
     else:
         return
     source_path = _resolve_peach_reference(container_path, reference)
@@ -3231,18 +3244,16 @@ def _format_peach_relation_expr(expr: ExprResult, variable: str) -> str:
     return f"({format_operand(expr.left)} {expr.operation} {format_operand(expr.right)})"
 
 
-def _format_peach_relation_inverse(expr: ExprResult, variable: str) -> str:
-    """Return the inverse of a one-field affine Peach relation expression."""
+def _format_peach_relation_inverse(expr: ExprResult, variable: str) -> str | None:
+    """Return a simple affine inverse, or ``None`` when none can be emitted."""
 
     field_on_left = isinstance(expr.left, FieldReference)
     field_on_right = isinstance(expr.right, FieldReference)
     if not (field_on_left ^ field_on_right):
-        raise ValueError(
-            "a Peach relation expression must contain one direct field reference"
-        )
+        return None
     constant = expr.right if field_on_left else expr.left
     if not isinstance(constant, (int, float)):
-        raise ValueError("a Peach relation expression requires a numeric constant")
+        return None
 
     operation = expr.operation
     if field_on_left:
@@ -3257,9 +3268,7 @@ def _format_peach_relation_inverse(expr: ExprResult, variable: str) -> str:
         return f"({constant!r} - {variable})"
     elif operation == "/":
         return f"({constant!r} / {variable})"
-    raise ValueError(
-        f"cannot invert Peach relation expression using {operation!r}"
-    )
+    return None
 
 
 def _resolve_peach_reference(
@@ -3994,10 +4003,18 @@ def _evaluate_field(
     field = override if isinstance(override, Field) else original
     constant = _field_constant(field)
     if isinstance(override, Fixed):
+        if isinstance(override.value, bool):
+            raise TypeError(
+                f"bool is not a supported Peach DSL scalar value: {name}; use 0 or 1"
+            )
         constant = override
     raw_value = field.options.get("value")
-    value = raw_value if isinstance(raw_value, (int, float, bool, str, bytes)) else None
-    if isinstance(override, (int, float, bool, str, bytes)):
+    if isinstance(raw_value, bool) or isinstance(override, bool):
+        raise TypeError(
+            f"bool is not a supported Peach DSL scalar value: {name}; use 0 or 1"
+        )
+    value = raw_value if isinstance(raw_value, (int, float, str, bytes)) else None
+    if isinstance(override, (int, float, str, bytes)):
         value = override
 
     raw_length = field.options.get("length")
@@ -4097,7 +4114,13 @@ def _evaluate_length(
     if isinstance(length, Fixed):
         return length.value
     if isinstance(length, Expr):
-        return _evaluate_expr(length, overrides)
+        evaluated = _evaluate_expr(length, overrides)
+        if _expr_result_has_field(evaluated):
+            return evaluated
+        constant = _evaluate_constant_expr_result(evaluated)
+        if isinstance(constant, bool) or not isinstance(constant, int):
+            raise TypeError("a field length expression must evaluate to an int")
+        return constant
     if isinstance(length, MemberRef):
         result = _evaluate_member_ref(length)
         if not isinstance(result, (int, FieldReference)):
@@ -4135,6 +4158,50 @@ def _evaluate_expr(
         _evaluate_expr_operand(expr.left, overrides),
         _evaluate_expr_operand(expr.right, overrides),
     )
+
+
+def _expr_result_has_field(expr: ExprResult) -> bool:
+    return any(
+        isinstance(operand, FieldReference)
+        or isinstance(operand, ExprResult) and _expr_result_has_field(operand)
+        for operand in (expr.left, expr.right)
+    )
+
+
+def _evaluate_constant_expr_result(expr: ExprResult) -> ConstraintLiteral:
+    def value(operand: EvaluatedExprOperand) -> ConstraintLiteral:
+        if isinstance(operand, ExprResult):
+            return _evaluate_constant_expr_result(operand)
+        if isinstance(operand, FieldReference):
+            raise ValueError("a constant expression cannot reference a field")
+        return operand
+
+    left = value(expr.left)
+    right = value(expr.right)
+    operations: Mapping[str, Callable[[ConstraintLiteral, ConstraintLiteral], ConstraintLiteral]] = {
+        "+": lambda a, b: a + b,  # type: ignore[operator]
+        "-": lambda a, b: a - b,  # type: ignore[operator]
+        "*": lambda a, b: a * b,  # type: ignore[operator]
+        "//": lambda a, b: a // b,  # type: ignore[operator]
+        "%": lambda a, b: a % b,  # type: ignore[operator]
+        "==": lambda a, b: a == b,
+        "!=": lambda a, b: a != b,
+        "<": lambda a, b: a < b,  # type: ignore[operator]
+        "<=": lambda a, b: a <= b,  # type: ignore[operator]
+        ">": lambda a, b: a > b,  # type: ignore[operator]
+        ">=": lambda a, b: a >= b,  # type: ignore[operator]
+        "&": lambda a, b: a & b,  # type: ignore[operator]
+        "|": lambda a, b: a | b,  # type: ignore[operator]
+        "^": lambda a, b: a ^ b,  # type: ignore[operator]
+        "<<": lambda a, b: a << b,  # type: ignore[operator]
+        ">>": lambda a, b: a >> b,  # type: ignore[operator]
+    }
+    operation = operations.get(expr.operation)
+    if operation is None:
+        raise ValueError(
+            f"unsupported constant field length operation: {expr.operation!r}"
+        )
+    return cast(ConstraintLiteral, operation(left, right))
 
 
 def _evaluate_expr_operand(

@@ -497,53 +497,6 @@ def ask_generate_custom_data_elements(protocol: str, element_names: list[str]) -
     return choice == "Generate custom elements"
 
 
-def ask_resolve_uncertain_wire_type(
-    protocol: str,
-    wire_type: str,
-    encoding: str,
-    dsl_evidence: str,
-    custom_symbol: str,
-) -> tuple[str, str | None]:
-    """Ask the user to resolve one inconclusive basic-wire-type audit item."""
-    console.print()
-    console.print(
-        f"[bold yellow]The {protocol} basic wire type audit is uncertain about: "
-        f"{wire_type}[/bold yellow]"
-    )
-    console.print(f"[dim]Encoding: {encoding}[/dim]")
-    console.print(f"[dim]DSL evidence: {dsl_evidence}[/dim]")
-    choice = questionary.select(
-        "How should this audit item be resolved?",
-        choices=[
-            questionary.Choice(
-                "This is not a basic type; remove it from the type audit",
-                value="remove",
-            ),
-            questionary.Choice(
-                "Existing DSL elements can parse it; mark it supported",
-                value="supported",
-            ),
-            questionary.Choice(
-                f"It needs a custom scalar codec ({custom_symbol})",
-                value="unsupported",
-            ),
-            questionary.Choice("Stop for manual review", value="stop"),
-        ],
-        style=QUESTIONARY_BASE_STYLE,
-    ).ask()
-    if choice != "unsupported":
-        return (choice or "stop", None)
-
-    value_type = questionary.select(
-        f"Logical value type for {custom_symbol}:",
-        choices=["int", "float", "bool", "str", "bytes"],
-        style=QUESTIONARY_BASE_STYLE,
-    ).ask()
-    if value_type is None:
-        return ("stop", None)
-    return ("unsupported", value_type)
-
-
 def ask_regenerate(what: str, protocol: str) -> bool:
     """Ask whether to regenerate existing generated code.
 

@@ -4,7 +4,6 @@ from typing import Callable, Protocol, TypedDict
 
 from agent import AgentConfig
 from langchain_core.retrievers import BaseRetriever
-from langgraph.graph.state import CompiledStateGraph
 from state import PipelineState
 
 
@@ -26,8 +25,8 @@ class PeachStepMixin:
     state: PipelineState
     retriever: BaseRetriever
     agent_config: AgentConfig
-    diagnosis_agent_graph: CompiledStateGraph
-    datamodel_autofix_agent_graph: CompiledStateGraph
+    diagnosis_agent_config: AgentConfig
+    datamodel_autofix_agent_config: AgentConfig
 
     call_agent: Callable[..., AgentResponse]
     save_state: Callable[[], None]

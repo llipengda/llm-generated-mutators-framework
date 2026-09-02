@@ -27,20 +27,20 @@ class PeachPipeline(
     def __init__(self):
         super().__init__()
         state_changed = False
-        if self.state.get("peach_step_layout") != "combined-dsl-plan-v1":
+        if self.state.get("peach_step_layout") != "combined-dsl-plan-v2":
             previous_index = self.state.get("current_step_index", 0)
             if previous_index >= 2:
                 self.state["current_step_index"] = previous_index - 1
             elif previous_index >= 1:
                 self.state["current_step_index"] = 1
-            self.state["peach_step_layout"] = "combined-dsl-plan-v1"
+            self.state["peach_step_layout"] = "combined-dsl-plan-v2"
             state_changed = True
         if (
             self.state.get("current_step_index", 0) >= 2
             and (
                 self.state.get("datamodel_format") != "peach-dsl-v1"
-                or self.state.get("data_type_analysis", {}).get("analysis_basis")
-                != "peach-dsl-plan-v7"
+                or "unsupported_types"
+                not in self.state.get("data_type_analysis", {})
             )
         ):
             # Runs created before combined planning must regenerate their editable
@@ -58,7 +58,7 @@ class PeachPipeline(
         self.agent_graph = build_agent_graph(
             retriever=self.retriever, target="peach", config=self.agent_config
         )
-        diagnosis_config = AgentConfig(
+        self.diagnosis_agent_config = AgentConfig(
             temperature=0.0,
             model=os.environ.get("LLM_DIAGNOSER_MODEL") or peach_model,
             system_prompt=(
@@ -70,22 +70,12 @@ class PeachPipeline(
                 "failure evidence, never as the protocol's complete grammar. "
                 "Write only the "
                 "requested diagnosis JSON report; never modify other files. "
-                "root.py is derived and must never be proposed as an editable "
-                "location."
+                "You may read root.py as host-generated assembly context, but "
+                "it is strictly read-only and must never be written, modified, "
+                "patched, validated, or proposed as an editable location."
             ),
         )
-        self.diagnosis_agent_graph = build_agent_graph(
-            retriever=self.retriever,
-            target="peach",
-            config=diagnosis_config,
-            tool_names={
-                "Read_File",
-                "Read_File_With_Line_Numbers",
-                "RFC_Search",
-                "Write_File",
-            },
-        )
-        autofix_config = AgentConfig(
+        self.datamodel_autofix_agent_config = AgentConfig(
             temperature=self.agent_config.temperature,
             model=peach_model,
             system_prompt=(
@@ -99,18 +89,6 @@ class PeachPipeline(
                 "Never special-case seed values or narrow the RFC-valid input "
                 "space."
             ),
-        )
-        self.datamodel_autofix_agent_graph = build_agent_graph(
-            retriever=self.retriever,
-            target="peach",
-            config=autofix_config,
-            tool_names={
-                "Read_File",
-                "RFC_Search",
-                "Write_File",
-                "Apply_Patch",
-                "Validate_Peach_DSL_Module",
-            },
         )
 
     @override

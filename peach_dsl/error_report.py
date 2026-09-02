@@ -409,23 +409,26 @@ def _format_dsl_tree(
     packet_unions: frozenset[str] = frozenset(),
 ) -> list[str]:
     children = node.children
-    packet_union_with_match = False
+    union_candidates_filtered = False
     if node.kind == "Choice" and node.name in packet_unions:
         retained = tuple(
             child for child in children if not _is_packet_type_rejection(child)
         )
-        # If no packet type matched, retain the candidates so the report still
-        # contains the values needed to diagnose an unsupported discriminator.
         if retained:
             children = retained
-            packet_union_with_match = True
+            union_candidates_filtered = len(retained) < len(node.children)
+        elif len(children) > 1:
+            # Every packet candidate was rejected by its packet_type token.
+            # Keep only the branch that cracked furthest to avoid cascades.
+            children = (_longest_parsed_branch(node, children),)
+            union_candidates_filtered = True
     errors = (
         tuple(
             error
             for error in node.errors
             if error.message != "No valid children were found."
         )
-        if packet_union_with_match
+        if union_candidates_filtered
         else node.errors
     )
     member: EvaluationResult | ResultMember | None = (
@@ -501,6 +504,32 @@ def _is_packet_type_rejection(node: ReportNode) -> bool:
         candidate.name == "packet_type" and error.category == "token_mismatch"
         for candidate, error in errors
     )
+
+
+def _longest_parsed_branch(
+    union: ReportNode, children: tuple[ReportNode, ...]
+) -> ReportNode:
+    """Select the packet candidate that advanced furthest in its input.
+
+    Peach reports offsets relative to the active slice.  Subtracting a node's
+    slice size from the Union's size translates nested offsets back into the
+    Union's coordinate space.  A known field size counts as consumed input.
+    ``max`` keeps declaration/report order when two alternatives tie.
+    """
+
+    return max(
+        children,
+        key=lambda child: _parsed_progress_bits(child, union.bit_total),
+    )
+
+
+def _parsed_progress_bits(node: ReportNode, union_bits: int) -> int:
+    progress = 0
+    for candidate in node.walk():
+        slice_offset = max(0, union_bits - candidate.bit_total)
+        consumed = candidate.size_bits or 0
+        progress = max(progress, slice_offset + candidate.bit_start + consumed)
+    return progress
 
 
 def _dsl_node_type(

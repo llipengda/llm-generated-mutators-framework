@@ -95,68 +95,73 @@ class DatamodelGenerationSteps(PeachStepMixin):
             )
 
         planner_prompt = f"""
-        In one coordinated task, audit DSL type support and plan a split Peach DSL
-        DataModel for {self.protocol_name} packet types:
+        In one coordinated task, identify unsupported protocol field encodings and
+        plan a split Peach DSL DataModel for {self.protocol_name} packet types:
         {packet_types}
 
+        The generated DataModel for each packet type must represent a complete 
+        {self.protocol_name} packet of that type.
+
+
         First read "./docs/peach-dsl.md" completely. It is the authoritative DSL
-        language and capability reference. Use RFC_Search to identify every basic
-        wire type together with shared structures, discriminators, length/count
-        rules, and packet families. The type audit and schema plan must agree: every
-        dsl_type in the plan must be justified by the audit. Preserve every known
-        RFC-defined length/count relationship in the relevant field's wire_contract
-        so the generation agents can model it explicitly with DSL references,
-        bounded blocks, arrays, or supported field expressions.
+        language and capability reference. Use RFC_Search to inspect the concrete
+        protocol fields used by the requested packet types and to plan shared
+        structures, discriminators, length/count rules, and packet families.
 
-        Judge DSL support only from the documented DSL. Do not inspect peach.txt,
-        Peach classes, generated XML, or runtime internals. Classify a type as
-        supported when documented DSL declarations or compositions express its
-        complete wire language; unsupported only when protocol-specific scalar
-        parsing/serialization requires ExtendedType; uncertain when evidence is
-        incomplete. Resolve dependencies first: once one scalar is represented by
-        ExtendedType, assess containing structures using ordinary Block, Array,
-        Optional, and Union.
+        For the type audit, analyze only wire encodings used by independently
+        defined protocol fields. An RFC grammar production is not automatically a
+        field type. Treat structures, containers, alternatives, repetition,
+        delimiters, lexical rules, and field-validity rules as ordinary DSL
+        composition or constraints when that is operationally sufficient.
 
-        The types array is a catalog of UNIQUE wire encodings, not a catalog of
-        fields, aliases, semantic roles, or usage sites. Emit one item for each
-        distinct parsing and serialization algorithm. When several protocol fields
-        use the same encoding, describe those uses in that one item's evidence;
-        never emit separate type items for them. In particular, one custom_type
-        contract must appear in exactly one unsupported item.
+        Judge support only from the documented DSL. Do not inspect peach.txt, Peach
+        classes, generated XML, or runtime internals. An encoding needs no report
+        entry when documented scalar and container composition is sufficient for
+        expected DataModel cracking, serialization, and field relationships. The
+        representation need not implement every valid or invalid RFC case.
 
-        For every unsupported scalar, recommend exactly one ExtendedType whose DSL
-        symbol and element name both start with the protocol prefix
-        "{custom_prefix}". Its value type must be int, float, bool, str, or bytes.
-        Example naming form: {custom_prefix}VarInt =
-        ExtendedType[int]("{custom_prefix}VarInt"). Never recommend an unprefixed
-        custom name or an ExtendedType of list, dict, or Schema.
+        Report an encoding as unsupported only the following conditions are ALL met:
+        1. It is used by a concrete protocol field;
+        2. At least one another field ACTUALLY uses its decoded value as length or count;
+        3. It CAN NOT be represented with combination of documented DSL types
+           (losing some semantic detail is acceptable);
+        Group all fields using the same wire encoding into one entry.
+
+        DOUBLE-CHECK every reported encoding against the DSL guide.
+
+        For every unsupported encoding, recommend exactly one ExtendedType. Its DSL
+        symbol and element name must start with "{custom_prefix}", and its value
+        type must be int, float, str, or bytes.
 
         Write the type audit to "{report_path}" with exactly this JSON shape:
         {{
           "protocol": "{self.protocol_lower}",
-          "analysis_basis": "peach-dsl-plan-v7",
           "packet_types": {json.dumps(packet_types)},
-          "types": [{{
-            "wire_type": "precise protocol type name",
-            "encoding": "complete wire encoding and validity bounds",
-            "rfc_evidence": "section and concise evidence",
-            "status": "supported | unsupported | uncertain",
-            "dsl_evidence": "exact documented DSL declarations checked",
-            "recommended_dsl": "exact DSL declaration or prefixed ExtendedType",
+          "unsupported_types": [{{
+            "wire_type": "concise name of the field encoding",
+            "used_by_fields": ["PacketOrStructure.field"],
+            "encoding": "wire representation required by the DataModel",
+            "required_behavior": "value or parsing behavior the DataModel requires",
+            "rfc_evidence": "relevant RFC section and concise evidence",
+            "dsl_gap": "why documented ordinary DSL elements and composition are insufficient",
+            "recommended_dsl": "{custom_prefix}TypeName = ExtendedType[value_type](\"{custom_prefix}TypeName\")",
             "confidence": "high | medium | low",
-            "custom_type": null
+            "custom_type": {{
+              "symbol": "{custom_prefix}TypeName",
+              "element_name": "{custom_prefix}TypeName",
+              "value_type": "int | float | str | bytes"
+            }}
           }}]
         }}
 
-        For an unsupported item only, replace custom_type null with:
-        {{"symbol": "{custom_prefix}DescriptiveName",
-          "element_name": "{custom_prefix}DescriptiveName",
-          "value_type": "int | float | bool | str | bytes"}}.
-        Supported and uncertain items must keep custom_type null.
+        If no custom scalar is required, write an empty unsupported_types array.
+        Every reported item must name a concrete field, describe one scalar wire
+        encoding rather than a structure, explain why ordinary documented DSL
+        composition is insufficient, and contain enough wire behavior to implement
+        its parser and serializer.
 
-        Include every primitive, including conventional supported types. Then group
-        packet types into families of at most {group_size} items and write the
-        DataModel plan to "{manifest_path}" with exactly this JSON shape:
+        Then group packet types into families of at most {group_size} items and
+        write the DataModel plan to "{manifest_path}" with exactly this JSON shape:
         {{
           "protocol": "{self.protocol_lower}",
           "shared_models": [{{
@@ -192,9 +197,9 @@ class DatamodelGenerationSteps(PeachStepMixin):
 
         shared_refs contains one object per DSL dependency, never runtime names.
         Its symbol may name a declaration in shared_models or a protocol-prefixed
-        custom type from the type audit, such as "{custom_prefix}VarInt". Its usage
-        must say concretely which packet model(s), field(s), or enclosing structure
-        use that symbol. Include no speculative or unused reference, and omit no
+        custom type from the unsupported type audit. Its usage must say concretely
+        which packet model(s), field(s), or enclosing structure use that symbol.
+        Include no speculative or unused reference, and omit no
         dependency described by the group. A structure used by multiple families
         belongs in shared_models. Write both requested JSON files in this single
         planning task. Do not generate Python, C#, XML, or any other file.
@@ -317,10 +322,12 @@ class DatamodelGenerationSteps(PeachStepMixin):
             assigned packet. Confirm exact
             discriminator, wire order, sizes/endianness, length/count relations,
             optional conditions, repetition and payload structure. Write only
-            "{family_path}". Import exact referenced symbols from shared_model;
-            define every Python symbol from packet_models exactly once. The compiler
-            derives runtime model names; do not express them with a DSL decorator.
-            Do not define shared models, packet union, packet array, or ROOT.
+            "{family_path}". Import exact referenced symbols with
+            `from shared_model import ...`; never use the relative form
+            `from .shared_model import ...`. Define every Python symbol from
+            packet_models exactly once. The compiler derives runtime model names;
+            do not express them with a DSL decorator. Do not define shared models,
+            packet union, packet array, or ROOT.
 
             {_DATAMODEL_MODELING_GUARDRAILS}
 

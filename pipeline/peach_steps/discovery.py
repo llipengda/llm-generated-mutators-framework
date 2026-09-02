@@ -7,7 +7,6 @@ from pipeline.peach_steps.common import PeachStepMixin
 from ui import (
     UI,
     ask_generate_custom_data_elements,
-    ask_resolve_uncertain_wire_type,
 )
 
 
@@ -80,20 +79,18 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             report = json.load(report_file)
         if not isinstance(report, dict) or report.get("protocol") != self.protocol_lower:
             raise ValueError("data type analysis has an invalid protocol")
-        if report.get("analysis_basis") != "peach-dsl-plan-v7":
-            raise ValueError("data type analysis was not produced against the current DSL")
         if report.get("packet_types") != (self.state.get("packet_types") or []):
             raise ValueError("data type analysis packet type scope is stale")
-        types = report.get("types")
-        if not isinstance(types, list) or not types:
-            raise ValueError("data type analysis must contain a non-empty types list")
-        allowed = {"supported", "unsupported", "uncertain"}
+        types = report.get("unsupported_types")
+        if not isinstance(types, list):
+            raise ValueError("data type analysis must contain an unsupported_types list")
         required = {
             "wire_type",
+            "used_by_fields",
             "encoding",
+            "required_behavior",
             "rfc_evidence",
-            "status",
-            "dsl_evidence",
+            "dsl_gap",
             "recommended_dsl",
             "confidence",
             "custom_type",
@@ -106,70 +103,72 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         for index, item in enumerate(types):
             if not isinstance(item, dict) or not required.issubset(item):
                 raise ValueError(f"data type analysis item {index + 1} has an invalid schema")
-            if item["status"] not in allowed:
-                raise ValueError(f"data type analysis item {index + 1} has an invalid status")
             if item["confidence"] not in {"high", "medium", "low"}:
                 raise ValueError(f"data type analysis item {index + 1} has invalid confidence")
             name = item["wire_type"]
             if not isinstance(name, str) or not name.strip() or name.casefold() in seen:
                 raise ValueError(f"data type analysis item {index + 1} has an invalid wire_type")
             seen.add(name.casefold())
-            for field in required - {"status", "confidence", "wire_type", "custom_type"}:
+            used_by_fields = item["used_by_fields"]
+            if (
+                not isinstance(used_by_fields, list)
+                or not used_by_fields
+                or any(not isinstance(field, str) or not field.strip() for field in used_by_fields)
+            ):
+                raise ValueError(
+                    f"data type analysis item {index + 1} has invalid used_by_fields"
+                )
+            for field in required - {"confidence", "wire_type", "used_by_fields", "custom_type"}:
                 if not isinstance(item[field], str) or not item[field].strip():
                     raise ValueError(
                         f"data type analysis item {index + 1} has an empty {field}"
                     )
             custom_type = item["custom_type"]
-            if item["status"] == "unsupported":
-                if not isinstance(custom_type, dict) or not all(
-                    isinstance(custom_type.get(field), str)
-                    and custom_type[field].strip()
-                    for field in ("symbol", "element_name", "value_type")
-                ):
-                    raise ValueError(
-                        f"data type analysis item {index + 1} needs a custom_type contract"
-                    )
-                if custom_type["value_type"] not in {
-                    "int", "float", "bool", "str", "bytes"
-                }:
-                    raise ValueError(
-                        f"data type analysis item {index + 1} has invalid custom value_type"
-                    )
-                if not custom_type["symbol"].startswith(custom_prefix) or not custom_type[
-                    "element_name"
-                ].startswith(custom_prefix):
-                    raise ValueError(
-                        f"custom type names must start with protocol prefix {custom_prefix}"
-                    )
-                previous = custom_by_symbol.get(
-                    custom_type["symbol"]
-                ) or custom_by_element.get(custom_type["element_name"])
-                if previous is not None:
-                    if previous != custom_type:
-                        raise ValueError(
-                            f"conflicting custom type contract for {custom_type['symbol']}"
-                        )
-                    continue
-                custom_by_symbol[custom_type["symbol"]] = custom_type
-                custom_by_element[custom_type["element_name"]] = custom_type
-            elif custom_type is not None:
+            if not isinstance(custom_type, dict) or not all(
+                isinstance(custom_type.get(field), str)
+                and custom_type[field].strip()
+                for field in ("symbol", "element_name", "value_type")
+            ):
                 raise ValueError(
-                    f"data type analysis item {index + 1} must not define custom_type"
+                    f"data type analysis item {index + 1} needs a custom_type contract"
                 )
+            if custom_type["value_type"] not in {"int", "float", "str", "bytes"}:
+                raise ValueError(
+                    f"data type analysis item {index + 1} has invalid custom value_type"
+                )
+            if not custom_type["symbol"].startswith(custom_prefix) or not custom_type[
+                "element_name"
+            ].startswith(custom_prefix):
+                raise ValueError(
+                    f"custom type names must start with protocol prefix {custom_prefix}"
+                )
+            previous = custom_by_symbol.get(
+                custom_type["symbol"]
+            ) or custom_by_element.get(custom_type["element_name"])
+            if previous is not None:
+                if previous != custom_type:
+                    raise ValueError(
+                        f"conflicting custom type contract for {custom_type['symbol']}"
+                    )
+                continue
+            custom_by_symbol[custom_type["symbol"]] = custom_type
+            custom_by_element[custom_type["element_name"]] = custom_type
             deduplicated_types.append(item)
-        report["types"] = deduplicated_types
+        report["unsupported_types"] = deduplicated_types
         return report
 
     def _data_type_summary(self, report: dict) -> str:
+        if not report["unsupported_types"]:
+            return "No unsupported protocol field encodings were found."
         lines = []
-        for item in report["types"]:
+        for item in report["unsupported_types"]:
             lines.append(
-                f"- **{item['wire_type']}** — `{item['status']}` "
-                f"({item['confidence']} confidence): {item['recommended_dsl']}"
+                f"- **{item['wire_type']}** ({item['confidence']} confidence): "
+                f"{item['recommended_dsl']}"
             )
-            if item["status"] != "supported":
-                lines.append(f"  - Encoding: {item['encoding']}")
-                lines.append(f"  - Evidence: {item['rfc_evidence']}; {item['dsl_evidence']}")
+            lines.append(f"  - Fields: {', '.join(item['used_by_fields'])}")
+            lines.append(f"  - Encoding: {item['encoding']}")
+            lines.append(f"  - Evidence: {item['rfc_evidence']}; {item['dsl_gap']}")
         return "\n".join(lines)
 
     def _peach_runtime_element_names(self) -> set[str]:
@@ -238,19 +237,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             json.dump(report, report_file, ensure_ascii=False, indent=2, sort_keys=True)
             report_file.write("\n")
 
-        unresolved = self._review_uncertain_wire_types(report)
-        if unresolved:
-            report["generation_status"] = "manual_review_required"
-            with report_path.open("w", encoding="utf-8") as report_file:
-                json.dump(report, report_file, ensure_ascii=False, indent=2, sort_keys=True)
-                report_file.write("\n")
-            self.state["data_type_analysis"] = report
-            self.save_state()
-            raise RuntimeError(
-                "wire type review stopped before DataModel generation: "
-                + ", ".join(item["wire_type"] for item in unresolved)
-            )
-        unsupported = [item for item in report["types"] if item["status"] == "unsupported"]
+        unsupported = report["unsupported_types"]
         with report_path.open("w", encoding="utf-8") as report_file:
             json.dump(report, report_file, ensure_ascii=False, indent=2, sort_keys=True)
             report_file.write("\n")
@@ -268,7 +255,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             report["generation_status"] = "not_required"
             self.state["data_type_analysis"] = report
             self.save_state()
-            UI.success("All confirmed protocol primitives are representable by the DSL.")
+            UI.success("No unsupported protocol field encodings require custom scalars.")
             return
 
         names = sorted({item["custom_type"]["symbol"] for item in unsupported})
@@ -340,9 +327,8 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         bounds, Sanitize, framework clone compatibility, PitParser, WritePit,
         common attributes/children/value,
         and Relation behavior when applicable. Use unique [DataElement] and
-        [PitParsable] names. Do not generate a custom class for supported or uncertain
-        items. Do not use placeholders, TODOs, seed-specific logic, silent clamping,
-        or a Blob fallback.
+        [PitParsable] names. Do not use placeholders, TODOs, seed-specific logic,
+        silent clamping, or a Blob fallback.
 
         Put the classes in "{source_dir}". Put `[assembly: PluginAssembly]` exactly
         once in "{source_dir / 'AssemblyInfo.cs'}" (and never in each class).
@@ -350,15 +336,23 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         object per generated type: {{"wire_type": "...", "element_name":
         "exact type name to pass to DSL ExtendedType", "class_name":
         "fully qualified C# class"}}.
-        Do not compile or attempt repair loops; the pipeline will run one local,
-        deterministic `mcs -warnaserror` compile after you finish. Write no files
-        outside "{source_dir}".
+        Use the "Build_DotNet_DLL" tool to compile all generated sources in
+        "{source_dir}" to "{dll_path}". If it reports errors or warnings, read the
+        diagnostics, fix the sources, and invoke the tool again. Continue until it
+        reports success. Avoid ambiguous Peach/System type names: fully qualify
+        framework types such as System.Text.Encoding when both namespaces expose
+        the same short name. Write no files outside "{source_dir}".
         """
         generation_agent = build_agent_graph(
             retriever=self.retriever,
             target="peach",
             config=self.agent_config,
-            tool_names={"Read_File", "Search_Class", "Write_File"},
+            tool_names={
+                "Read_File",
+                "Search_Class",
+                "Build_DotNet_DLL",
+                "Write_File",
+            },
         )
         self.call_agent(
             generation_prompt,
@@ -446,58 +440,10 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         self.save_state()
         UI.success(f"Compiled custom Peach DOM elements: {dll_path}")
 
-    def _review_uncertain_wire_types(self, report: dict) -> list[dict]:
-        """Resolve inconclusive audit items interactively and return stopped items."""
-        reviewed: list[dict] = []
-        unresolved: list[dict] = []
-        custom_prefix = normalize_symbol(self.protocol_lower)
-        for item in report["types"]:
-            if item["status"] != "uncertain":
-                reviewed.append(item)
-                continue
-
-            candidate = normalize_symbol(item["wire_type"])
-            custom_symbol = (
-                candidate
-                if candidate.startswith(custom_prefix)
-                else custom_prefix + candidate
-            )
-            action, value_type = ask_resolve_uncertain_wire_type(
-                self.protocol_name,
-                item["wire_type"],
-                item["encoding"],
-                item["dsl_evidence"],
-                custom_symbol,
-            )
-            if action == "remove":
-                continue
-            if action == "supported":
-                item["status"] = "supported"
-                item["custom_type"] = None
-                item["review_resolution"] = "user_confirmed_supported"
-            elif action == "unsupported" and value_type is not None:
-                item["status"] = "unsupported"
-                item["custom_type"] = {
-                    "symbol": custom_symbol,
-                    "element_name": custom_symbol,
-                    "value_type": value_type,
-                }
-                item["recommended_dsl"] = (
-                    f'{custom_symbol} = ExtendedType[{value_type}]("{custom_symbol}")'
-                )
-                item["review_resolution"] = "user_confirmed_custom_scalar"
-            else:
-                unresolved.append(item)
-            reviewed.append(item)
-        report["types"] = reviewed
-        return unresolved
-
     def _custom_data_element_context(self) -> str:
         report_path, _, dll_path = self._data_type_paths()
         report = self.state.get("data_type_analysis") or {}
-        unsupported = [
-            item for item in report.get("types", []) if item.get("status") == "unsupported"
-        ]
+        unsupported = report.get("unsupported_types", [])
         if unsupported and report.get("generation_status") == "declined":
             contracts = [item["custom_type"] for item in unsupported]
             return f"""
@@ -527,5 +473,5 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         - Declare each confirmed custom scalar with ExtendedType exactly as described
           by that analysis. Its runtime behavior is supplied by "{dll_path}".
         - "docs/peach-dsl.md" is authoritative for every other declaration. Never
-          invent another custom type or treat an uncertain type as supported.
+          invent another custom type.
         """

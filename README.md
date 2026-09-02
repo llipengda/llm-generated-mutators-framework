@@ -118,7 +118,7 @@ scheduled to move into a hardened, network-disabled Docker compiler container.
 | Step | Description |
 |------|-------------|
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
-| 2. Datamodel Planning & Generation | One planning call audits whether the DSL supports every protocol primitive and produces the split DataModel manifest from the same RFC evidence. Unsupported scalars require explicit approval and receive protocol-prefixed `ExtendedType` names. `shared_model.py` is generated and Pyright-checked first; family modules are then generated in parallel and Pyright-checked before one integrated compilation. |
+| 2. Datamodel Planning & Generation | One planning call reports only concrete protocol-field encodings that require custom scalar support and produces the split DataModel manifest from the same RFC evidence. Unsupported scalars require explicit approval and receive protocol-prefixed `ExtendedType` names. `shared_model.py` is generated and Pyright-checked first; family modules are then generated in parallel and Pyright-checked before one integrated compilation. |
 | 3. Datamodel Validation & Fix | Parses seeds through the compiled Pit and compares re-serialized bytes. The DSL mechanically converts every Peach report node to compact DSL-path text in `datamodel_error_report.txt`; it performs no root-cause selection. A diagnosis agent analyzes that text and produces a repair plan; the auto-fix agent edits only DSL and recompiles. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
 | 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Each iteration: clone → mutate → serialize → re-parse. Failures trigger LLM fixes. |
@@ -128,7 +128,7 @@ scheduled to move into a hardened, network-disabled Docker compiler container.
 
 ```
 llm/peach/<proto>/
-├── data_type_analysis.json             # RFC/DSL primitive compatibility report
+├── data_type_analysis.json             # Unsupported protocol field encodings
 ├── DataElements/                       # Approved protocol-specific Peach DOM plugins
 │   ├── manifest.json                   # Wire type → Pit element/class mapping
 │   └── out/<PROTO>DataElements.dll     # Plugin loaded by validators and images

@@ -28,7 +28,7 @@ T_co = TypeVar("T_co", covariant=True)
 S = TypeVar("S", bound="Schema")
 Endian = Literal["big", "little"]
 StringEncoding = Literal["ascii", "utf7", "utf8", "utf16", "utf16be", "utf32", "utf32be"]
-ScalarValue = int | float | bool | str | bytes
+ScalarValue = int | float | str | bytes
 ExtendedValue = TypeVar("ExtendedValue", bound=ScalarValue)
 
 
@@ -302,7 +302,7 @@ class BoundSchemaUnion:
 
 class NamedUnion:
     """Named alternatives, constructed with ``Union(first=First, second=Second)``."""
-    def __call__(self, **overrides: type[Schema] | Schema | Field[int] | Field[float] | Field[bool] | Field[str] | Field[bytes] | BlockField[Any]) -> NamedUnion: ...
+    def __call__(self, **overrides: type[Schema] | Schema | Field[int] | Field[float] | Field[str] | Field[bytes] | BlockField[Any]) -> NamedUnion: ...
     @overload
     def __get__(self, instance: None, owner: type[Schema]) -> NamedUnion: ...
     @overload
@@ -316,7 +316,7 @@ class UnionType:
     @overload
     def __call__(self, definition: type[T], /) -> T: ...
     @overload
-    def __call__(self, **alternatives: type[Schema] | Schema | Field[int] | Field[float] | Field[bool] | Field[str] | Field[bytes] | BlockField[Any]) -> NamedUnion: ...
+    def __call__(self, **alternatives: type[Schema] | Schema | Field[int] | Field[float] | Field[str] | Field[bytes] | BlockField[Any]) -> NamedUnion: ...
 
 
 class ArrayField(Generic[T_co]):
@@ -345,7 +345,7 @@ class BlockField(Generic[T_co]):
 
 SchemaMember = AnyField | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[ScalarValue] | BlockField[Any]
 Override = BlockField[Any] | FieldOverride[ScalarValue] | _SchemaInstance
-ArrayElementInput = ScalarType[int] | ScalarType[float] | SizedType[int] | SizedType[str] | SizedType[bytes] | BoundSizedType[int] | BoundSizedType[str] | BoundSizedType[bytes] | Field[int] | Field[float] | Field[bool] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | type[Schema]
+ArrayElementInput = ScalarType[int] | ScalarType[float] | SizedType[int] | SizedType[str] | SizedType[bytes] | BoundSizedType[int] | BoundSizedType[str] | BoundSizedType[bytes] | Field[int] | Field[float] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | type[Schema]
 
 
 class BoundArrayType(Generic[T_co]):
@@ -396,13 +396,13 @@ class BoundBlockType:
     @overload
     def __call__(self, schema: type[S], /) -> BlockField[S]: ...
     @overload
-    def __call__(self, **fields: Field[int] | Field[float] | Field[bool] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[Any] | BlockField[Any] | type[Schema] | Override) -> BlockField[Any]: ...
+    def __call__(self, **fields: Field[int] | Field[float] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[Any] | BlockField[Any] | type[Schema] | Override) -> BlockField[Any]: ...
 class BlockType:
     """Declare a direct or decorated Block, optionally with ``Block[length]``."""
     @overload
     def __call__(self, schema: type[S], /) -> BlockField[S]: ...
     @overload
-    def __call__(self, **fields: Field[int] | Field[float] | Field[bool] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[Any] | BlockField[Any] | type[Schema] | Override) -> BlockField[Any]: ...
+    def __call__(self, **fields: Field[int] | Field[float] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[Any] | BlockField[Any] | type[Schema] | Override) -> BlockField[Any]: ...
     def __getitem__(self, length: Length) -> BoundBlockType: ...
 
 

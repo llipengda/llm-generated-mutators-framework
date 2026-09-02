@@ -590,8 +590,8 @@ def get_tools(
 
     @tool("Validate_Peach_DSL_Module")
     def validate_peach_dsl_module(filepath: str) -> str:
-        """Statically validate a generated Peach DSL module and its imports."""
-        from peach_dsl.compiler import DSLValidationError, validate_dsl_source
+        """Type-check a Peach DSL module and evaluate every Schema it defines."""
+        from peach_dsl.compiler import DSLValidationError, validate_dsl_module
 
         try:
             safe_path = _resolve_tool_path(
@@ -599,8 +599,11 @@ def get_tools(
             )
             if safe_path.suffix != ".py":
                 return "FAIL: Peach DSL modules must use the .py suffix."
-            validate_dsl_source(safe_path)
-            return f"PASS: validated DSL module {safe_path}."
+            schemas = validate_dsl_module(safe_path)
+            return (
+                f"PASS: validated DSL module {safe_path}; "
+                f"evaluated {len(schemas)} Schema(s)."
+            )
         except (DSLValidationError, OSError, ValueError) as error:
             return f"FAIL: {error}"
 

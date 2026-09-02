@@ -15,7 +15,7 @@ import traceback
 from types import ModuleType
 import xml.etree.ElementTree as ET
 
-from .sdk import Schema, to_peach_data_model
+from .sdk import Schema, evaluate_schema, to_peach_data_model
 
 
 PEACH_NAMESPACE = "http://peachfuzzer.com/2012/Peach"
@@ -24,6 +24,28 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 class DSLValidationError(ValueError):
     """Pyright or runtime DSL validation failed."""
+
+
+def _validate_language_rules(path: Path, tree: ast.Module) -> None:
+    """Reject DSL constructs that Python's subtype rules cannot express."""
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Subscript):
+            continue
+        target = node.value
+        is_extended_type = (
+            isinstance(target, ast.Name) and target.id == "ExtendedType"
+        ) or (isinstance(target, ast.Attribute) and target.attr == "ExtendedType")
+        if (
+            is_extended_type
+            and isinstance(node.slice, ast.Name)
+            and node.slice.id == "bool"
+        ):
+            raise DSLValidationError(
+                f"{path}:{node.lineno}:{node.col_offset + 1}: "
+                "ExtendedType[bool] is forbidden; use a numeric value type "
+                "and 0/1 values"
+            )
 
 
 def _format_compile_error(error: BaseException, entry: Path) -> str:
@@ -113,9 +135,70 @@ def validate_dsl_source(path: Path) -> ast.Module:
     _run_pyright(path)
     try:
         source = path.read_text(encoding="utf-8")
-        return ast.parse(source, filename=str(path))
+        tree = ast.parse(source, filename=str(path))
     except (OSError, SyntaxError, UnicodeError) as error:
         raise DSLValidationError(f"cannot parse {path}: {error}") from error
+    _validate_language_rules(path, tree)
+    return tree
+
+
+def _module_schema_classes(module: ModuleType) -> tuple[type[Schema], ...]:
+    """Return every Schema class defined by a loaded DSL module.
+
+    Imported schemas are validated by their own module. Nested schema classes
+    remain part of the module and are included even when they are not reachable
+    from a top-level schema's evaluated field tree.
+    """
+
+    schemas: list[type[Schema]] = []
+    seen: set[type[Schema]] = set()
+
+    def collect(value: object) -> None:
+        if (
+            not isinstance(value, type)
+            or not issubclass(value, Schema)
+            or value is Schema
+            or value.__module__ != module.__name__
+            or value in seen
+        ):
+            return
+        seen.add(value)
+        schemas.append(value)
+        for nested in vars(value).values():
+            collect(nested)
+
+    for value in vars(module).values():
+        collect(value)
+    return tuple(schemas)
+
+
+def validate_dsl_module(path: Path) -> tuple[str, ...]:
+    """Type-check, load, and evaluate every Schema defined in one DSL module."""
+
+    path = path.resolve()
+    validate_dsl_source(path)
+    try:
+        module = _load_entry(path)
+    except Exception as error:
+        raise DSLValidationError(
+            f"failed to load {path}: {_format_compile_error(error, path)}"
+        ) from error
+
+    schema_names: list[str] = []
+    failures: list[str] = []
+    for schema in _module_schema_classes(module):
+        schema_name = schema.__qualname__
+        schema_names.append(schema_name)
+        try:
+            evaluate_schema(schema)
+        except Exception as error:
+            failures.append(
+                f"{path}: Schema {schema_name} failed to evaluate: "
+                f"{_format_compile_error(error, path)}"
+            )
+    if failures:
+        raise DSLValidationError("\n".join(failures))
+    return tuple(schema_names)
 
 
 def validate_dsl_dependencies(entry: Path) -> dict[Path, ast.Module]:
@@ -133,6 +216,7 @@ def validate_dsl_dependencies(entry: Path) -> dict[Path, ast.Module]:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except (OSError, SyntaxError, UnicodeError) as error:
             raise DSLValidationError(f"cannot parse {path}: {error}") from error
+        _validate_language_rules(path, tree)
         trees[path] = tree
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom) or node.level != 0:

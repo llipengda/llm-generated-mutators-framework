@@ -39,8 +39,8 @@ allows. A semantic constraint that the DSL cannot express does not make an
 otherwise lossless scalar unsupported.
 
 Use `ExtendedType` only when ordinary fields and containers cannot implement a
-scalar's byte-level parsing and serialization. A different semantic or runtime
-type alone is not a reason to add a custom scalar.
+scalar's wire codec. Semantic meaning alone is not enough: a CRC encoded as a
+fixed-width integer is still `Int16`, `Int32`, etc., not an `ExtendedType`.
 
 ## Values, constraints, and references
 
@@ -73,13 +73,14 @@ logical Python type (`str`, `int`, `float`, or `bytes`) for static checking. The
 compiler rewrites the expression from the Python AST; it does not call the
 lambda while declaring or compiling the schema.
 
-An expression may reference at most one field, such as `length - 4` or
+An expression may reference at most ONE field, such as `length - 4` or
 `(flags & 1) != 0`.
 
 ### Reference rules
 
 Lengths, counts, conditions, and relations may refer to a field or a
-single-field expression:
+single-field expression.
+An expression may reference at most ONE field.
 
 ```python
 length = Int16()
@@ -138,6 +139,9 @@ IntN(
     value_type=None,
 )
 ```
+
+Represent Boolean wire values with the numeric type that matches their encoded 
+width (for example, `Bit[1]` or `Int8`) and use numeric values such as `0` and `1`.
 
 `Double` accepts the common parameters plus `endian` and `size=32 | 64`, but
 not `signed`. `Bit[width]` accepts:
@@ -228,7 +232,7 @@ fixed_length = VarInt(fixed(10), encoding="custom")
 ```
 
 `ExtendedType[T](type_name)` creates a custom scalar factory. `T` must be
-`int`, `float`, `bool`, `str`, or `bytes`; compose container and schema types
+`int`, `float`, `str`, or `bytes`; compose container and schema types
 with the standard DSL elements instead. The first field argument is a value or
 `fixed(value)`. Extra attributes may be `str`, `int`, `float`, or `bool`;
 `name` is reserved.

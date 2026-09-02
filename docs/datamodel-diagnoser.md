@@ -91,9 +91,14 @@ The LLM-only mode attempts to:
 When Step 3 runs inside the Peach pipeline, the DSL first evaluates `root.py`
 in an isolated process. It mechanically parses every validator log, preserves
 the complete cracking-tree hierarchy, converts Peach node kinds to DSL node
-types, and binds runtime nodes to DSL paths. It does not select root causes, remove
-cascading failures, rank evidence, or resolve source candidates. The compact,
-line-oriented result is written to `datamodel_error_report.txt`.
+types, and binds runtime nodes to DSL paths. To suppress misleading packet-type
+cascades, when every alternative of a `@PacketUnion` is rejected solely by its
+`packet_type` token, the converted tree retains only the alternative that
+consumed the most input (and the first alternative when progress ties). This
+rule does not apply to ordinary Unions. Apart from this structural filtering,
+the converter does not select root causes, rank evidence, or resolve source
+candidates. The compact, line-oriented result is written to
+`datamodel_error_report.txt`.
 
 A read-only diagnosis agent analyzes the converted report instead of the raw
 logs. It groups symptoms, selects every distinct supported root cause, resolves
