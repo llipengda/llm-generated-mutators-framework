@@ -58,7 +58,13 @@ LLM_EMBEDDING_API_KEY=     # Embedding API key (falls back to OPENAI_API_KEY)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -e ./peach_dsl
 ```
+
+The editable install exposes the `peach_dsl` package and the `peach-dsl`
+compiler command. The package can also be installed independently; its only
+runtime dependency is Pyright, used to validate generated DSL modules. From
+inside the `peach_dsl` directory, install it with `pip install -e .`.
 
 ### 3. Set up Peach SDK
 

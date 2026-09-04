@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "peach-dsl"
+version = "0.1.0"
+description = "Typed Python DSL for defining Peach protocol data models"
+requires-python = ">=3.10"
+dependencies = [
+    "pyright>=1.1.411",
+]
+
+[project.scripts]
+peach-dsl = "peach_dsl.compiler:main"
+
+[tool.setuptools]
+packages = ["peach_dsl"]
+package-dir = { peach_dsl = "." }
+
+[tool.setuptools.package-data]
+peach_dsl = ["*.pyi", "py.typed"]

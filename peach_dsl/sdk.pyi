@@ -20,7 +20,7 @@ single ``Union`` in an entry schema; Peach export then emits reusable DataModels
 and ``Block ref`` overrides.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, Generic, Literal, Self, TypeVar, overload
 
 T = TypeVar("T")
@@ -283,7 +283,11 @@ class _SchemaInstance:
     def bind_to(self, container: _SchemaInstance, path: tuple[str, ...]) -> Self: ...
 
 
-class Schema(_SchemaInstance):
+class SchemaMeta(type):
+    def __or__(cls, other: SchemaMeta | SchemaUnion) -> SchemaUnion: ...
+
+
+class Schema(_SchemaInstance, metaclass=SchemaMeta):
     """Base class for a named binary structure."""
     def __or__(self, other: type[Schema] | SchemaUnion) -> SchemaUnion: ...
 
@@ -343,8 +347,8 @@ class BlockField(Generic[T_co]):
     def __get__(self, instance: _SchemaInstance, owner: type[Schema]) -> T_co: ...
     def __call__(self, **overrides: Override) -> T_co: ...
 
-SchemaMember = AnyField | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[ScalarValue] | BlockField[Any]
-Override = BlockField[Any] | FieldOverride[ScalarValue] | _SchemaInstance
+SchemaMember = AnyField | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | OptionalField[Any] | BlockField[Any]
+Override = FieldOverride[ScalarValue] | SchemaMember
 ArrayElementInput = ScalarType[int] | ScalarType[float] | SizedType[int] | SizedType[str] | SizedType[bytes] | BoundSizedType[int] | BoundSizedType[str] | BoundSizedType[bytes] | Field[int] | Field[float] | Field[str] | Field[bytes] | _SchemaInstance | SchemaUnion | NamedUnion | ArrayField[Any] | type[Schema]
 
 
@@ -438,9 +442,13 @@ class SchemaResult:
     fields: Mapping[str, FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult]
     packet_union: str | None
     path: str | None
+    def walk(self) -> Iterator[ResultMember]:
+        """Yield this result and its descendants in depth-first pre-order."""
 class UnionResult:
     alternatives: tuple[FieldResult | SchemaResult, ...]
     path: str | None
+    def walk(self) -> Iterator[ResultMember]:
+        """Yield this result and its descendants in depth-first pre-order."""
 class ArrayResult:
     name: str
     element: FieldResult | SchemaResult | UnionResult | ArrayResult

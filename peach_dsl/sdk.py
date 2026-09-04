@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dataclass_field, replace
 import hashlib
@@ -1184,8 +1184,9 @@ class BlockField:
         merged_overrides = {**self.overrides, **overrides}
         effective_fields = dict(self.fields)
         for name, override in merged_overrides.items():
-            if isinstance(override, (_SchemaInstance, BlockField)):
-                effective_fields[name] = override
+            replacement = _schema_member_override(override)
+            if replacement is not None:
+                effective_fields[name] = replacement
         return BlockField(
             self._length,
             effective_fields,
@@ -1708,11 +1709,38 @@ SchemaMember = (
     | SchemaUnion
     | NamedUnion
     | ArrayField
-    | OptionalField[ScalarValue]
+    | OptionalField[object]
     | BlockField
 )
 
-Override = BlockField | FieldOverride[ScalarValue] | _SchemaInstance
+Override = FieldOverride[ScalarValue] | SchemaMember
+
+
+def _schema_member_override(value: Override | None) -> SchemaMember | None:
+    """Return an override that replaces a member's wire structure."""
+
+    if isinstance(
+        value,
+        (
+            Field,
+            _SchemaInstance,
+            SchemaUnion,
+            NamedUnion,
+            ArrayField,
+            OptionalField,
+            BlockField,
+        ),
+    ):
+        return value
+    return None
+
+
+def _effective_schema_member(
+    member: SchemaMember,
+    override: Override | None,
+) -> SchemaMember:
+    replacement = _schema_member_override(override)
+    return replacement if replacement is not None else member
 
 
 def _bind_nested_length(
@@ -1774,7 +1802,7 @@ def _bind_schema_member_references(
                 candidate = candidate.clone_unbound()
             elif isinstance(candidate, BlockField):
                 candidate = candidate()
-            if isinstance(candidate, (Field, _SchemaInstance, BlockField)):
+            if _schema_member_override(candidate) is not None:
                 candidate = cast(
                     Override,
                     _bind_schema_member_references(
@@ -2061,8 +2089,19 @@ class FieldResult:
         return _format_field_result(self)
 
 
+class _EvaluationResultMixin:
+    """Shared traversal behavior for evaluated schema tree roots."""
+
+    __slots__ = ()
+
+    def walk(self) -> Iterator[ResultMember]:
+        """Yield this result and its descendants in depth-first pre-order."""
+
+        yield from _walk_result_member(cast(ResultMember, self))
+
+
 @dataclass(frozen=True, slots=True)
-class SchemaResult:
+class SchemaResult(_EvaluationResultMixin):
     name: str
     fields: Mapping[
         str,
@@ -2078,7 +2117,7 @@ class SchemaResult:
 
 
 @dataclass(frozen=True, slots=True)
-class UnionResult:
+class UnionResult(_EvaluationResultMixin):
     alternatives: tuple[FieldResult | SchemaResult, ...]
     path: str | None = None
 
@@ -2132,6 +2171,20 @@ def evaluate_schema(target: SchemaInput) -> EvaluationResult:
 
 ResultMember = FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult
 ArrayElementResult = FieldResult | SchemaResult | UnionResult | ArrayResult
+
+
+def _walk_result_member(member: ResultMember) -> Iterator[ResultMember]:
+    yield member
+    if isinstance(member, SchemaResult):
+        children = member.fields.values()
+    elif isinstance(member, UnionResult):
+        children = member.alternatives
+    elif isinstance(member, (ArrayResult, OptionalResult)):
+        children = (member.element,)
+    else:
+        return
+    for child in children:
+        yield from _walk_result_member(child)
 
 
 def _add_packet_paths(result: EvaluationResult) -> EvaluationResult:
@@ -2600,11 +2653,7 @@ def _collect_peach_models(
         overrides = {}
     for name, member in schema_type.__schema_fields__.items():
         override = overrides.get(name)
-        effective_member = (
-            override
-            if isinstance(override, (_SchemaInstance, BlockField))
-            else member
-        )
+        effective_member = _effective_schema_member(member, override)
         schema_dependencies.update(
             dependency
             for dependency in _peach_member_schema_types(effective_member)
@@ -2772,12 +2821,17 @@ def _append_extracted_schema_fields(
     result: SchemaResult,
     path: tuple[str, ...],
     relations: PeachRelations,
+    overrides: Mapping[str, Override] | None = None,
 ) -> None:
     for name, raw_member in raw_fields.items():
+        effective_raw = _effective_schema_member(
+            raw_member,
+            overrides.get(name) if overrides is not None else None,
+        )
         _append_extracted_member(
             parent,
             name,
-            raw_member,
+            effective_raw,
             result.fields[name],
             path,
             relations,
@@ -2856,11 +2910,7 @@ def _append_extracted_schema_reference(
     for child_name, child_raw in type(raw).__schema_fields__.items():
         if child_name in override_names:
             override = raw.overrides.get(child_name)
-            effective_raw = (
-                override
-                if isinstance(override, (_SchemaInstance, BlockField))
-                else child_raw
-            )
+            effective_raw = _effective_schema_member(child_raw, override)
             _append_extracted_member(
                 element,
                 child_name,
@@ -3027,7 +3077,7 @@ def _append_extracted_array_element(
 def _append_extracted_optional(
     parent: ET.Element,
     name: str,
-    raw: OptionalField[ScalarValue],
+    raw: OptionalField[object],
     result: ResultMember,
     path: tuple[str, ...],
     relations: PeachRelations,
@@ -3077,7 +3127,14 @@ def _append_extracted_block(
     if isinstance(result.length, int):
         attributes["length"] = str(result.length)
     element = ET.SubElement(parent, "Block", attributes)
-    _append_extracted_schema_fields(element, raw.fields, result, path + (name,), relations)
+    _append_extracted_schema_fields(
+        element,
+        raw.fields,
+        result,
+        path + (name,),
+        relations,
+        raw.overrides,
+    )
 
 
 def _collect_peach_relations(
@@ -3804,48 +3861,12 @@ def _evaluate_concrete_schema(
 
     defaults = schema.__schema_defaults__.merge(inherited_defaults)
     for name, member in schema.__schema_fields__.items():
-        override = overrides.get(name)
-        if isinstance(member, Field):
-            if isinstance(override, _SchemaInstance):
-                fields[name] = _evaluate_concrete_schema(
-                    cast(type[Schema], type(override)), override.overrides, defaults
-                )
-            elif isinstance(override, BlockField):
-                fields[name] = _evaluate_block(override, defaults)
-            else:
-                fields[name] = _evaluate_field(name, member, overrides, defaults)
-        elif isinstance(member, _SchemaInstance):
-            if isinstance(override, BlockField):
-                fields[name] = _evaluate_block(override, defaults)
-            else:
-                source = override if isinstance(override, _SchemaInstance) else member
-                fields[name] = _evaluate_concrete_schema(
-                    cast(type[Schema], type(source)),
-                    source.overrides,
-                    defaults,
-                )
-        elif isinstance(member, (SchemaUnion, NamedUnion)):
-            fields[name] = _evaluate_schema_union(member, defaults)
-        elif isinstance(member, ArrayField):
-            fields[name] = _evaluate_array(name, member, overrides, defaults)
-        elif isinstance(member, OptionalField):
-            fields[name] = _evaluate_optional(name, member, overrides, defaults)
-        else:
-            if isinstance(override, _SchemaInstance):
-                fields[name] = replace(
-                    _evaluate_concrete_schema(
-                        cast(type[Schema], type(override)), override.overrides, defaults
-                    ),
-                    length=(
-                        _evaluate_length(member.length_spec, overrides)
-                        if member.length_spec is not None
-                        else None
-                    ),
-                )
-            elif isinstance(override, BlockField):
-                fields[name] = _evaluate_block(override, defaults)
-            else:
-                fields[name] = _evaluate_block(member, defaults)
+        fields[name] = _evaluate_schema_member(
+            name,
+            member,
+            overrides,
+            defaults,
+        )
 
     flags_layout = schema.__flags_layout__
     if flags_layout is not None:
@@ -3869,6 +3890,49 @@ def _evaluate_concrete_schema(
         flags_layout,
         packet_union=schema.__packet_union__,
     )
+
+
+def _evaluate_schema_member(
+    name: str,
+    member: SchemaMember,
+    overrides: Mapping[str, Override],
+    defaults: SchemaDefaults,
+) -> FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult:
+    override = overrides.get(name)
+    replacement = _schema_member_override(override)
+    effective = replacement if replacement is not None else member
+
+    if override is not None and replacement is None and not isinstance(member, Field):
+        raise TypeError(
+            f"a scalar value can only override a scalar field: {name}; "
+            "use a Field, Schema, Union, Array, Optional, or Block value"
+        )
+    if isinstance(effective, Field):
+        return _evaluate_field(name, effective, overrides, defaults)
+    if isinstance(effective, _SchemaInstance):
+        result = _evaluate_concrete_schema(
+            cast(type[Schema], type(effective)),
+            effective.overrides,
+            defaults,
+        )
+        # A decorated, length-delimited Block exposes its nested Schema as the
+        # override constructor. Preserve that wrapper's declared boundary.
+        if (
+            isinstance(member, BlockField)
+            and member.length_spec is not None
+        ):
+            return replace(
+                result,
+                length=_evaluate_length(member.length_spec, overrides),
+            )
+        return result
+    if isinstance(effective, (SchemaUnion, NamedUnion)):
+        return _evaluate_schema_union(effective, defaults)
+    if isinstance(effective, ArrayField):
+        return _evaluate_array(name, effective, overrides, defaults)
+    if isinstance(effective, OptionalField):
+        return _evaluate_optional(name, effective, overrides, defaults)
+    return _evaluate_block(effective, defaults)
 
 
 def _evaluate_schema_union(
@@ -3909,22 +3973,12 @@ def _evaluate_block(
         FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult,
     ] = {}
     for name, member in block.fields.items():
-        if isinstance(member, Field):
-            fields[name] = _evaluate_field(name, member, block.overrides, defaults)
-        elif isinstance(member, _SchemaInstance):
-            fields[name] = _evaluate_concrete_schema(
-                cast(type[Schema], type(member)),
-                member.overrides,
-                defaults,
-            )
-        elif isinstance(member, (SchemaUnion, NamedUnion)):
-            fields[name] = _evaluate_schema_union(member, defaults)
-        elif isinstance(member, ArrayField):
-            fields[name] = _evaluate_array(name, member, {}, defaults)
-        elif isinstance(member, OptionalField):
-            fields[name] = _evaluate_optional(name, member, {}, defaults)
-        else:
-            fields[name] = _evaluate_block(member, defaults)
+        fields[name] = _evaluate_schema_member(
+            name,
+            member,
+            block.overrides,
+            defaults,
+        )
 
     return SchemaResult(
         "Block",
@@ -3968,7 +4022,7 @@ def _evaluate_array(
 
 def _evaluate_optional(
     name: str,
-    optional: OptionalField[ScalarValue],
+    optional: OptionalField[object],
     overrides: Mapping[str, Override],
     defaults: SchemaDefaults,
 ) -> ArrayResult | OptionalResult:

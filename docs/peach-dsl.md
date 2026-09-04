@@ -254,8 +254,11 @@ class Request(Schema):
     header = Header(kind=fixed(1), flags=Int8(fixed(0)))
 ```
 
-An override may be a plain value, `fixed(value)`, a field declaration, a schema
-instance, or a direct `Block(...)`. Overrides apply only to immediate members.
+An override may be a plain value, `fixed(value)`, or any field declaration,
+including a schema instance, `Union`, `Array`, `Optional`, or direct
+`Block(...)`. Any field kind may replace any other field kind. Plain and fixed
+scalar values require an existing scalar field because they do not describe a
+wire type. Overrides apply only to immediate members.
 
 For repeated complex construction, use a function or class method:
 
