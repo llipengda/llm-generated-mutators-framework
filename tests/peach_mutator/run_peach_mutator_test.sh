@@ -11,7 +11,7 @@ PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROTO_UPPER=$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')
 
-SEED_DIR="$ROOT/tests/seeds/$PROTO"
+SEED_DIR="$ROOT/seeds/$PROTO"
 
 if [ $# -ge 2 ]; then
   if [ ! -d "$2" ]; then
@@ -54,6 +54,7 @@ docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds 
     -v "$ROOT/llm/peach/$PROTO/mutator_test_logs:/logs" pdli/llm-peach:sdk \
     sh -c "cp /generated/Mutators/out/${PROTO_UPPER}Mutators.dll ./Plugins && \
     if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \
+    if [ -f /generated/python_fixup.py ]; then cp /generated/python_fixup.py ./; fi && \
     mono Peach.LLM.Validations.Mutator.exe /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG} && \
     chmod -R 777 /logs"
 

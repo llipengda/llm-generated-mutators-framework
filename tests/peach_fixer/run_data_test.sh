@@ -16,6 +16,10 @@ DATAMODEL_NAME="${PROTO}_packet_array"
 PROTO_UPPER=$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')
 CUSTOM_DLL="$ROOT/llm/peach/$PROTO/DataElements/out/${PROTO_UPPER}DataElements.dll"
 DOCKER_ARGS=(-v "$PIT_PATH:/datamodel.xml")
+PYTHON_FIXUP="$(dirname "$PIT_PATH")/python_fixup.py"
+if [ -f "$PYTHON_FIXUP" ]; then
+    DOCKER_ARGS+=(-v "$PYTHON_FIXUP:/generated/python_fixup.py:ro")
+fi
 if [ -f "$CUSTOM_DLL" ]; then
     DOCKER_ARGS+=(-v "$CUSTOM_DLL:/custom-data-elements.dll:ro")
 fi

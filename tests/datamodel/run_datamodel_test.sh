@@ -9,14 +9,14 @@ fi
 PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-SEED_DIR="$ROOT/tests/seeds/$PROTO"
+SEED_DIR="$ROOT/seeds/$PROTO"
 
 if [ $# -ge 2 ]; then
   if [ ! -d "$2" ]; then
     echo "Error: SEED_DIR '$2' does not exist or is not a directory." >&2
     exit 1
   fi
-  SEED_DIR=$2
+  SEED_DIR="$(cd "$2" && pwd)"
 fi
 
 DATAMODEL_PATH="${3:-$ROOT/llm/peach/$PROTO/datamodel.xml}"
@@ -33,6 +33,10 @@ chmod u+rwx "$LOG_DIR"
 
 CUSTOM_DLL="$ROOT/llm/peach/$PROTO/DataElements/out/$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')DataElements.dll"
 DOCKER_ARGS=(-v "$DATAMODEL_PATH:/test/datamodel.xml:ro" -v "$SEED_DIR:/seeds:ro" -v "$LOG_DIR:/logs")
+PYTHON_FIXUP="$(dirname "$DATAMODEL_PATH")/python_fixup.py"
+if [ -f "$PYTHON_FIXUP" ]; then
+  DOCKER_ARGS+=(-v "$PYTHON_FIXUP:/generated/python_fixup.py:ro")
+fi
 if [ -f "$CUSTOM_DLL" ]; then
   DOCKER_ARGS+=(-v "$CUSTOM_DLL:/custom-data-elements.dll:ro")
 fi

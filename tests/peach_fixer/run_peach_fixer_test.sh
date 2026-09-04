@@ -40,6 +40,7 @@ docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated \
     sh -c "cp /generated/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll ./Plugins && \
     if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \
     cp /generated/datamodel.xml ./ && \
+    if [ -f /generated/python_fixup.py ]; then cp /generated/python_fixup.py ./; fi && \
     mono Peach.LLM.Validations.Fixer.exe"
 
 find "$ROOT/llm/peach/$PROTO/fixer_test_logs" -type f -print0 | while IFS= read -r -d '' log_file; do
