@@ -15,7 +15,7 @@ import traceback
 from types import ModuleType
 import xml.etree.ElementTree as ET
 
-from .sdk import Schema, evaluate_schema, to_peach_data_model
+from .sdk import Schema, evaluate_schema, to_peach_artifacts
 
 
 PEACH_NAMESPACE = "http://peachfuzzer.com/2012/Peach"
@@ -124,7 +124,7 @@ def _run_pyright(path: Path) -> None:
     except (json.JSONDecodeError, TypeError, ValueError):
         detail = (result.stdout + result.stderr).strip()
     if not detail and "No module named pyright" in result.stderr:
-        detail = "Pyright is not installed; run `pip install -r requirements.txt`"
+        detail = "Pyright is not installed; run `uv sync` from the repository root"
     raise DSLValidationError(detail or f"Pyright failed while checking {path}")
 
 
@@ -295,10 +295,23 @@ def compile_entry(
     if not isinstance(root_schema, type) or not issubclass(root_schema, Schema):
         raise DSLValidationError(f"{entry} must export ROOT as a Schema class")
 
-    xml_text = to_peach_data_model(root_schema, name=root_schema.__name__)
-    xml_text = _remove_compiler_only_union_alternative(xml_text)
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
+    artifacts = to_peach_artifacts(root_schema, name=root_schema.__name__)
+    xml_text = _remove_compiler_only_union_alternative(artifacts.xml)
+
+    if artifacts.python_fixup is not None:
+        script_output = output.with_name("python_fixup.py")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=script_output.parent,
+            prefix=script_output.name + ".",
+            delete=False,
+        ) as script_temporary:
+            script_temporary.write(artifacts.python_fixup)
+            script_temporary_path = Path(script_temporary.name)
+        os.replace(script_temporary_path, script_output)
 
     with tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=output.parent, prefix=output.name + ".", delete=False

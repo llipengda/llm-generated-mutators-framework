@@ -56,6 +56,61 @@ class PacketEnvelope(Schema):
 
 
 class SDKTests(unittest.TestCase):
+    def test_computed_captures_schema_argument_without_calling_function(self) -> None:
+        called = False
+
+        @computed
+        def calc_crc(header: bytearray) -> int:
+            nonlocal called
+            called = True
+            return sum(header) % 65536
+
+        class ComputedPacket(Schema):
+            @Block
+            class header(Schema):
+                a = Int8()
+                b = Int8()
+                c = Int64()
+
+            crc = Int16(calc_crc(header))
+
+        self.assertFalse(called)
+        result = evaluate_schema(ComputedPacket)
+        self.assertIsInstance(result, SchemaResult)
+        crc = result.fields["crc"]
+        self.assertIsInstance(crc, FieldResult)
+        self.assertIsNotNone(crc.computed)
+        assert crc.computed is not None
+        self.assertIs(crc.computed.func, calc_crc.__wrapped__)
+        self.assertEqual(len(crc.computed.args), 1)
+        self.assertEqual(
+            crc.computed.args[0],
+            ComputedReference[bytearray](("header",)),
+        )
+        self.assertEqual(dict(crc.computed.kwargs), {})
+        self.assertFalse(called)
+
+    def test_computed_accepts_one_to_four_parameters(self) -> None:
+        def make_function(count: int):
+            namespace: dict[str, object] = {}
+            parameters = ", ".join(f"value{index}: int" for index in range(count))
+            exec(  # noqa: S102 - small test-only function factory
+                f"def implementation({parameters}) -> int:\n    raise AssertionError",
+                namespace,
+            )
+            return namespace["implementation"]
+
+        for count in range(1, 5):
+            with self.subTest(count=count):
+                declaration = computed(make_function(count))
+                captured = declaration(*range(count))
+                self.assertEqual(captured.args, tuple(range(count)))
+
+        with self.assertRaisesRegex(TypeError, "between 1 and 4"):
+            computed(make_function(0))
+        with self.assertRaisesRegex(TypeError, "between 1 and 4"):
+            computed(make_function(5))
+
     def test_fixed_replaces_const_without_compatibility_alias(self) -> None:
         self.assertIsInstance(fixed(1), Fixed)
         self.assertFalse(hasattr(peach_dsl, "const"))

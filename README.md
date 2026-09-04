@@ -4,13 +4,14 @@ LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to p
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (the checked-in `.python-version` selects Python 3.13 by default)
+- [uv](https://docs.astral.sh/uv/) — Python version, virtual environment, and dependency management
 - [Docker](https://docs.docker.com/get-docker/) — for Peach SDK setup and fuzzing images
 - [Mono](https://www.mono-project.com/) — `mono` and `mcs` for compiling and running C# code
 - `xmllint` (libxml2) — validates DSL-compiled Peach XML against `peach/peach.xsd`
 - Node.js `>=22.13.0` and npm — only required for the bundled Pit visualizer
 
-Python packages (see `requirements.txt`):
+Python packages are declared in `pyproject.toml` and locked in `uv.lock`:
 
 - `click`, `python-dotenv`, `rich`, `questionary`
 - `langchain`, `langchain-core`, `langchain-community`, `langchain-openai`, `langgraph`
@@ -64,16 +65,13 @@ LLM_EMBEDDING_API_KEY=     # Embedding API key (falls back to OPENAI_API_KEY)
 ### 2. Install Python dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-pip install -e ./peach_dsl
+uv sync
 ```
 
-The editable install exposes the `peach_dsl` package and the `peach-dsl`
-compiler command. The package can also be installed independently; its only
-runtime dependency is Pyright, used to validate generated DSL modules. From
-inside the `peach_dsl` directory, install it with `pip install -e .`.
+`uv sync` installs the locked dependencies into `.venv` and installs the local
+`peach_dsl` package in editable mode. It exposes both the `peach_dsl` package
+and the `peach-dsl` compiler command. Use `uv add <package>` to add a dependency
+and `uv lock --upgrade-package <package>` to upgrade one deliberately.
 
 ### 3. Set up Peach SDK
 
@@ -91,7 +89,7 @@ This step requires Docker and Mono. It:
 ## Quickstart
 
 ```bash
-python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
+uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 ```
 
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
@@ -106,13 +104,13 @@ Validate the manifest and DSL modules without replacing the current
 `datamodel.xml`:
 
 ```bash
-.venv/bin/python -m core.datamodel_dsl <protocol> --check
+uv run python -m core.datamodel_dsl <protocol> --check
 ```
 
 Run the actual compilation after resolving reported conflicts:
 
 ```bash
-.venv/bin/python -m core.datamodel_dsl <protocol>
+uv run python -m core.datamodel_dsl <protocol>
 ```
 
 The command runs strict Pyright syntax/type checking, then reports invalid DSL,
@@ -163,13 +161,13 @@ llm/peach/<proto>/
 Datamodel validation:
 
 ```bash
-./tests/datamodel/run_datamodel_test.sh mqtt tests/seeds/mqtt
+./tests/datamodel/run_datamodel_test.sh mqtt seeds/mqtt
 ```
 
 Mutator sanity:
 
 ```bash
-./tests/peach_mutator/run_peach_mutator_test.sh mqtt tests/seeds/mqtt
+./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
 ```
 
 ## Pit visualizer

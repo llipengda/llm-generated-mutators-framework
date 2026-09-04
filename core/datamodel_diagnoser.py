@@ -1046,7 +1046,7 @@ def add_llm_judgment(
             dotenv.load_dotenv(".env")
         except ImportError as error:
             raise RuntimeError(
-                "LLM dependencies are unavailable; install requirements.txt"
+                "LLM dependencies are unavailable; run `uv sync`"
             ) from error
 
     resolved_model = model_name or _default_llm_model()
@@ -1057,7 +1057,7 @@ def add_llm_judgment(
             from langchain_openai import ChatOpenAI
         except ImportError as error:
             raise RuntimeError(
-                "LLM dependencies are unavailable; install requirements.txt"
+                "LLM dependencies are unavailable; run `uv sync`"
             ) from error
 
         if not os.environ.get("OPENAI_API_KEY"):

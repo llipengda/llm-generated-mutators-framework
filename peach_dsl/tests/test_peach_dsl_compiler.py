@@ -125,6 +125,118 @@ class PeachDSLCompilerTests(unittest.TestCase):
             path.write_text("import os\nvalue = os.path.basename('/tmp/x')\n")
             validate_dsl_source(path)
 
+    def test_computed_type_checks_one_to_four_symbolic_parameters(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "computed.py"
+            path.write_text(
+                "from peach_dsl import *\n"
+                "@computed\n"
+                "def one(a: int) -> int:\n"
+                "    return a\n"
+                "@computed\n"
+                "def two(a: int, b: str) -> int:\n"
+                "    return a + len(b)\n"
+                "@computed\n"
+                "def three(a: int, b: str, c: bytearray) -> int:\n"
+                "    return a + len(b) + sum(c)\n"
+                "@computed\n"
+                "def four(a: int, b: str, c: bytearray, d: int) -> int:\n"
+                "    return a + len(b) + sum(c) + d\n"
+                "class Packet(Schema):\n"
+                "    number = Int8()\n"
+                "    text = String()\n"
+                "    @Block\n"
+                "    class header(Schema):\n"
+                "        value = Int8()\n"
+                "    first = Int16(one(number))\n"
+                "    second = Int16(two(number, text))\n"
+                "    third = Int16(three(number, text, header))\n"
+                "    fourth = Int16(four(number, text, header, number))\n",
+                encoding="utf-8",
+            )
+            validate_dsl_source(path)
+
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "bad = two(Packet.text, Packet.number)\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(DSLValidationError):
+                validate_dsl_source(path)
+
+    def test_computed_rejects_five_parameters_statically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "computed_five.py"
+            path.write_text(
+                "from peach_dsl import *\n"
+                "@computed\n"
+                "def five(a: int, b: int, c: int, d: int, e: int) -> int:\n"
+                "    return a + b + c + d + e\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(DSLValidationError, "overload"):
+                validate_dsl_source(path)
+
+    def test_computed_generates_script_fixup_with_common_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "computed_root.py"
+            entry.write_text(
+                "from peach_dsl import *\n"
+                "@computed\n"
+                "def calc_crc(header: bytearray, kind: int) -> int:\n"
+                "    return (sum(header) + kind) % 65536\n"
+                "@computed\n"
+                "def add_fields(left: int, right: int) -> int:\n"
+                "    return left + right\n"
+                "@computed\n"
+                "def block_crc(block: bytearray) -> int:\n"
+                "    return sum(block) % 256\n"
+                "class Header(Schema):\n"
+                "    kind = Int8()\n"
+                "    payload = Blob[2]()\n"
+                "class Packet(Schema):\n"
+                "    prefix = Int8()\n"
+                "    header = Header()\n"
+                "    @Block\n"
+                "    class trailer(Schema):\n"
+                "        value = Int8()\n"
+                "    crc = Int16(calc_crc(header, header.kind))\n"
+                "    total = Int16(add_fields(prefix, crc))\n"
+                "    trailer_crc = Int8(block_crc(trailer))\n"
+                "ROOT = Packet\n",
+                encoding="utf-8",
+            )
+            output = root / "datamodel.xml"
+            result = compile_dsl_subprocess(entry, output)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            xml = output.read_text(encoding="utf-8")
+            self.assertIn('<PythonPath path="."', xml)
+            self.assertIn('<Import import="python_fixup"', xml)
+            self.assertIn('<Fixup class="ScriptFixup">', xml)
+            self.assertRegex(
+                xml,
+                r'<Param name="class" value="python_fixup\.Fixup_calc_crc_[0-9a-f]{12}"',
+            )
+            self.assertIn('<Param name="ref" value="header"', xml)
+            self.assertIn('<Param name="ref" value="Packet"', xml)
+            self.assertIn('<Param name="ref" value="trailer"', xml)
+
+            script = (root / "python_fixup.py").read_text(encoding="utf-8")
+            self.assertTrue(script.startswith("import clr\n"))
+            self.assertRegex(script, r"class Fixup_calc_crc_[0-9a-f]{12}:")
+            self.assertIn("def func(self, header, kind):", script)
+            self.assertIn("return (sum(header) + kind) % 65536", script)
+            self.assertIn("header = bytearray(element.Bytes())", script)
+            self.assertIn('kind = int(element.find("kind").InternalValue)', script)
+            self.assertIn("return self.func(header, kind)", script)
+            self.assertIn('left = int(element.find("prefix").InternalValue)', script)
+            self.assertIn('right = int(element.find("crc").InternalValue)', script)
+            self.assertIn("return self.func(left, right)", script)
+            self.assertIn("block = bytearray(element.Bytes())", script)
+            self.assertIn("return self.func(block)", script)
+
     def test_pyright_checks_imported_sibling_dsl_modules(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

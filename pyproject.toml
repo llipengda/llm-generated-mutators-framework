@@ -1,0 +1,37 @@
+[project]
+name = "llm-generated-mutators-framework"
+version = "0.1.0"
+description = "LLM-assisted generator for protocol-aware Peach fuzzing code"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click==8.3.1",
+    "faiss-cpu==1.13.2",
+    "langchain==1.2.7",
+    "langchain-community==0.4.1",
+    "langchain-core==1.2.7",
+    "langchain-openai==1.1.7",
+    "langchain-text-splitters==1.1.0",
+    "langgraph==1.0.7",
+    "langgraph-prebuilt==1.0.7",
+    "peach-dsl",
+    "pypdf==6.8.0",
+    "pyright==1.1.411",
+    "python-dotenv==1.2.1",
+    "pythonnet==3.0.5",
+    "questionary==2.1.1",
+    "rich==14.3.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+peach-dsl = { path = "peach_dsl", editable = true }
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+ignore = ["**/python_fixup.py"]

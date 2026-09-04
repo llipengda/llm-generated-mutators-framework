@@ -25,6 +25,11 @@ from typing import Any, Generic, Literal, Self, TypeVar, overload
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+A = TypeVar("A")
+B = TypeVar("B")
+C = TypeVar("C")
+D = TypeVar("D")
+R = TypeVar("R")
 S = TypeVar("S", bound="Schema")
 Endian = Literal["big", "little"]
 StringEncoding = Literal["ascii", "utf7", "utf8", "utf16", "utf16be", "utf32", "utf32be"]
@@ -44,6 +49,35 @@ class Fixed(Generic[T_co]):
 
 
 def fixed(value: T) -> Fixed[T]: ...
+
+
+class ComputedArgument(Generic[T_co]):
+    """A symbolic DSL value whose logical Python type is ``T_co``."""
+
+
+class Computed(Generic[T_co]):
+    """A captured computed-field declaration; the function has not run."""
+    func: Callable[..., T_co]
+    args: tuple[object, ...]
+    kwargs: Mapping[str, object]
+
+
+class ComputedReference(ComputedArgument[T_co], Generic[T_co]):
+    """A computed argument bound to a path inside its declaring Schema."""
+    path: tuple[str, ...]
+
+
+ComputedParameter = T | ComputedArgument[T]
+
+
+@overload
+def computed(func: Callable[[A], R]) -> Callable[[ComputedParameter[A]], Computed[R]]: ...
+@overload
+def computed(func: Callable[[A, B], R]) -> Callable[[ComputedParameter[A], ComputedParameter[B]], Computed[R]]: ...
+@overload
+def computed(func: Callable[[A, B, C], R]) -> Callable[[ComputedParameter[A], ComputedParameter[B], ComputedParameter[C]], Computed[R]]: ...
+@overload
+def computed(func: Callable[[A, B, C, D], R]) -> Callable[[ComputedParameter[A], ComputedParameter[B], ComputedParameter[C], ComputedParameter[D]], Computed[R]]: ...
 
 
 class ConstraintValue(_ConstraintNode, Generic[T]):
@@ -116,7 +150,7 @@ class Expr:
     def __ge__(self, other: ExprOperand) -> Expr: ...
 
 
-class Field(Generic[T_co]):
+class Field(ComputedArgument[T_co], Generic[T_co]):
     """One scalar field.  Class access is a declaration; instance access is a reference."""
     kind: str
     @overload
@@ -155,7 +189,7 @@ AnyField = Field[ScalarValue]
 FieldOverride = T | Fixed[T] | Field[T]
 
 
-class MemberRef(Generic[T_co]):
+class MemberRef(ComputedArgument[T_co], Generic[T_co]):
     """A Field reference bound through a nested Schema instance."""
     @property
     def name(self) -> str: ...
@@ -190,6 +224,7 @@ ExprOperand = int | float | bool | str | Fixed[int] | Fixed[str] | Field[int] | 
 ConstraintInput = str | Callable[[T], bool]
 Length = int | Field[int] | MemberRef[int] | Fixed[int] | Expr
 FixedInput = T | Fixed[T]
+ScalarInput = T | Fixed[T] | Computed[T]
 
 
 class Occurs:
@@ -200,20 +235,20 @@ class Occurs:
 
 
 class ScalarType(Generic[T]):
-    def __call__(self, value: FixedInput[T] | None = None, *, constraint: ConstraintInput[T] | None = None,
+    def __call__(self, value: ScalarInput[T] | None = None, *, constraint: ConstraintInput[T] | None = None,
                  field_id: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None) -> Field[T]: ...
 
 
 class IntegerType(ScalarType[int]):
-    def __call__(self, value: FixedInput[int] | None = None, *, endian: Endian | None = None,
+    def __call__(self, value: ScalarInput[int] | None = None, *, endian: Endian | None = None,
                  signed: bool | None = None, constraint: ConstraintInput[int] | None = None,
                  field_id: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None) -> Field[int]: ...
 
 
 class DoubleType(ScalarType[float]):
-    def __call__(self, value: FixedInput[float] | None = None, *, size: Literal[32, 64] = 64,
+    def __call__(self, value: ScalarInput[float] | None = None, *, size: Literal[32, 64] = 64,
                  endian: Endian | None = None, constraint: ConstraintInput[float] | None = None,
                  field_id: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None) -> Field[float]: ...
@@ -222,19 +257,19 @@ class DoubleType(ScalarType[float]):
 class ExtendedType(Generic[ExtendedValue]):
     """Create a custom scalar factory for a supported scalar value type."""
     def __init__(self, name: str) -> None: ...
-    def __call__(self, value: FixedInput[ExtendedValue] | None = None, /,
+    def __call__(self, value: ScalarInput[ExtendedValue] | None = None, /,
                  **attributes: int | float | bool | str) -> Field[ExtendedValue]: ...
 
 
 class BoundSizedType(Generic[T]):
-    def __call__(self, value: FixedInput[T] | None = None, *, constraint: ConstraintInput[T] | None = None,
+    def __call__(self, value: ScalarInput[T] | None = None, *, constraint: ConstraintInput[T] | None = None,
                  field_id: str | None = None,
                  length_type: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None) -> Field[T]: ...
 
 
 class BoundStringType(BoundSizedType[str]):
-    def __call__(self, value: FixedInput[str] | None = None, *, constraint: ConstraintInput[str] | None = None,
+    def __call__(self, value: ScalarInput[str] | None = None, *, constraint: ConstraintInput[str] | None = None,
                  field_id: str | None = None,
                  length_type: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None,
@@ -243,7 +278,7 @@ class BoundStringType(BoundSizedType[str]):
 
 
 class BoundDecimalStringType(BoundSizedType[int]):
-    def __call__(self, value: FixedInput[int] | None = None, *, constraint: ConstraintInput[int] | None = None,
+    def __call__(self, value: ScalarInput[int] | None = None, *, constraint: ConstraintInput[int] | None = None,
                  field_id: str | None = None,
                  length_type: str | None = None, mutable: bool | None = None,
                  token: bool | None = None, value_type: str | None = None,
@@ -252,13 +287,13 @@ class BoundDecimalStringType(BoundSizedType[int]):
 
 
 class SizedType(Generic[T]):
-    def __call__(self, value: FixedInput[T] | None = None) -> Field[T]: ...
+    def __call__(self, value: ScalarInput[T] | None = None) -> Field[T]: ...
     def __getitem__(self, length: Length) -> BoundSizedType[T]: ...
 
 
 class StringType(SizedType[str]):
     def __getitem__(self, length: Length) -> BoundStringType: ...
-    def __call__(self, value: FixedInput[str] | None = None, *, constraint: ConstraintInput[str] | None = None,
+    def __call__(self, value: ScalarInput[str] | None = None, *, constraint: ConstraintInput[str] | None = None,
                  field_id: str | None = None, length_type: str | None = None,
                  mutable: bool | None = None, token: bool | None = None,
                  value_type: str | None = None, type: StringEncoding | None = None,
@@ -268,14 +303,14 @@ class StringType(SizedType[str]):
 class DecimalStringType(ScalarType[int]):
     """Create a base-10 integer encoded as a Peach String."""
     def __getitem__(self, length: Length) -> BoundDecimalStringType: ...
-    def __call__(self, value: FixedInput[int] | None = None, *, constraint: ConstraintInput[int] | None = None,
+    def __call__(self, value: ScalarInput[int] | None = None, *, constraint: ConstraintInput[int] | None = None,
                  field_id: str | None = None, length_type: str | None = None,
                  mutable: bool | None = None, token: bool | None = None,
                  value_type: str | None = None, type: StringEncoding | None = None,
                  null_terminated: bool | None = None, pad_character: str | None = None) -> Field[int]: ...
 
 
-class _SchemaInstance:
+class _SchemaInstance(ComputedArgument[bytearray]):
     """Base for Schema references. Keyword arguments override scalar or nested Schema members."""
     def __init__(self, **overrides: Override) -> None: ...
     def __call__(self, **overrides: Override) -> Self: ...
@@ -340,7 +375,7 @@ class OptionalField(Generic[T_co]):
 
 class BoundOptionalField(Generic[T_co]):
     def internal(self) -> T_co: ...
-class BlockField(Generic[T_co]):
+class BlockField(ComputedArgument[bytearray], Generic[T_co]):
     @overload
     def __get__(self, instance: None, owner: type[Schema]) -> BlockField[T_co]: ...
     @overload
@@ -436,6 +471,7 @@ class FieldResult:
     kind: str
     fixed: Fixed[ScalarValue] | None
     value: ScalarValue | None
+    computed: Computed[ScalarValue] | None
     path: str | None
 class SchemaResult:
     name: str
@@ -469,6 +505,11 @@ def evaluate_schema(target: SchemaInput) -> EvaluationResult:
 def format_schema_result(result: EvaluationResult) -> str: ...
 def to_peach_data_model(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> str:
     """Export Peach XML; PacketUnion schemas become dependency-ordered DataModels."""
+class PeachArtifacts:
+    xml: str
+    python_fixup: str | None
+def to_peach_artifacts(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> PeachArtifacts:
+    """Export Peach XML and the generated ScriptFixup Python module."""
 
 
 Double: DoubleType

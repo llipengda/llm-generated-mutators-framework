@@ -43,7 +43,7 @@ Generate a diagnosis from the repository root, then use **上传诊断结果** i
 Studio to import the JSON file:
 
 ```bash
-.venv/bin/python -m core.datamodel_diagnoser \
+uv run python -m core.datamodel_diagnoser \
   llm/peach/<proto>/datamodel.xml \
   llm/peach/<proto>/dm_test_logs \
   --output diagnosis.json

@@ -5,9 +5,11 @@ import ast
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dataclass_field, replace
+from functools import wraps
 import hashlib
 import inspect
 import re
+import textwrap
 from types import MappingProxyType
 from typing import Callable, Generic, Literal, Self, TypeVar, cast, get_args, overload
 from xml.etree import ElementTree as ET
@@ -15,6 +17,11 @@ from xml.etree import ElementTree as ET
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
+A = TypeVar("A")
+B = TypeVar("B")
+C = TypeVar("C")
+D = TypeVar("D")
+R = TypeVar("R")
 S = TypeVar("S", bound="Schema")
 Endian = Literal["big", "little"]
 StringEncoding = Literal[
@@ -62,6 +69,111 @@ class Fixed(Generic[T_co]):
 
 def fixed(value: T) -> Fixed[T]:
     return Fixed(value)
+
+
+class ComputedArgument(Generic[T_co]):
+    """Marker for a symbolic DSL value whose logical Python type is ``T_co``."""
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class Computed(Generic[T_co]):
+    """A captured computed-field declaration; its Python function is not run."""
+
+    func: Callable[..., T_co]
+    args: tuple[object, ...]
+    kwargs: Mapping[str, object]
+
+    def __repr__(self) -> str:
+        try:
+            source = textwrap.dedent(inspect.getsource(self.func))
+        except (OSError, TypeError):
+            source = self.func.__qualname__
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+        return (
+            f"Computed({self.func.__qualname__}:{digest}, args={self.args!r}, "
+            f"kwargs={dict(self.kwargs)!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ComputedReference(ComputedArgument[T_co], Generic[T_co]):
+    """A computed argument bound to a path inside its declaring Schema."""
+
+    path: tuple[str, ...]
+
+
+ComputedParameter = T | ComputedArgument[T]
+
+
+@overload
+def computed(
+    func: Callable[[A], R],
+) -> Callable[[ComputedParameter[A]], Computed[R]]: ...
+
+
+@overload
+def computed(
+    func: Callable[[A, B], R],
+) -> Callable[[ComputedParameter[A], ComputedParameter[B]], Computed[R]]: ...
+
+
+@overload
+def computed(
+    func: Callable[[A, B, C], R],
+) -> Callable[
+    [ComputedParameter[A], ComputedParameter[B], ComputedParameter[C]],
+    Computed[R],
+]: ...
+
+
+@overload
+def computed(
+    func: Callable[[A, B, C, D], R],
+) -> Callable[
+    [
+        ComputedParameter[A],
+        ComputedParameter[B],
+        ComputedParameter[C],
+        ComputedParameter[D],
+    ],
+    Computed[R],
+]: ...
+
+
+def computed(func: Callable[..., R]) -> Callable[..., Computed[R]]:
+    """Capture calls to a one-to-four-argument function as DSL metadata."""
+
+    signature = inspect.signature(func)
+    parameters = tuple(signature.parameters.values())
+    if not 1 <= len(parameters) <= 4:
+        raise TypeError("a computed function must declare between 1 and 4 parameters")
+    unsupported = tuple(
+        parameter.name
+        for parameter in parameters
+        if parameter.kind
+        not in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        or parameter.default is not inspect.Parameter.empty
+    )
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise TypeError(
+            "computed functions require positional parameters without defaults; "
+            f"unsupported parameter(s): {names}"
+        )
+
+    @wraps(func)
+    def inner(*args: object, **kwargs: object) -> Computed[R]:
+        bound = signature.bind(*args, **kwargs)
+        return Computed(
+            func,
+            tuple(bound.args),
+            MappingProxyType(dict(bound.kwargs)),
+        )
+
+    return inner
 
 
 ConstraintLiteral = int | float | bool | str
@@ -182,7 +294,7 @@ class ConstraintValue(_ConstraintNode, Generic[T]):
         return Expr(">=", self, other)
 
 
-class Field(Generic[T_co]):
+class Field(ComputedArgument[T_co], Generic[T_co]):
     """Description of one value in a schema."""
 
     def __init__(self, kind: str, **options: object) -> None:
@@ -305,7 +417,7 @@ class Field(Generic[T_co]):
 
 
 @dataclass(frozen=True, slots=True, eq=False)
-class MemberRef(Generic[T_co]):
+class MemberRef(ComputedArgument[T_co], Generic[T_co]):
     """A field reference bound to a concrete Schema instance and member path."""
 
     instance: _SchemaInstance
@@ -602,9 +714,10 @@ FieldOverride = T | Fixed[T] | Field[T]
 PeachAttributeValue = int | float | bool | str
 ExtendedValue = TypeVar("ExtendedValue", bound=ScalarValue)
 FixedInput = T | Fixed[T]
+ScalarInput = T | Fixed[T] | Computed[T]
 
 
-def _fixed(value: FixedInput[T] | None) -> Fixed[T] | None:
+def _fixed(value: ScalarInput[T] | None) -> Fixed[T] | None:
     if isinstance(value, Fixed):
         fixed_value = cast(Fixed[T], value)
         if isinstance(fixed_value.value, bool):
@@ -615,7 +728,7 @@ def _fixed(value: FixedInput[T] | None) -> Fixed[T] | None:
     return None
 
 
-def _default_value(value: FixedInput[T] | None) -> T | None:
+def _default_value(value: ScalarInput[T] | None) -> T | Computed[T] | None:
     if value is None or isinstance(value, Fixed):
         return None
     if isinstance(value, bool):
@@ -630,7 +743,7 @@ class ScalarType(Generic[T]):
 
     def __call__(
         self,
-        value: FixedInput[T] | None = None,
+        value: ScalarInput[T] | None = None,
         *,
         constraint: ConstraintInput[T] | None = None,
         field_id: str | None = None,
@@ -657,7 +770,7 @@ class IntegerType(ScalarType[int]):
 
     def __call__(
         self,
-        value: FixedInput[int] | None = None,
+        value: ScalarInput[int] | None = None,
         *,
         endian: Endian | None = None,
         signed: bool | None = None,
@@ -690,7 +803,7 @@ class DoubleType(ScalarType[float]):
 
     def __call__(
         self,
-        value: FixedInput[float] | None = None,
+        value: ScalarInput[float] | None = None,
         *,
         size: Literal[32, 64] = 64,
         endian: Endian | None = None,
@@ -732,7 +845,7 @@ class ExtendedType(Generic[ExtendedValue]):
 
     def __call__(
         self,
-        value: FixedInput[ExtendedValue] | None = None,
+        value: ScalarInput[ExtendedValue] | None = None,
         /,
         **attributes: PeachAttributeValue,
     ) -> Field[ExtendedValue]:
@@ -801,7 +914,7 @@ class SizedType(Generic[T]):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def __call__(self, value: FixedInput[T] | None = None) -> Field[T]:
+    def __call__(self, value: ScalarInput[T] | None = None) -> Field[T]:
         """Create an unsized value, for example a Blob consuming its container."""
 
         return Field(
@@ -818,7 +931,7 @@ class StringType(SizedType[str]):
 
     def __call__(
         self,
-        value: FixedInput[str] | None = None,
+        value: ScalarInput[str] | None = None,
         *,
         constraint: ConstraintInput[str] | None = None,
         field_id: str | None = None,
@@ -858,7 +971,7 @@ class BoundSizedType(Generic[T]):
 
     def __call__(
         self,
-        value: FixedInput[T] | None = None,
+        value: ScalarInput[T] | None = None,
         *,
         constraint: ConstraintInput[T] | None = None,
         field_id: str | None = None,
@@ -887,7 +1000,7 @@ class BoundSizedType(Generic[T]):
 class BoundStringType(BoundSizedType[str]):
     def __call__(
         self,
-        value: FixedInput[str] | None = None,
+        value: ScalarInput[str] | None = None,
         *,
         constraint: ConstraintInput[str] | None = None,
         field_id: str | None = None,
@@ -922,7 +1035,7 @@ class BoundStringType(BoundSizedType[str]):
 class BoundDecimalStringType(BoundSizedType[int]):
     def __call__(
         self,
-        value: FixedInput[int] | None = None,
+        value: ScalarInput[int] | None = None,
         *,
         constraint: ConstraintInput[int] | None = None,
         field_id: str | None = None,
@@ -987,7 +1100,7 @@ class DecimalStringType(ScalarType[int]):
 
     def __call__(
         self,
-        value: FixedInput[int] | None = None,
+        value: ScalarInput[int] | None = None,
         *,
         constraint: ConstraintInput[int] | None = None,
         field_id: str | None = None,
@@ -1134,15 +1247,24 @@ class BlockField:
         self.overrides = MappingProxyType(dict(overrides or {}))
         normalized: dict[str, SchemaMember] = {}
         bindings: dict[int, tuple[str, _SchemaInstance]] = {}
+        computed_bindings: dict[int, tuple[str, ...]] = {}
         for name, member in fields.items():
             child = _normalize_block_member(member)
             normalized[name] = child
+            if isinstance(
+                member, (ComputedArgument, _SchemaInstance, BlockField)
+            ):
+                computed_bindings[id(member)] = (name,)
+            if isinstance(child, (ComputedArgument, _SchemaInstance, BlockField)):
+                computed_bindings[id(child)] = (name,)
             if isinstance(member, _SchemaInstance) and isinstance(
                 child, _SchemaInstance
             ):
                 bindings[id(member)] = (name, child)
         normalized = {
-            name: _bind_schema_member_references(child, bindings)
+            name: _bind_schema_member_references(
+                child, bindings, computed_bindings
+            )
             for name, child in normalized.items()
         }
         self.fields = MappingProxyType(normalized)
@@ -1777,23 +1899,90 @@ def _bind_nested_expr_operand(
     return operand
 
 
+def _bind_computed_argument(
+    argument: object,
+    bindings: Mapping[int, tuple[str, _SchemaInstance]],
+    computed_bindings: Mapping[int, tuple[str, ...]],
+) -> object:
+    """Rebind a symbolic computed argument to the cloned schema member."""
+
+    computed_path = computed_bindings.get(id(argument))
+    if computed_path is not None:
+        return ComputedReference[object](computed_path)
+    if isinstance(argument, MemberRef):
+        rebound = _bind_nested_length(cast(MemberRef[int], argument), bindings)
+        if isinstance(rebound, MemberRef):
+            return ComputedReference[object](rebound.path)
+        return rebound
+    if isinstance(argument, _SchemaInstance):
+        binding = bindings.get(id(argument)) or bindings.get(
+            id(argument.binding_root)
+        )
+        if binding is None:
+            if argument.binding_path:
+                return ComputedReference[bytearray](argument.binding_path)
+            return argument
+        name, _instance = binding
+        if not argument.binding_path:
+            return ComputedReference[bytearray]((name,))
+        path = (
+            argument.binding_path
+            if argument.binding_path[:1] == (name,)
+            else (name,) + argument.binding_path
+        )
+        return ComputedReference[bytearray](path)
+    return argument
+
+
+def _bind_computed(
+    value: Computed[object],
+    bindings: Mapping[int, tuple[str, _SchemaInstance]],
+    computed_bindings: Mapping[int, tuple[str, ...]],
+) -> Computed[object]:
+    return Computed(
+        value.func,
+        tuple(
+            _bind_computed_argument(argument, bindings, computed_bindings)
+            for argument in value.args
+        ),
+        MappingProxyType(
+            {
+                name: _bind_computed_argument(
+                    argument, bindings, computed_bindings
+                )
+                for name, argument in value.kwargs.items()
+            }
+        ),
+    )
+
+
 def _bind_schema_member_references(
     member: SchemaMember,
     bindings: Mapping[int, tuple[str, _SchemaInstance]],
+    computed_bindings: Mapping[int, tuple[str, ...]],
 ) -> SchemaMember:
     """Bind references captured inside Block, Array, and Optional declarations."""
 
     if isinstance(member, Field):
-        length = cast(Length | None, member.options.get("length"))
+        options = dict(member.options)
+        changed = False
+        length = cast(Length | None, options.get("length"))
         if isinstance(length, (MemberRef, Expr)):
             rebound = _bind_nested_length(length, bindings)
             if rebound is not length:
-                options = dict(member.options)
                 options["length"] = rebound
-                replacement = Field[ScalarValue](member.kind, **options)
-                replacement.owner = member.owner
-                replacement.name = member.name
-                return replacement
+                changed = True
+        raw_value = options.get("value")
+        if isinstance(raw_value, Computed):
+            options["value"] = _bind_computed(
+                cast(Computed[object], raw_value), bindings, computed_bindings
+            )
+            changed = True
+        if changed:
+            replacement = Field[ScalarValue](member.kind, **options)
+            replacement.owner = member.owner
+            replacement.name = member.name
+            return replacement
     elif isinstance(member, _SchemaInstance):
         rebound_overrides: dict[str, Override] = {}
         for name, override in member.overrides.items():
@@ -1806,7 +1995,7 @@ def _bind_schema_member_references(
                 candidate = cast(
                     Override,
                     _bind_schema_member_references(
-                        cast(SchemaMember, candidate), bindings
+                        cast(SchemaMember, candidate), bindings, computed_bindings
                     ),
                 )
             rebound_overrides[name] = candidate
@@ -1817,7 +2006,7 @@ def _bind_schema_member_references(
                 name: cast(
                     _SchemaInstance | AnyField | BlockField,
                     _bind_schema_member_references(
-                        cast(SchemaMember, alternative), bindings
+                        cast(SchemaMember, alternative), bindings, computed_bindings
                     ),
                 )
                 for name, alternative in member.alternatives.items()
@@ -1828,7 +2017,9 @@ def _bind_schema_member_references(
             member.length_spec = _bind_nested_length(member.length_spec, bindings)
         member.fields = MappingProxyType(
             {
-                name: _bind_schema_member_references(child, bindings)
+                name: _bind_schema_member_references(
+                    child, bindings, computed_bindings
+                )
                 for name, child in member.fields.items()
             }
         )
@@ -1841,7 +2032,7 @@ def _bind_schema_member_references(
         member.element = cast(
             OptionalElement,
             _bind_schema_member_references(
-                cast(SchemaMember, member.element), bindings
+                cast(SchemaMember, member.element), bindings, computed_bindings
             ),
         )
     elif isinstance(member, ArrayField):
@@ -1850,7 +2041,7 @@ def _bind_schema_member_references(
         member.element = cast(
             ArrayElement,
             _bind_schema_member_references(
-                cast(SchemaMember, member.element), bindings
+                cast(SchemaMember, member.element), bindings, computed_bindings
             ),
         )
     return member
@@ -1867,11 +2058,17 @@ class SchemaMeta(type):
         namespace: dict[str, object],
     ) -> SchemaMeta:
         bindings: dict[int, tuple[str, _SchemaInstance]] = {}
+        computed_bindings: dict[int, tuple[str, ...]] = {}
         for field_name, member in tuple(namespace.items()):
             if isinstance(member, _SchemaInstance):
                 clone = member.clone_unbound()
                 bindings[id(member)] = (field_name, clone)
+                computed_bindings[id(member)] = (field_name,)
                 namespace[field_name] = clone
+
+        for field_name, member in tuple(namespace.items()):
+            if isinstance(member, (ComputedArgument, _SchemaInstance, BlockField)):
+                computed_bindings[id(cast(object, member))] = (field_name,)
 
         for field_name, member in tuple(namespace.items()):
             if isinstance(
@@ -1879,7 +2076,7 @@ class SchemaMeta(type):
                 (Field, _SchemaInstance, SchemaUnion, NamedUnion, ArrayField, OptionalField, BlockField),
             ):
                 namespace[field_name] = _bind_schema_member_references(
-                    cast(SchemaMember, member), bindings
+                    cast(SchemaMember, member), bindings, computed_bindings
                 )
 
         cls = super().__new__(mcls, name, bases, namespace)
@@ -2075,6 +2272,7 @@ class FieldResult:
     kind: str
     fixed: Fixed[ScalarValue] | None = None
     value: ScalarValue | None = None
+    computed: Computed[ScalarValue] | None = None
     length: int | FieldReference | ExprResult | None = None
     position: int | None = None
     signed: bool | None = None
@@ -2362,6 +2560,30 @@ _PEACH_MODEL_NAMES: ContextVar[Mapping[type[Schema], str] | None] = ContextVar(
     "peach_model_names",
     default=None,
 )
+_PEACH_CURRENT_MODEL: ContextVar[str | None] = ContextVar(
+    "peach_current_model",
+    default=None,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptFixupDefinition:
+    class_name: str
+    function: Callable[..., ScalarValue]
+    argument_paths: tuple[tuple[str, ...], ...]
+    ancestor_path: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PeachArtifacts:
+    xml: str
+    python_fixup: str | None
+
+
+_SCRIPT_FIXUPS: ContextVar[dict[str, ScriptFixupDefinition] | None] = ContextVar(
+    "peach_script_fixups",
+    default=None,
+)
 
 
 def _peach_model_name(schema: type[Schema]) -> str:
@@ -2370,6 +2592,46 @@ def _peach_model_name(schema: type[Schema]) -> str:
 
 
 def to_peach_data_model(
+    target: SchemaInput,
+    *,
+    name: str | None = None,
+    include_header: bool = True,
+) -> str:
+    """Convert a Schema to Peach XML."""
+
+    return to_peach_artifacts(
+        target,
+        name=name,
+        include_header=include_header,
+    ).xml
+
+
+def to_peach_artifacts(
+    target: SchemaInput,
+    *,
+    name: str | None = None,
+    include_header: bool = True,
+) -> PeachArtifacts:
+    """Render Peach XML and any Python ScriptFixup module it requires."""
+
+    definitions: dict[str, ScriptFixupDefinition] = {}
+    token = _SCRIPT_FIXUPS.set(definitions)
+    try:
+        xml = _to_peach_data_model(
+            target,
+            name=name,
+            include_header=include_header,
+        )
+    finally:
+        _SCRIPT_FIXUPS.reset(token)
+
+    python_fixup = _render_python_fixups(definitions) if definitions else None
+    if definitions and include_header:
+        xml = _add_python_fixup_import(xml)
+    return PeachArtifacts(xml, python_fixup)
+
+
+def _to_peach_data_model(
     target: SchemaInput,
     *,
     name: str | None = None,
@@ -2401,10 +2663,14 @@ def to_peach_data_model(
     _collect_peach_relations(result, relation_root, relations)
     _apply_peach_result_paths(result, relation_root, relations)
 
-    if isinstance(result, SchemaResult):
-        _append_peach_schema_fields(data_model, result, (), relations)
-    else:
-        _append_peach_union(data_model, "value", result, (), relations)
+    model_token = _PEACH_CURRENT_MODEL.set(model_name)
+    try:
+        if isinstance(result, SchemaResult):
+            _append_peach_schema_fields(data_model, result, (), relations)
+        else:
+            _append_peach_union(data_model, "value", result, (), relations)
+    finally:
+        _PEACH_CURRENT_MODEL.reset(model_token)
 
     ET.indent(root, space="  ")
     if not include_header:
@@ -2491,7 +2757,7 @@ def _to_peach_model_library(target: SchemaInput, *, name: str | None) -> str:
     if isinstance(target, (SchemaUnion, NamedUnion)):
         # There is no containing Schema to act as a model-library root.  The
         # inline form remains the useful representation for this uncommon case.
-        return to_peach_data_model(target, name=name, include_header=False)
+        return _to_peach_data_model(target, name=name, include_header=False)
 
     root_schema = type(target) if isinstance(target, Schema) else target
     models: dict[type[Schema], SchemaDefaults] = {}
@@ -2530,13 +2796,17 @@ def _to_peach_model_library(target: SchemaInput, *, name: str | None) -> str:
             relations: PeachRelations = {}
             _collect_peach_relations(result, (), relations)
             _apply_peach_result_paths(result, (), relations)
-            _append_extracted_schema_fields(
-                data_model,
-                schema.__schema_fields__,
-                result,
-                (),
-                relations,
-            )
+            model_token = _PEACH_CURRENT_MODEL.set(model_names[schema])
+            try:
+                _append_extracted_schema_fields(
+                    data_model,
+                    schema.__schema_fields__,
+                    result,
+                    (),
+                    relations,
+                )
+            finally:
+                _PEACH_CURRENT_MODEL.reset(model_token)
     finally:
         _PEACH_MODEL_NAMES.reset(token)
 
@@ -3421,6 +3691,236 @@ def _append_peach_field(
 
     element = ET.SubElement(parent, tag, attributes)
     _append_peach_relations(element, path + (name,), relations)
+    if field.computed is not None:
+        _append_script_fixup(element, field.computed, path + (name,))
+
+
+def _append_script_fixup(
+    element: ET.Element,
+    computed_value: Computed[ScalarValue],
+    field_path: tuple[str, ...],
+) -> None:
+    definitions = _SCRIPT_FIXUPS.get()
+    if definitions is None:
+        raise ValueError("computed fields require Peach artifact rendering")
+    model_name = _PEACH_CURRENT_MODEL.get()
+    if model_name is None:
+        raise ValueError("a computed field has no containing Peach DataModel")
+    if computed_value.kwargs:
+        raise ValueError("computed field calls must use positional arguments")
+
+    container_path = field_path[:-1]
+    argument_paths = tuple(
+        _computed_argument_path(argument, container_path)
+        for argument in computed_value.args
+    )
+    ancestor_path = _common_path_prefix(argument_paths)
+    function = computed_value.func
+    source = _computed_function_source(function)
+    identity = "\n".join(
+        (
+            model_name,
+            ".".join(field_path),
+            source,
+            *(".".join(argument_path) for argument_path in argument_paths),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    function_name = re.sub(r"\W+", "_", function.__name__).strip("_") or "computed"
+    class_name = f"Fixup_{function_name}_{digest}"
+    definitions.setdefault(
+        class_name,
+        ScriptFixupDefinition(
+            class_name,
+            function,
+            argument_paths,
+            ancestor_path,
+        ),
+    )
+
+    reference = ".".join(ancestor_path) if ancestor_path else model_name
+    fixup = ET.SubElement(element, "Fixup", {"class": "ScriptFixup"})
+    ET.SubElement(
+        fixup,
+        "Param",
+        {"name": "class", "value": f"python_fixup.{class_name}"},
+    )
+    ET.SubElement(fixup, "Param", {"name": "ref", "value": reference})
+
+
+def _computed_argument_path(
+    argument: object,
+    container_path: tuple[str, ...],
+) -> tuple[str, ...]:
+    if isinstance(argument, ComputedReference):
+        return container_path + argument.path
+    if isinstance(argument, MemberRef):
+        return container_path + argument.path
+    if isinstance(argument, Field):
+        if argument.name is None:
+            raise ValueError("a computed Field argument has no name")
+        return container_path + (argument.name,)
+    if isinstance(argument, _SchemaInstance):
+        if not argument.binding_path:
+            raise ValueError("a computed Schema argument is not bound to a field")
+        return container_path + argument.binding_path
+    if isinstance(argument, BlockField):
+        if argument.name is None:
+            raise ValueError("a computed Block argument has no name")
+        return container_path + (argument.name,)
+    raise TypeError(
+        "computed field arguments must be Field, MemberRef, Schema, or Block values"
+    )
+
+
+def _common_path_prefix(paths: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+    if not paths:
+        raise ValueError("a computed field must reference at least one argument")
+    prefix = list(paths[0])
+    for path in paths[1:]:
+        limit = min(len(prefix), len(path))
+        index = 0
+        while index < limit and prefix[index] == path[index]:
+            index += 1
+        del prefix[index:]
+    return tuple(prefix)
+
+
+def _computed_function_node(function: Callable[..., ScalarValue]) -> ast.FunctionDef:
+    try:
+        source = textwrap.dedent(inspect.getsource(function))
+    except (OSError, TypeError) as error:
+        raise ValueError(
+            f"cannot read source for computed function {function.__qualname__}"
+        ) from error
+    module = ast.parse(source)
+    node = next(
+        (
+            item
+            for item in module.body
+            if isinstance(item, ast.FunctionDef) and item.name == function.__name__
+        ),
+        None,
+    )
+    if node is None:
+        raise ValueError(
+            f"cannot find source definition for computed function {function.__qualname__}"
+        )
+    return node
+
+
+def _computed_function_source(function: Callable[..., ScalarValue]) -> str:
+    node = _computed_function_node(function)
+    node.decorator_list = []
+    return ast.unparse(ast.fix_missing_locations(node))
+
+
+def _computed_annotation_name(annotation: object, parameter: str) -> str:
+    supported: Mapping[object, str] = {
+        int: "int",
+        float: "float",
+        str: "str",
+        bytes: "bytes",
+        bytearray: "bytearray",
+        "int": "int",
+        "float": "float",
+        "str": "str",
+        "bytes": "bytes",
+        "bytearray": "bytearray",
+    }
+    name = supported.get(annotation)
+    if name is None:
+        raise TypeError(
+            f"computed parameter {parameter!r} must be annotated as "
+            "int, float, str, bytes, or bytearray"
+        )
+    return name
+
+
+def _computed_argument_expression(converter: str, target: str) -> str:
+    if converter == "bytearray":
+        return f"bytearray({target}.Bytes())"
+    if converter == "bytes":
+        return f"bytes(bytearray({target}.Bytes()))"
+    return f"{converter}({target}.InternalValue)"
+
+
+def _render_computed_method(function: Callable[..., ScalarValue]) -> str:
+    node = _computed_function_node(function)
+    node.name = "func"
+    node.decorator_list = []
+    node.returns = None
+    node.type_comment = None
+    for argument in (
+        *node.args.posonlyargs,
+        *node.args.args,
+        *node.args.kwonlyargs,
+    ):
+        argument.annotation = None
+        argument.type_comment = None
+    node.args.args.insert(0, ast.arg(arg="self"))
+    return ast.unparse(ast.fix_missing_locations(node))
+
+
+def _render_python_fixups(
+    definitions: Mapping[str, ScriptFixupDefinition],
+) -> str:
+    lines = [
+        "import clr",
+        "clr.AddReference(\"Peach.LLM\")",
+        "import Peach.LLM.Core",
+        "clr.ImportExtensions(Peach.LLM.Core)",
+        "",
+        "",
+    ]
+    for definition in definitions.values():
+        signature = inspect.signature(definition.function)
+        parameters = tuple(signature.parameters.values())
+        if len(parameters) != len(definition.argument_paths):
+            raise ValueError(
+                f"computed function {definition.function.__qualname__} argument count changed"
+            )
+        lines.append(f"class {definition.class_name}:")
+        lines.append("    def __init__(self, parent):")
+        lines.append("        self.parent = parent")
+        lines.append("")
+        lines.extend(
+            textwrap.indent(_render_computed_method(definition.function), "    ").splitlines()
+        )
+        lines.append("")
+        lines.append("    def fixup(self, element):")
+        argument_names: list[str] = []
+        for parameter, argument_path in zip(parameters, definition.argument_paths):
+            converter = _computed_annotation_name(parameter.annotation, parameter.name)
+            relative_path = argument_path[len(definition.ancestor_path) :]
+            target = (
+                "element"
+                if not relative_path
+                else f'element.find("{".".join(relative_path)}")'
+            )
+            expression = _computed_argument_expression(converter, target)
+            lines.append(f"        {parameter.name} = {expression}")
+            argument_names.append(parameter.name)
+        lines.append(f"        return self.func({', '.join(argument_names)})")
+        lines.append("")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _add_python_fixup_import(xml_text: str) -> str:
+    ET.register_namespace("", PEACH_NAMESPACE)
+    ET.register_namespace("xsi", XSI_NAMESPACE)
+    root = ET.fromstring(xml_text)
+    root.insert(0, ET.Element("PythonPath", {"path": "."}))
+    root.insert(1, ET.Element("PythonPath", {"path": "/generated"}))
+    root.insert(2, ET.Element("Import", {"import": "python_fixup"}))
+    ET.indent(root, space="  ")
+    return ET.tostring(
+        root,
+        encoding="utf-8",
+        xml_declaration=True,
+        short_empty_elements=True,
+    ).decode("utf-8")
 
 
 def _peach_field_tag(field: FieldResult) -> str:
@@ -4073,6 +4573,11 @@ def _evaluate_field(
             f"bool is not a supported Peach DSL scalar value: {name}; use 0 or 1"
         )
     value = raw_value if isinstance(raw_value, (int, float, str, bytes)) else None
+    computed_value = (
+        cast(Computed[ScalarValue], raw_value)
+        if isinstance(raw_value, Computed)
+        else None
+    )
     if isinstance(override, (int, float, str, bytes)):
         value = override
 
@@ -4107,6 +4612,7 @@ def _evaluate_field(
         field.kind,
         constant,
         value,
+        computed_value,
         length,
         None,
         signed,

@@ -94,6 +94,42 @@ reusable schemas or generated DSL modules. Declare and import dependencies in
 one direction; a referenced value must be resolvable without returning to the
 field, schema, or module currently being defined.
 
+### Computed field declarations
+
+Use `@computed` to capture a calculation and its symbolic field or schema
+arguments without executing the Python function:
+
+```python
+@computed
+def calc_crc(header: bytearray) -> int:
+    return sum(header) % 65536
+
+
+class Packet(Schema):
+    @Block
+    class header(Schema):
+        kind = Int8()
+        length = Int16()
+
+    crc = Int16(calc_crc(header))
+```
+
+A computed function must have one to four required positional parameters.
+Fields satisfy parameters of their logical scalar type, while a `Schema` or
+`Block` satisfies a `bytearray` parameter. Calling the decorated function
+creates `Computed` metadata containing the original function and arguments;
+the function body is not executed by the DSL compiler.
+
+When the Pit is compiled, computed argument paths are resolved and their
+nearest common ancestor becomes the `ref` parameter of a Peach `ScriptFixup`.
+The compiler writes `python_fixup.py` beside `datamodel.xml`, copies each
+computed function into a uniquely named fixup class, and loads each argument
+relative to that common ancestor. The generated Pit imports `python_fixup` and
+searches both `.` (for local runs from the artifact directory) and `/generated`
+(the framework's Docker mount point). `bytes` and `bytearray` parameters use
+the SDK's `Element.Bytes()` extension; scalar parameters use Peach's logical
+`InternalValue`.
+
 Prefer references to fields declared earlier in wire order. Anonymous
 `Block(...)` and `Union(...)` members are not path-addressable; use their
 decorated class forms when another field must reference an internal path.
