@@ -4,10 +4,10 @@ import os
 from pathlib import Path
 from typing import Callable, Protocol, TypedDict
 
-from agent import AgentConfig
+from core.agent import AgentConfig
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
-from state import PipelineState
+from core.state import PipelineState
 
 
 class AgentMessage(Protocol):
@@ -48,7 +48,7 @@ class PeachStepMixin:
     def _custom_data_element_context(self) -> str:
         raise NotImplementedError
 
-    def repair_datamodel_assembly(
+    def _repair_datamodel_assembly(
         self, *, allow_packet_type_additions: bool = False
     ) -> None:
         raise NotImplementedError

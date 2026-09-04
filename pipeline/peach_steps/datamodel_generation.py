@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 import subprocess
 
-from agent import build_agent_graph
-from datamodel_dsl import (
+from core.agent import build_agent_graph
+from core.datamodel_dsl import (
     compile_dsl_subprocess,
     load_manifest,
     normalize_symbol,
@@ -17,8 +17,8 @@ from pipeline.peach_steps.common import (
     _env_int,
     PeachStepMixin,
 )
-from tools import validate_peach_xml
-from ui import UI, ask_before_step, ask_reuse_generated_component
+from core.tools import validate_peach_xml
+from core.ui import UI, ask_before_step, ask_reuse_generated_component
 
 
 class DatamodelGenerationSteps(PeachStepMixin):
@@ -210,8 +210,9 @@ class DatamodelGenerationSteps(PeachStepMixin):
             agent = build_agent_graph(
                 retriever=self.retriever,
                 config=self.agent_config,
-                tool_names={"Read_File", "RFC_Search", "Write_File"},
+                tool_names={"Read_File", "Search_Files", "RFC_Search", "Write_File"},
                 read_files=(Path("docs/peach-dsl.md"),),
+                write_files=(manifest_path, report_path),
             )
             self.call_agent(
                 planner_prompt
@@ -247,6 +248,8 @@ class DatamodelGenerationSteps(PeachStepMixin):
         custom_element_context = self._custom_data_element_context()
         manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
         shared_path = dsl_dir / "shared_model.py"
+        report_path = dsl_dir.parent / "data_type_analysis.json"
+        manifest_path = dsl_dir / "schema_manifest.json"
         for probe_path in dsl_dir.glob("_probe*.py"):
             probe_path.unlink(missing_ok=True)
         (dsl_dir / "shared.py").unlink(missing_ok=True)
@@ -260,12 +263,12 @@ class DatamodelGenerationSteps(PeachStepMixin):
 
             {custom_element_context}
 
-            Use Read_Shared_DSL_Context to read "./docs/peach-dsl.md", the type
+            Use Read_File to read "./docs/peach-dsl.md", the type
             analysis, schema manifest, and current shared module as needed. This
             tool intentionally cannot read Peach XML, C#, examples, packet-family
             modules, or arbitrary project files. Read the DSL guide completely and
             follow it exactly. Use RFC_Search to confirm every shared field. Use
-            Write_Shared_DSL to write "{shared_path}" with `from peach_dsl import
+            Write_File to write "{shared_path}" with `from peach_dsl import
             *`, then define every contracted shared symbol exactly once. Also
             declare every protocol-prefixed ExtendedType from the type analysis
             that appears in shared_refs. Do not specify runtime model names or
@@ -284,9 +287,16 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 retriever=self.retriever,
                 config=self.agent_config,
                 tool_names={
-                    "Read_Shared_DSL_Context", "RFC_Search", "Write_Shared_DSL",
+                    "Read_File", "Search_Files", "RFC_Search", "Write_File",
                     "Validate_Peach_DSL_Module",
                 },
+                read_files=(
+                    Path("docs/peach-dsl.md"),
+                    report_path,
+                    manifest_path,
+                    shared_path,
+                ),
+                write_files=(shared_path,),
             )
             self.call_agent(prompt, "Step 2.2: Shared DSL Generation", agent_graph=agent)
             unexpected_probes = sorted(dsl_dir.glob("_probe*.py"))
@@ -339,7 +349,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 retriever=self.retriever,
                 config=self.agent_config,
                 tool_names={
-                    "Read_File", "RFC_Search", "Write_File", "Apply_Patch",
+                    "Read_File", "Search_Files", "RFC_Search", "Write_File", "Apply_Patch",
                     "Validate_Peach_DSL_Module",
                 },
                 read_files=(
@@ -347,6 +357,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
                     shared_path,
                     family_path,
                 ),
+                write_files=(family_path,),
             )
             self.call_agent(
                 prompt,
@@ -414,16 +425,14 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 if compiler_output:
                     UI.dim(f"DSL XML compiler output:\n{compiler_output}")
                 UI.dim(f"Validating compiled Peach XML: {output_path}")
-                xsd_result = str(
-                    validate_peach_xml.invoke(
-                        {"xml_path": str(output_path)},
-                        config={"callbacks": [self.tool_usage_logger]},
-                    )
+                xsd_result = validate_peach_xml.invoke(
+                    {"xml_path": str(output_path)},
+                    config={"callbacks": [self.tool_usage_logger]},
                 )
-                if xsd_result.startswith("PASS:"):
+                if xsd_result.get("ok", False):
                     UI.success(f"DSL compiled to {output_path}")
                     return manifest
-                error = xsd_result
+                error = xsd_result.get("message", str(xsd_result))
                 UI.error(f"Compiled Peach XML validation failed:\n{error}")
             elif result is not None:
                 error = (result.stdout + result.stderr).strip()
@@ -457,10 +466,11 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 retriever=self.retriever,
                 config=self.agent_config,
                 tool_names={
-                    "Read_File", "RFC_Search", "Write_File", "Apply_Patch",
+                    "Read_File", "Search_Files", "RFC_Search", "Write_File", "Apply_Patch",
                     "Validate_Peach_DSL_Module"
                 },
                 read_files=(Path("docs/peach-dsl.md"), manifest_path, root_path, *modules),
+                write_files=(manifest_path, *modules),
             )
             self.call_agent(
                 prompt,
@@ -474,7 +484,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 raise RuntimeError(f"integration repair produced an invalid manifest: {warning}")
         return manifest
 
-    def repair_datamodel_assembly(
+    def _repair_datamodel_assembly(
         self, *, allow_packet_type_additions: bool = False
     ) -> None:
         output_dir = Path("./llm/peach") / self.protocol_lower

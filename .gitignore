@@ -10,7 +10,6 @@ dist/
 llm/
 *.log
 logs/
-.pipeline_state*
 
 peach/sdk
 peach/

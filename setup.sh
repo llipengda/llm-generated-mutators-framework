@@ -48,4 +48,3 @@ docker run --rm -v "$(pwd)/peach:/p" pdli/llm-peach:sdk \
            && cp /peach/llm/Core/README.md /p/README.md \
            && /peach/output/linux_x86_64_release/bin/pittool makexsd \
            && cp /peach/output/linux_x86_64_release/bin/peach.xsd /p/peach.xsd"
-python3 process_peach_txt.py

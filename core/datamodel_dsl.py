@@ -14,7 +14,7 @@ import tempfile
 from typing import Any, Iterable
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def normalize_identifier(value: str) -> str:

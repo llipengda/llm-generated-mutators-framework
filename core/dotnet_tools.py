@@ -4,6 +4,13 @@ import sys
 from pathlib import Path
 
 from System.Reflection import BindingFlags, MemberTypes  # type: ignore
+from core.tool_result import (
+    ClassSearchData,
+    DotNetBuildData,
+    ToolResult,
+    tool_error,
+    tool_success,
+)
 
 
 class MultiAssemblyInspector:
@@ -144,14 +151,14 @@ class MultiAssemblyInspector:
 
 if not os.path.exists("./peach/sdk/"):
     print(
-        "Error: ./peach/sdk/ not found. Please run `./setup.sh peach` first to prepare the SDK."
+        "Error: ./peach/sdk/ not found. Please run `./setup.sh` first to prepare the SDK."
     )
     sys.exit(1)
 
 inspector = MultiAssemblyInspector(["./peach/sdk/"])
 
 from langchain_core.tools import tool
-from log import console, file_logger
+from core.log import console
 
 
 import threading
@@ -160,7 +167,7 @@ _search_lock = threading.Lock()
 
 
 @tool("Search_Class")
-def search_class(query: str) -> str:
+def search_class(query: str) -> ToolResult[ClassSearchData]:
     """
     Search for a class and its members in the loaded assemblies.
 
@@ -168,23 +175,23 @@ def search_class(query: str) -> str:
         query (str): A partial or full class name to search for.
 
     Returns:
-        str: A formatted string with class details and member signatures.
+        A structured result containing class details and member signatures.
     """
-    file_logger.log(
-f"""TOOL CALL: search_class
-    query: {query}
-""")
     with _search_lock:
-        response = inspector.fuzzy_search(query)
-    file_logger.log(
-f"""TOOL RESPONSE:
-{response}
-""")
+        content = inspector.fuzzy_search(query)
+    response = tool_success(
+        "class_search_complete",
+        f"Completed SDK class search for {query!r}.",
+        ClassSearchData(query=query, content=content),
+    )
     return response
 
 
 @tool("Build_DotNet_DLL")
-def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
+def build_dotnet_dll(
+    source_file_or_dir: str,
+    output_dll: str,
+) -> ToolResult[DotNetBuildData]:
     """
     Compiles C# source file into a DLL.
 
@@ -193,7 +200,7 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
         output_dll (str): Desired path and name for the output DLL.
 
     Returns:
-        str: Success message including path to the compiled DLL or an error message if compilation fails.
+        A structured compilation result with output path or diagnostics.
     """
     import subprocess
 
@@ -227,17 +234,17 @@ def build_dotnet_dll(source_file_or_dir: str, output_dll: str) -> str:
                 refs.append(f"-r:{custom_dll}")
         break
     if not refs:
-        console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh peach` first to prepare the SDK. [/red][/dim]")
-        sys.exit(1)
+        console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh` first to prepare the SDK. [/red][/dim]")
+        return tool_error(
+            "sdk_references_missing",
+            f"No reference DLLs found in {reference_dir}.",
+        )
 
     if not csharp_files:
-        return "Error: No C# source files found in the specified directory."
-
-    file_logger.log(
-f"""TOOL CALL: build_dotnet_dll
-    source_dir: {source_file_or_dir}
-    output_dll: {output_dll}
-""")
+        return tool_error(
+            "csharp_sources_missing",
+            f"No C# source files found in {source_file_or_dir}.",
+        )
 
     cmd = [
         "mcs",
@@ -247,55 +254,29 @@ f"""TOOL CALL: build_dotnet_dll
         "-out:" + output_dll,
     ] + refs + csharp_files
 
-    result = ""
-
     res = subprocess.run(cmd, text=True, capture_output=True)
     if res.returncode == 0:
         if not os.path.exists(output_dll):
-            result = "Error: Compilation succeeded but output DLL not found."
+            result = tool_error(
+                "output_missing",
+                f"Compilation succeeded but output DLL {output_path} was not found.",
+            )
         else:
-            result = f"Success: Compiled DLL: {output_dll}"
+            result = tool_success(
+                "dotnet_build_succeeded",
+                f"Compiled DLL: {output_dll}",
+                DotNetBuildData(
+                    source=source_file_or_dir,
+                    output=str(output_path),
+                    source_count=len(csharp_files),
+                ),
+            )
     else:
         diagnostics = (res.stdout + res.stderr).strip()
-        result = f"Compilation failed:\n{diagnostics or 'Unknown error'}"
-    file_logger.log(
-f"""TOOL RESPONSE:
-{result}
-""")
+        result = tool_error(
+            "dotnet_build_failed",
+            f"C# compilation failed with exit code {res.returncode} for "
+            f"{source_file_or_dir} -> {output_path}.\n"
+            f"{diagnostics or 'Unknown error'}",
+        )
     return result
-
-@tool("Validate_Data")
-def validate_data(protocol: str, hex_data: str) -> str:
-    """
-    Validates the given hex data against the specified protocol using the DataParser.
-
-    Args:
-        protocol (str): The name of the protocol to validate against.
-        hex_data (str): The hex string representing the data to be validated. e.g., "0F3B6CEE".
-
-    Returns:
-        str: A message indicating whether the data is valid or if there are any issues.
-    """
-    
-    import subprocess
-    cmd = [
-        "./tests/peach_fixer/run_data_test.sh",
-        protocol,
-        hex_data
-    ]
-
-    result = subprocess.run(cmd, text=True, capture_output=True)
-    res = ""
-    if result.returncode == 0:
-        res = f"Data is valid for protocol {protocol}."
-    else:
-        res = f"Data validation failed for protocol {protocol}:\n{(result.stdout + result.stderr) if result else 'Unknown error'}"
-
-    file_logger.log(
-f"""TOOL CALL: validate_data
-    protocol: {protocol}
-    hex_data: {hex_data}
-TOOL RESPONSE:
-{res}
-""")
-    return res

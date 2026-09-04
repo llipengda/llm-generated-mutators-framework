@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from datamodel_dsl import (
+from core.datamodel_dsl import (
     compile_dsl_subprocess,
     default_manifest,
     render_root_module,

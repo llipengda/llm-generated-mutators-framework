@@ -1,8 +1,8 @@
 import os
 
-from agent import build_agent_graph
+from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
-from ui import UI
+from core.ui import UI
 
 
 class FixerSteps(PeachStepMixin):

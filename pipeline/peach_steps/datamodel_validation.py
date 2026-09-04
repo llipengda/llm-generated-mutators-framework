@@ -2,14 +2,14 @@ import json
 from pathlib import Path
 import subprocess
 
-from agent import build_agent_graph
+from core.agent import build_agent_graph
 from peach_dsl.error_report import convert_reports_subprocess
 from pipeline.peach_steps.common import (
     PeachStepMixin,
     _DATAMODEL_DSL_SOURCE_STYLE,
     _DATAMODEL_MODELING_GUARDRAILS,
 )
-from ui import UI, ask_reuse_diagnosis
+from core.ui import UI, ask_reuse_diagnosis
 
 
 _PEACH_DSL_GUIDE = Path(__file__).resolve().parents[2] / "docs" / "peach-dsl.md"
@@ -124,7 +124,7 @@ class DatamodelValidationSteps(PeachStepMixin):
            and determine the most likely root causes.
         3. Read "{dsl_dir / 'schema_manifest.json'}", then use the converted DSL
            paths to select the relevant shared_model.py or family_<id>.py files.
-           Use Read_File_With_Line_Numbers on those DSL modules and confirm the
+           Use Read_File on those DSL modules and confirm the
            final editable file and line for every proposed repair.
         4. You may read "{dsl_dir / 'root.py'}" to understand the complete
            host-generated assembly and how the editable schemas are composed.
@@ -194,13 +194,14 @@ class DatamodelValidationSteps(PeachStepMixin):
                 config=self.diagnosis_agent_config,
                 tool_names={
                     "Read_File",
-                    "Read_File_With_Line_Numbers",
+                    "Search_Files",
                     "RFC_Search",
                     "Write_File",
                 },
                 read_files=_datamodel_diagnosis_read_files(
                     dsl_dir, converted_report_path
                 ),
+                write_files=(report_path,),
             )
             self.call_agent(
                 prompt,
@@ -255,6 +256,7 @@ class DatamodelValidationSteps(PeachStepMixin):
                 config=self.datamodel_autofix_agent_config,
                 tool_names={
                     "Read_File",
+                    "Search_Files",
                     "RFC_Search",
                     "Write_File",
                     "Apply_Patch",
@@ -263,6 +265,7 @@ class DatamodelValidationSteps(PeachStepMixin):
                 read_files=_datamodel_repair_read_files(
                     dsl_dir, diagnosis_path
                 ),
+                write_roots=(dsl_dir,),
             )
 
             UI.warning_rule("Step 3: Applying Datamodel Auto-fix")
@@ -336,7 +339,7 @@ class DatamodelValidationSteps(PeachStepMixin):
             )
             # Validate the manifest, regenerate the derived root, compile the
             # complete DSL, and expose additions to all downstream steps.
-            self.repair_datamodel_assembly(allow_packet_type_additions=True)
+            self._repair_datamodel_assembly(allow_packet_type_additions=True)
 
         self.fix_verify_loop(
             "Step 3: Datamodel Validation & Fix",

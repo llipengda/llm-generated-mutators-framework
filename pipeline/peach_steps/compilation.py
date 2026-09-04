@@ -1,6 +1,6 @@
 import os
 
-from ui import UI
+from core.ui import UI
 from pipeline.peach_steps.common import PeachStepMixin
 
 

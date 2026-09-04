@@ -34,7 +34,7 @@ class ToolUsageLogger(BaseCallbackHandler):
         safe_protocol = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.protocol).strip("._")
         if not safe_protocol:
             safe_protocol = "unknown"
-        root = log_root or Path(__file__).resolve().parent / "logs"
+        root = log_root or Path(__file__).resolve().parent.parent / "logs"
         self.path = root / safe_protocol / "tool_usage.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.session_id = str(uuid4())
@@ -170,14 +170,3 @@ class ToolUsageLogger(BaseCallbackHandler):
                 value = value[:117] + "..."
             parts.append(f"{key}={value}")
         return f" ({', '.join(parts)})" if parts else ""
-
-
-class _LegacyToolLogger:
-    """Compatibility sink for old per-tool logging calls during migration."""
-
-    def log(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
-
-
-# Tool lifecycle logging is now handled centrally by ToolUsageLogger.
-file_logger = _LegacyToolLogger()

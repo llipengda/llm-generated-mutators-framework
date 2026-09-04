@@ -29,7 +29,7 @@ python3 -m venv .venv
     --rfc-path rfc/someip.pdf --rfc-path rfc/someip-sd.pdf
 
 # Peach sanity checks
-.venv/bin/python -m datamodel_dsl mqtt --check
+.venv/bin/python -m core.datamodel_dsl mqtt --check
 ./tests/datamodel/run_datamodel_test.sh mqtt tests/seeds/mqtt
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt tests/seeds/mqtt
 ./tests/peach_fixer/run_peach_fixer_test.sh mqtt tests/seeds/mqtt
@@ -40,28 +40,26 @@ python3 -m venv .venv
 
 No linter or type-checker is configured. A `.env` file with `OPENAI_API_KEY` is required.
 
+## Python typing
+
+Avoid `typing.Any` whenever practical. Prefer precise concrete types, union
+types, `TypedDict`, `Protocol`, type variables, or explicit JSON-compatible
+recursive types. Use `Any` only at an unavoidable untyped third-party boundary,
+keep its scope as narrow as possible, and document why it is required.
+
 ## Architecture
 
 ```
 main.py                  # Peach pipeline CLI entry point (click).
-config.py                # Global mutable state: protocol_name, seed_dir, rfc_paths. Set by build_config_from_args().
-state.py                 # PipelineState persistence (.pipeline_state.json): packet_types, constraints, token usage.
-agent.py                 # LangChain agent factory. Creates ChatOpenAI + tools + MemorySaver checkpoint.
-rag.py                   # RFC retriever: loads PDF/text → splits → FAISS vector store (cached under .cache/rag/).
+core/                    # Runtime core: agent, config, state, RAG, tools, UI, logging, and result types.
 peach_dsl/               # Typed declarative DataModel DSL, Pyright validation, compiler, and error mapping.
-datamodel_dsl.py         # DSL manifest validation, deterministic root generation, and local compilation CLI.
+core/datamodel_dsl.py    # DSL manifest validation, deterministic root generation, and local compilation CLI.
 docs/peach-dsl.md        # Authoritative DSL language reference for agents and developers.
-tools.py                 # Scoped Peach file/DSL tools plus RFC search.
-dotnet_tools.py          # Peach LangChain tools: Search_Class (DLL reflection), Build_DotNet_DLL (mcs compile), Validate_Data.
-ui.py                    # Rich-based console UI + interactive ask_before_step() prompt with 60s auto-continue.
-usage_tracking.py        # TokenUsageTracker callback; accumulates prompt/completion tokens per step.
-log.py                   # Dual logger: rich Console for user, file_logger for tool_usage.log (reset each run).
 pipeline/base.py         # BasePipeline: step orchestration loop, call_agent(), token tracking, state save.
 pipeline/peach.py        # Lightweight PeachPipeline composition root and step ordering.
 pipeline/peach_steps/    # Peach implementations split by discovery, DataModel, mutator, fixer, and compilation steps.
 peach_gen.sh             # Compiles Peach mutators/fixers, generates Pit XML configs and Docker images.
 setup.sh                 # Prerequisite setup: for peach, pulls Docker SDK image and extracts DLLs into peach/sdk/.
-process_peach_txt.py     # Filters peach/peach.txt to keep only Analyzer/DataElement/Relation/Transformer sections.
 ```
 
 ### Peach pipeline steps (C# target)
@@ -87,7 +85,7 @@ derived artifacts and must not be hand-edited.
 ### Key conventions
 
 - **Global config**: `config.py` uses module-level mutable state. `build_config_from_args()` must be called before any getter.
-- **Pipeline state**: Persisted to `.pipeline_state/<proto>.json` (gitignored). Contains `packet_types`, `constraints`, and `token_usage_*`. Atomic writes via temp file + `os.replace()`. On startup, if a saved state exists for the protocol, the user is asked whether to resume or start fresh.
+- **Pipeline state**: Persisted to `logs/<proto>/pipeline_state.json` (gitignored) alongside tool lifecycle logs. Contains `packet_types`, `constraints`, and `token_usage_*`. Atomic writes via temp file + `os.replace()`. Older `.pipeline_state/<proto>.json` files are migrated automatically. On startup, if a saved state exists for the protocol, the user is asked whether to resume or start fresh.
 - **Agent tools**: Agents get scoped file/DSL tools, DLL reflection, C# compilation (`mcs`), data validation, and RFC search as required by each step.
 - **DSL source of truth**: DataModel agents must read `docs/peach-dsl.md`, write only generated DSL modules, and validate them with `Validate_Peach_DSL_Module` / `Validate_Peach_DSL`. Peach runtime scripts continue to consume the compiled `datamodel.xml`.
 - **DataModel report conversion**: Step 3 converts Peach validator report nodes to compact DSL-path text in `datamodel_error_report.txt`. When every `@PacketUnion` candidate is rejected solely by its `packet_type` token, the converter keeps only the candidate that parsed furthest (first on ties); ordinary Unions are not filtered this way. The converter otherwise does not analyze, rank, deduplicate, or filter failures; the diagnosis agent performs root-cause analysis and writes `datamodel_diagnosis.json`. Repair agents read only the final diagnosis and referenced DSL modules.

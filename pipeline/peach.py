@@ -1,8 +1,8 @@
 import os
 from typing import override
 
-from agent import AgentConfig, build_agent_graph
-from config import get_fixer_enabled
+from core.agent import AgentConfig, build_agent_graph
+from core.config import get_fixer_enabled
 from pipeline.base import BasePipeline
 from pipeline.peach_steps import (
     CompilationStep,

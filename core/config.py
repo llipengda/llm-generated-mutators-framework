@@ -3,7 +3,7 @@ from typing import TypedDict
 
 import dotenv
 
-from log import console
+from core.log import console
 
 
 class Config(TypedDict):

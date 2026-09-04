@@ -2,7 +2,7 @@ import json
 import os
 from typing import NotRequired, TypedDict
 
-from ui import UI
+from core.ui import UI
 
 
 class PipelineState(TypedDict):
@@ -42,10 +42,19 @@ def add_step_usage(
         step_bucket[key] += val
 
 def _pipeline_state_path(protocol_name: str) -> str:
-    repo_root = os.path.dirname(__file__)
-    state_dir = os.path.join(repo_root, ".pipeline_state")
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    state_dir = os.path.join(repo_root, "logs", protocol_name)
     os.makedirs(state_dir, exist_ok=True)
-    return os.path.join(state_dir, f"{protocol_name}.json")
+    path = os.path.join(state_dir, "pipeline_state.json")
+
+    # Migrate state created by older versions without interrupting resume.
+    legacy_path = os.path.join(repo_root, ".pipeline_state", f"{protocol_name}.json")
+    if not os.path.exists(path) and os.path.exists(legacy_path):
+        try:
+            os.replace(legacy_path, path)
+        except OSError:
+            pass
+    return path
 
 
 def load_pipeline_state(protocol_name: str) -> PipelineState:

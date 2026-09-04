@@ -15,7 +15,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from ui import UI
+from core.ui import UI
 
 
 _RAG_CACHE_VERSION = 1

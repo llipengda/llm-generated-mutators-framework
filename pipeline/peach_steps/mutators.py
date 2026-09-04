@@ -1,8 +1,8 @@
 import os
 
-from agent import build_agent_graph
+from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
-from ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
+from core.ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
 
 
 class MutatorSteps(PeachStepMixin):

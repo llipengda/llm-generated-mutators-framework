@@ -9,8 +9,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.retrievers import BaseRetriever
 
-from config import get_protocol_name
-from tools import get_tools, make_rfc_search
+from core.config import get_protocol_name
+from core.tools import get_tools, make_rfc_search
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: preserve reasoning_content round-trip through LangChain
@@ -75,6 +75,8 @@ def build_agent_graph(
     config: AgentConfig | None = None,
     tool_names: Collection[str] | None = None,
     read_files: Collection[Path | str] | None = None,
+    write_files: Collection[Path | str] | None = None,
+    write_roots: Collection[Path | str] | None = None,
 ):
     if config is None:
         config = AgentConfig()
@@ -82,8 +84,13 @@ def build_agent_graph(
     llm = ChatOpenAI(temperature=config.temperature, model=config.model)
     rfc_search = make_rfc_search(retriever)
     selected_read_files = None if read_files is None else tuple(read_files)
+    selected_write_files = None if write_files is None else tuple(write_files)
+    selected_write_roots = None if write_roots is None else tuple(write_roots)
     available_tools = [rfc_search] + get_tools(
-        get_protocol_name(), read_files=selected_read_files
+        get_protocol_name(),
+        read_files=selected_read_files,
+        write_files=selected_write_files,
+        write_roots=selected_write_roots,
     )
     if tool_names is None:
         selected_tools = available_tools

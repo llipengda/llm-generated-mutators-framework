@@ -12,7 +12,7 @@ from prompt_toolkit.styles import Style
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from log import console
+from core.log import console
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 

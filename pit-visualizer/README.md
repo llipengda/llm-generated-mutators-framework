@@ -7,7 +7,7 @@ the LLM-Generated Mutators Framework. It can:
 - display the protocol as a packet canvas or a navigable topology tree;
 - inspect and edit element attributes and child fields;
 - follow references, relations, choices, and optional fields;
-- import the JSON output produced by `datamodel_diagnoser.py` and highlight the
+- import the JSON output produced by `core/datamodel_diagnoser.py` and highlight the
   most likely root cause in the model; and
 - export the edited Pit XML.
 
@@ -43,7 +43,7 @@ Generate a diagnosis from the repository root, then use **上传诊断结果** i
 Studio to import the JSON file:
 
 ```bash
-python3 datamodel_diagnoser.py \
+.venv/bin/python -m core.datamodel_diagnoser \
   llm/peach/<proto>/datamodel.xml \
   llm/peach/<proto>/dm_test_logs \
   --output diagnosis.json

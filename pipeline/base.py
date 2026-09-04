@@ -2,7 +2,7 @@ import os
 import threading
 from typing import Callable
 
-from state import (
+from core.state import (
     PipelineState,
     _pipeline_state_path,
     add_step_usage,
@@ -10,20 +10,20 @@ from state import (
     new_usage_bucket,
     save_pipeline_state,
 )
-from config import (
+from core.config import (
     get_protocol_name,
     get_rfc_paths,
     get_seed_dir,
     warn_if_rfc_missing,
 )
-from rag import build_retriever
-from ui import ask_after_fix_failure, ask_before_step, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
+from core.rag import build_retriever
+from core.ui import ask_after_fix_failure, ask_before_step, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.retrievers import BaseRetriever
-from usage_tracking import TokenUsageTracker
-from log import ToolUsageLogger
+from core.usage_tracking import TokenUsageTracker
+from core.log import ToolUsageLogger
 
 class BasePipeline:
     protocol_lower: str

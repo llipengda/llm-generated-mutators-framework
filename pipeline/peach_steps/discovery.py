@@ -1,10 +1,10 @@
 import json
 from pathlib import Path
 
-from agent import build_agent_graph
-from datamodel_dsl import normalize_symbol
+from core.agent import build_agent_graph
+from core.datamodel_dsl import normalize_symbol
 from pipeline.peach_steps.common import PeachStepMixin
-from ui import (
+from core.ui import (
     UI,
     ask_generate_custom_data_elements,
 )
@@ -348,10 +348,12 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             config=self.agent_config,
             tool_names={
                 "Read_File",
+                "Search_Files",
                 "Search_Class",
                 "Build_DotNet_DLL",
                 "Write_File",
             },
+            write_roots=(source_dir,),
         )
         self.call_agent(
             generation_prompt,
