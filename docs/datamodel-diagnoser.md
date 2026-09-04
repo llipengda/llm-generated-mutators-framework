@@ -129,9 +129,3 @@ Round-trip validation also cannot detect every bad model. For example, one
 unbounded Blob can preserve all bytes while hiding the intended field
 structure. The static warnings cover common versions of this problem but are
 necessarily conservative.
-
-## Tests
-
-```bash
-python3 -m unittest -v tests.test_datamodel_diagnoser
-```
