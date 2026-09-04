@@ -8,22 +8,28 @@ LLM-assisted generator that reads one or more RFCs (PDF/text) via RAG, prompts a
 
 ## Build, test, and lint
 
+All Python commands in this repository must use the project virtual environment.
+Use `.venv/bin/python` and `.venv/bin/pip` explicitly; do not run project code,
+tests, or dependency installation with the system Python. If `.venv` does not
+exist yet, create it before continuing.
+
 ```bash
 # Install dependencies
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
 # Setup Peach SDK (requires Docker + mono)
 ./setup.sh
 
 # Run full pipeline (interactive, auto-continues after 60s)
-python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
+.venv/bin/python main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 
 # Multiple RFCs can be specified by repeating --rfc-path
-python3 main.py --protocol someip --seed-dir tests/seeds/someip \
+.venv/bin/python main.py --protocol someip --seed-dir tests/seeds/someip \
     --rfc-path rfc/someip.pdf --rfc-path rfc/someip-sd.pdf
 
 # Peach sanity checks
-python3 -m datamodel_dsl mqtt --check
+.venv/bin/python -m datamodel_dsl mqtt --check
 ./tests/datamodel/run_datamodel_test.sh mqtt tests/seeds/mqtt
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt tests/seeds/mqtt
 ./tests/peach_fixer/run_peach_fixer_test.sh mqtt tests/seeds/mqtt
