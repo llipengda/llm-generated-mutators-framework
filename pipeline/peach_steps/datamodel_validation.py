@@ -191,7 +191,6 @@ class DatamodelValidationSteps(PeachStepMixin):
         """
             diagnosis_agent_graph = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.diagnosis_agent_config,
                 tool_names={
                     "Read_File",
@@ -253,7 +252,6 @@ class DatamodelValidationSteps(PeachStepMixin):
             dsl_dir = diagnosis_path.parent / "datamodel_dsl"
             autofix_agent_graph = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.datamodel_autofix_agent_config,
                 tool_names={
                     "Read_File",

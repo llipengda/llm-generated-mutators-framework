@@ -56,7 +56,7 @@ class PeachPipeline(
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
         )
         self.agent_graph = build_agent_graph(
-            retriever=self.retriever, target="peach", config=self.agent_config
+            retriever=self.retriever, config=self.agent_config
         )
         self.diagnosis_agent_config = AgentConfig(
             temperature=0.0,

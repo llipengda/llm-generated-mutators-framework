@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project overview
 
-LLM-assisted generator that reads one or more RFCs (PDF/text) via RAG, prompts an LLM to produce protocol-aware fuzzing code (C or C#), and iteratively validates/fixes the output. Two targets: **AFLNet** (C) and **Peach** (C#).
+LLM-assisted generator that reads one or more RFCs (PDF/text) via RAG, prompts an LLM to produce protocol-aware C# fuzzing code, and iteratively validates/fixes the output for **Peach**.
 
 ## Build, test, and lint
 
@@ -13,20 +13,14 @@ LLM-assisted generator that reads one or more RFCs (PDF/text) via RAG, prompts a
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 
 # Setup Peach SDK (requires Docker + mono)
-./setup.sh peach
+./setup.sh
 
 # Run full pipeline (interactive, auto-continues after 60s)
 python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
-python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf --target peach
 
 # Multiple RFCs can be specified by repeating --rfc-path
 python3 main.py --protocol someip --seed-dir tests/seeds/someip \
-    --rfc-path rfc/someip.pdf --rfc-path rfc/someip-sd.pdf --target peach
-
-# AFLNet sanity checks
-./tests/PR_mr/mr_test.sh mqtt tests/seeds/mqtt          # parser + reassembler metamorphic tests
-./tests/mutator_sanity/run_mutator_sanity.sh mqtt tests/seeds/mqtt
-./tests/fixer_sanity/run_fixer_sanity.sh mqtt
+    --rfc-path rfc/someip.pdf --rfc-path rfc/someip-sd.pdf
 
 # Peach sanity checks
 python3 -m datamodel_dsl mqtt --check
@@ -43,7 +37,7 @@ No linter or type-checker is configured. A `.env` file with `OPENAI_API_KEY` is 
 ## Architecture
 
 ```
-main.py                  # CLI entry point (click). Routes --target to AFLNetPipeline or PeachPipeline.
+main.py                  # Peach pipeline CLI entry point (click).
 config.py                # Global mutable state: protocol_name, seed_dir, rfc_paths. Set by build_config_from_args().
 state.py                 # PipelineState persistence (.pipeline_state.json): packet_types, constraints, token usage.
 agent.py                 # LangChain agent factory. Creates ChatOpenAI + tools + MemorySaver checkpoint.
@@ -51,33 +45,18 @@ rag.py                   # RFC retriever: loads PDF/text → splits → FAISS ve
 peach_dsl/               # Typed declarative DataModel DSL, Pyright validation, compiler, and error mapping.
 datamodel_dsl.py         # DSL manifest validation, deterministic root generation, and local compilation CLI.
 docs/peach-dsl.md        # Authoritative DSL language reference for agents and developers.
-tools.py                 # AFLNet LangChain tools: Save_And_Verify_Code, Read_File, Append_And_Verify_Code, RFC_Search.
+tools.py                 # Scoped Peach file/DSL tools plus RFC search.
 dotnet_tools.py          # Peach LangChain tools: Search_Class (DLL reflection), Build_DotNet_DLL (mcs compile), Validate_Data.
 ui.py                    # Rich-based console UI + interactive ask_before_step() prompt with 60s auto-continue.
 usage_tracking.py        # TokenUsageTracker callback; accumulates prompt/completion tokens per step.
 log.py                   # Dual logger: rich Console for user, file_logger for tool_usage.log (reset each run).
 pipeline/base.py         # BasePipeline: step orchestration loop, call_agent(), token tracking, state save.
-pipeline/aflnet.py       # 9-step C pipeline (see steps below).
 pipeline/peach.py        # Lightweight PeachPipeline composition root and step ordering.
 pipeline/peach_steps/    # Peach implementations split by discovery, DataModel, mutator, fixer, and compilation steps.
 peach_gen.sh             # Compiles Peach mutators/fixers, generates Pit XML configs and Docker images.
 setup.sh                 # Prerequisite setup: for peach, pulls Docker SDK image and extracts DLLs into peach/sdk/.
 process_peach_txt.py     # Filters peach/peach.txt to keep only Analyzer/DataElement/Relation/Transformer sections.
 ```
-
-### AFLNet pipeline steps (C target)
-
-1. Fetch packet types from RFC
-2. Generate C structs (`_packets.h/.c`) with tagged fields (`/* Fixed */`, `/* Optional */`, `/* Repeatable */`)
-3. Generate parser (`_parser.c`)
-4. Generate reassembler (`_reassembler.c`)
-5. Verify via metamorphic tests (`mr_test.sh`), auto-fix on failure
-6. Generate mutators per packet type (`_mutators.c`)
-7. Mutator sanity check (`run_mutator_sanity.sh`), auto-fix on failure
-8. Extract constraints → generate fixers (`_fixers.c`)
-9. Fixer sanity check (`run_fixer_sanity.sh`), auto-fix on failure
-
-Generated code lands in `llm/<proto>/`.
 
 ### Peach pipeline steps (C# target)
 
@@ -103,12 +82,12 @@ derived artifacts and must not be hand-edited.
 
 - **Global config**: `config.py` uses module-level mutable state. `build_config_from_args()` must be called before any getter.
 - **Pipeline state**: Persisted to `.pipeline_state/<proto>.json` (gitignored). Contains `packet_types`, `constraints`, and `token_usage_*`. Atomic writes via temp file + `os.replace()`. On startup, if a saved state exists for the protocol, the user is asked whether to resume or start fresh.
-- **Agent tools differ by target**: AFLNet gets file I/O + GCC syntax checks; Peach gets DLL reflection, C# compilation (`mcs`), and data validation.
+- **Agent tools**: Agents get scoped file/DSL tools, DLL reflection, C# compilation (`mcs`), data validation, and RFC search as required by each step.
 - **DSL source of truth**: DataModel agents must read `docs/peach-dsl.md`, write only generated DSL modules, and validate them with `Validate_Peach_DSL_Module` / `Validate_Peach_DSL`. Peach runtime scripts continue to consume the compiled `datamodel.xml`.
 - **DataModel report conversion**: Step 3 converts Peach validator report nodes to compact DSL-path text in `datamodel_error_report.txt`. When every `@PacketUnion` candidate is rejected solely by its `packet_type` token, the converter keeps only the candidate that parsed furthest (first on ties); ordinary Unions are not filtered this way. The converter otherwise does not analyze, rank, deduplicate, or filter failures; the diagnosis agent performs root-cause analysis and writes `datamodel_diagnosis.json`. Repair agents read only the final diagnosis and referenced DSL modules.
 - **Peach SDK**: DLLs extracted into `peach/sdk/` by `setup.sh`. The `dotnet_tools.py` module loads them at import time via `clr.AddReference` — if `peach/sdk/` is missing, the import fails.
 - **Token tracking**: Each `call_agent()` creates a local `TokenUsageTracker` (per-invocation, thread-safe). Tracks `prompt_tokens`, `completion_tokens`, `cached_tokens`, and `calls` (LLM API invocations). Summarized at pipeline end.
-- **Model configuration**: Set via environment variables. `LLM_MODEL` / `LLM_TEMPERATURE` apply to both targets. `LLM_PEACH_MODEL` / `LLM_PEACH_TEMPERATURE` override for Peach only. Defaults: AFLNet `gpt-5.2` / 0.0; Peach `gpt-5.4` / 0.7.
+- **Model configuration**: Set via environment variables. `LLM_PEACH_MODEL` / `LLM_PEACH_TEMPERATURE` override `LLM_MODEL` / `LLM_TEMPERATURE`. Defaults: `gpt-5.4` / 0.7.
 - **`fix_verify_loop`**: Generic verify → fix → re-verify loop in `BasePipeline`. Up to 3 auto-retries, then interactive fallback (stop / provide hint and retry). Used by Peach Steps 3 and 5.
 
 ## Sibling project: ../llm-peach

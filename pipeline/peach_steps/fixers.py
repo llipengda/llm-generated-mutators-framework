@@ -132,7 +132,7 @@ class FixerSteps(PeachStepMixin):
             """
 
             agent = build_agent_graph(
-                retriever=self.retriever, target="peach", config=self.agent_config
+                retriever=self.retriever, config=self.agent_config
             )
 
             self.call_agent(
@@ -306,7 +306,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             """
 
             agent = build_agent_graph(
-                retriever=self.retriever, target="peach", config=self.agent_config
+                retriever=self.retriever, config=self.agent_config
             )
 
             self.call_agent(

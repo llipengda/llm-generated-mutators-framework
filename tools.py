@@ -54,45 +54,6 @@ def _peach_output_dir(protocol: str) -> Path:
     return _PROJECT_ROOT / "llm" / "peach" / protocol.lower()
 
 
-@tool("Save_And_Verify_Code")
-def save_and_verify_code(filename: str, complete_c_code: str) -> str:
-    """Save COMPLETE C code to filename and check syntax with GCC."""
-    file_logger.log(
-f"""
-TOOL CALL: save_and_verify_code
-    filename: {filename}
-    c_code: {complete_c_code[:10]}...
-"""
-    )
-
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            clean_code = complete_c_code.replace("```c", "").replace("```", "")
-            f.write(clean_code)
-
-        cmd = ["gcc", "-fsyntax-only", filename]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode == 0:
-            response = f"SUCCESS: Code saved to {filename}. GCC syntax check passed."
-        else:
-            response = (
-                f"WARNING: Saved to {filename}, but GCC found errors:\n{result.stderr}"
-            )
-
-        file_logger.log(
-f"""
-TOOL RESPONSE:
-    {response}
-""")
-        return response
-
-    except Exception as e:
-        return f"ERROR: Failed to write or check file. {str(e)}"
-
-
 def _scoped_read_file(
     filepath: str,
     *,
@@ -137,32 +98,6 @@ TOOL RESPONSE:
         return f"ERROR: Could not read file {filepath}. {str(e)}"
 
 
-@tool("Read_File")
-def read_file(filepath: str, *, line_count: int = -1, start_line: int = 1) -> str:
-    """Read a file and return its content."""
-    file_logger.log(
-f"""
-TOOL CALL: read_file
-    filepath: {filepath}
-    line_count: {line_count}
-    start_line: {start_line}
-"""
-    )
-    try:
-        if os.path.isdir(filepath):
-            files = os.listdir(filepath)
-            response = f"Directory listing for {filepath}:\n" + "\n".join(files)
-            file_logger.log(f"\nTOOL RESPONSE:\n{response}\n")
-            return response
-        with open(filepath, "r", encoding="utf-8") as source:
-            if line_count == -1:
-                return source.read()
-            lines = source.readlines()
-            return "".join(lines[start_line - 1 : start_line - 1 + line_count])
-    except Exception as error:
-        return f"ERROR: Could not read file {filepath}. {error}"
-
-
 def _read_file_with_line_numbers(
     filepath: str,
     *,
@@ -193,41 +128,6 @@ def _read_file_with_line_numbers(
         return f"ERROR: Could not read numbered file {filepath}. {error}"
 
 
-@tool("Append_And_Verify_Code")
-def append_and_verify_code(filepath: str, content_to_append: str) -> str:
-    """Append content to a file and run a GCC syntax check."""
-    file_logger.log(
-f"""
-TOOL CALL: append_and_verify_code
-    filepath: {filepath}
-    content_to_append: {content_to_append[:10]}...
-"""
-    )
-    try:
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-
-        with open(filepath, "a", encoding="utf-8") as f:
-            f.write(content_to_append)
-
-        cmd = ["gcc", "-fsyntax-only", filepath]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            response = f"SUCCESS: Appended to {filepath}. GCC syntax check passed."
-        else:
-            response = (
-                f"WARNING: Appended to {filepath}, but GCC found errors:\n{result.stderr}"
-            )
-
-        file_logger.log(
-f"""
-TOOL RESPONSE:
-    {response}
-""")
-        return response
-
-    except Exception as e:
-        return f"ERROR: Could not append to file {filepath}. {str(e)}"
-    
 def _write_file(filepath: str, content: str, *, output_root: Path) -> str:
     """Write content to a file inside output_root."""
     file_logger.log(
@@ -433,17 +333,11 @@ from dotnet_tools import search_class, build_dotnet_dll, validate_data
 
 
 def get_tools(
-    target: str,
     protocol: str,
     *,
     read_files: tuple[Path | str, ...] | None = None,
 ) -> list[BaseTool]:
-    """Build file tools with target- and protocol-specific path policies."""
-    if target == "aflnet":
-        return [save_and_verify_code, read_file, append_and_verify_code]
-    if target != "peach":
-        raise ValueError(f"Unknown target: {target!r}")
-
+    """Build Peach tools with protocol-specific path policies."""
     output_root = _peach_output_dir(protocol)
     default_read_roots = (output_root,)
     default_read_files = (

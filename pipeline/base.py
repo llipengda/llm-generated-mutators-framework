@@ -10,7 +10,6 @@ from state import (
     new_usage_bucket,
     save_pipeline_state,
 )
-from agent import build_agent_graph
 from config import (
     get_protocol_name,
     get_rfc_paths,
@@ -50,8 +49,6 @@ class BasePipeline:
         warn_if_rfc_missing(rfc_paths)
         retriever = build_retriever(rfc_paths)
 
-        agent_graph = build_agent_graph(retriever=retriever)
-
         config: RunnableConfig = {
             "configurable": {"thread_id": "session_001"},
         }
@@ -89,7 +86,6 @@ class BasePipeline:
             }
 
         self.seed_dir = os.path.abspath(seed_dir)
-        self.agent_graph = agent_graph
         self.retriever = retriever
         self.config = config
         self.state = state
@@ -232,9 +228,6 @@ class BasePipeline:
 
             UI.error(f"{step_title} still failing after manual-hint fix.")
 
-    def new_agent(self):
-        return build_agent_graph(retriever=self.retriever)
-    
     def save_state(self):
         save_pipeline_state(self.state, self.protocol_lower)
 

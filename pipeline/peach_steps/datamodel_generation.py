@@ -209,7 +209,6 @@ class DatamodelGenerationSteps(PeachStepMixin):
             report_path.unlink(missing_ok=True)
             agent = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.agent_config,
                 tool_names={"Read_File", "RFC_Search", "Write_File"},
                 read_files=(Path("docs/peach-dsl.md"),),
@@ -283,7 +282,6 @@ class DatamodelGenerationSteps(PeachStepMixin):
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.agent_config,
                 tool_names={
                     "Read_Shared_DSL_Context", "RFC_Search", "Write_Shared_DSL",
@@ -339,7 +337,6 @@ class DatamodelGenerationSteps(PeachStepMixin):
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.agent_config,
                 tool_names={
                     "Read_File", "RFC_Search", "Write_File", "Apply_Patch",
@@ -458,7 +455,6 @@ class DatamodelGenerationSteps(PeachStepMixin):
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
-                target="peach",
                 config=self.agent_config,
                 tool_names={
                     "Read_File", "RFC_Search", "Write_File", "Apply_Patch",

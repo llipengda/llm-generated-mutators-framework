@@ -63,17 +63,16 @@ class AgentConfig:
         default_factory=lambda: os.environ.get("LLM_MODEL", "gpt-5.2")
     )
     temperature: float = field(
-        default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.0)
+        default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.7)
     )
     system_prompt: str = """
-You are a helpful assistant expert in C programming and protocol fuzzing.
+You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.
 """
 
 def build_agent_graph(
     *,
     retriever: BaseRetriever,
     config: AgentConfig | None = None,
-    target: Literal["aflnet", "peach"] = "aflnet",
     tool_names: Collection[str] | None = None,
     read_files: Collection[Path | str] | None = None,
 ):
@@ -84,7 +83,7 @@ def build_agent_graph(
     rfc_search = make_rfc_search(retriever)
     selected_read_files = None if read_files is None else tuple(read_files)
     available_tools = [rfc_search] + get_tools(
-        target, get_protocol_name(), read_files=selected_read_files
+        get_protocol_name(), read_files=selected_read_files
     )
     if tool_names is None:
         selected_tools = available_tools

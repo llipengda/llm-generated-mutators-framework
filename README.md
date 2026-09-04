@@ -69,7 +69,7 @@ inside the `peach_dsl` directory, install it with `pip install -e .`.
 ### 3. Set up Peach SDK
 
 ```bash
-./setup.sh peach
+./setup.sh
 ```
 
 This step requires Docker and Mono. It:
@@ -82,7 +82,7 @@ This step requires Docker and Mono. It:
 ## Quickstart
 
 ```bash
-python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf --target peach
+python3 main.py --protocol mqtt --seed-dir tests/seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 ```
 
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
@@ -111,7 +111,7 @@ them, without rerunning schema planning or packet generation:
 
 ```bash
 python3 main.py --protocol <protocol> --seed-dir <seed-dir> \
-  --rfc-path <rfc-file> --target peach --repair-datamodel-assembly
+  --rfc-path <rfc-file> --repair-datamodel-assembly
 ```
 
 The command runs strict Pyright syntax/type checking, then reports invalid DSL,
@@ -197,7 +197,7 @@ diagnosis-import instructions.
 
 ## Troubleshooting
 
-- **`peach/sdk/` missing**: run `./setup.sh peach`.
+- **`peach/sdk/` missing**: run `./setup.sh`.
 - **Docker not found**: install Docker Desktop or Docker Engine.
 - **Mono not found**: `brew install mono` on macOS, or `apt install mono-complete` on Linux.
 - **RAG setup fails**: the pipeline still runs without RAG, but RFC grounding will be weaker. Ensure the RFC file exists and `faiss-cpu` is installed.
