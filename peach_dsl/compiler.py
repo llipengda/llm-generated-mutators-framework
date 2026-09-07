@@ -13,6 +13,7 @@ import sys
 import tempfile
 import traceback
 from types import ModuleType
+from typing import Any, cast
 import xml.etree.ElementTree as ET
 
 from .sdk import Schema, evaluate_schema, to_peach_artifacts
@@ -107,9 +108,9 @@ def _run_pyright(path: Path) -> None:
     if result.returncode == 0:
         return
     try:
-        payload = json.loads(result.stdout)
+        payload = cast(dict[str, Any], json.loads(result.stdout))
         diagnostics = payload.get("generalDiagnostics", [])
-        messages = []
+        messages: list[str] = []
         for diagnostic in diagnostics:
             location = diagnostic.get("range", {}).get("start", {})
             line = int(location.get("line", 0)) + 1

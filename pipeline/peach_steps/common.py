@@ -2,20 +2,13 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Callable, Protocol, TypedDict
+from typing import Any, Callable
 
 from core.agent import AgentConfig
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
 from core.state import PipelineState
-
-
-class AgentMessage(Protocol):
-    content: str
-
-
-class AgentResponse(TypedDict):
-    messages: list[AgentMessage]
+from core.agent_types import AgentResponse
 
 
 class PeachStepMixin:
@@ -39,10 +32,10 @@ class PeachStepMixin:
     def _data_type_paths(self) -> tuple[Path, Path, Path]:
         raise NotImplementedError
 
-    def _load_data_type_analysis(self, report_path: Path) -> dict:
+    def _load_data_type_analysis(self, report_path: Path) -> dict[str, Any]:
         raise NotImplementedError
 
-    def _finalize_data_type_support(self, report: dict) -> None:
+    def _finalize_data_type_support(self, report: dict[str, Any]) -> None:
         raise NotImplementedError
 
     def _custom_data_element_context(self) -> str:
@@ -54,7 +47,7 @@ class PeachStepMixin:
         raise NotImplementedError
 
 
-_DATAMODEL_MODELING_GUARDRAILS = """
+DATAMODEL_MODELING_GUARDRAILS = """
 DataModel structural, fixed-value, and generalization rules:
 - Model RFC-defined length and count relationships whenever the documented DSL
   can express them. Connect a length/count field to the data it governs with
@@ -99,7 +92,7 @@ DataModel structural, fixed-value, and generalization rules:
 """
 
 
-_DATAMODEL_DSL_SOURCE_STYLE = """
+DATAMODEL_DSL_SOURCE_STYLE = """
 DSL source style rules:
 - Keep generated DSL modules compact and code-focused. Do not write module,
   class, or helper-function docstrings; section banners; separator lines; RFC
@@ -115,7 +108,7 @@ DSL source style rules:
 """
 
 
-def _env_float(key: str, default: float) -> float:
+def env_float(key: str, default: float) -> float:
     val = os.environ.get(key)
     if val is None:
         return default
@@ -125,7 +118,7 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
-def _env_int(key: str, default: int) -> int:
+def env_int(key: str, default: int) -> int:
     val = os.environ.get(key)
     if val is None:
         return default

@@ -1,18 +1,31 @@
 import json
 from pathlib import Path
-import subprocess
 
 from core.agent import build_agent_graph
-from peach_dsl.error_report import convert_reports_subprocess
 from pipeline.peach_steps.common import (
     PeachStepMixin,
-    _DATAMODEL_DSL_SOURCE_STYLE,
-    _DATAMODEL_MODELING_GUARDRAILS,
+    DATAMODEL_DSL_SOURCE_STYLE,
+    DATAMODEL_MODELING_GUARDRAILS,
 )
 from core.ui import UI, ask_reuse_diagnosis
 
 
 _PEACH_DSL_GUIDE = Path(__file__).resolve().parents[2] / "docs" / "peach-dsl.md"
+
+
+def _validator_summary(output: str) -> str | None:
+    return next(
+        (
+            line.strip()
+            for line in reversed(output.splitlines())
+            if "tests passed." in line
+            and (
+                line.strip().startswith("[PASS]")
+                or line.strip().startswith("[FAIL]")
+            )
+        ),
+        None,
+    )
 
 
 def _datamodel_repair_read_files(
@@ -52,12 +65,12 @@ class DatamodelValidationSteps(PeachStepMixin):
             cmd, title="Running Datamodel Tests"
         )
 
-        last_line = result.stdout.strip().split("\n")[-1]
-        UI.panel(f"Result: [bold]{last_line}[/bold]")
+        summary = _validator_summary(result.stdout)
+        UI.panel(f"Result: [bold]{summary or 'validator failed'}[/bold]")
 
-        if "[FAIL]" in last_line:
+        if summary is not None and summary.startswith("[FAIL]"):
             return False, result.stdout
-        if "[PASS]" in last_line:
+        if summary is not None and summary.startswith("[PASS]"):
             return True, result.stdout
 
         return (
@@ -81,30 +94,12 @@ class DatamodelValidationSteps(PeachStepMixin):
 
         try:
             report_path.unlink(missing_ok=True)
-            converted_report_path.unlink(missing_ok=True)
             (output_dir / "datamodel_error_report.json").unlink(missing_ok=True)
-            validator_summary = next(
-                (
-                    line.strip()
-                    for line in reversed(test_output.splitlines())
-                    if line.strip()
-                ),
-                "validator failed",
-            )
-            try:
-                conversion = convert_reports_subprocess(
-                    dsl_dir / "root.py",
-                    log_dir,
-                    converted_report_path,
-                )
-            except subprocess.TimeoutExpired as error:
+            validator_summary = _validator_summary(test_output) or "validator failed"
+            if not converted_report_path.is_file():
                 raise RuntimeError(
-                    f"DSL error report conversion timed out after {error.timeout} seconds"
-                ) from error
-            if conversion.returncode != 0:
-                diagnostics = (conversion.stdout + conversion.stderr).strip()
-                raise RuntimeError(
-                    "DSL error report conversion failed: " + diagnostics
+                    "Datamodel test script did not generate the DSL error report: "
+                    f"{converted_report_path}"
                 )
             prompt = f"""
         Diagnose the failed {self.protocol_name} Peach DataModel.
@@ -146,7 +141,7 @@ class DatamodelValidationSteps(PeachStepMixin):
         module (line 1 and the proposed packet schema symbol are acceptable).
         Do not relabel a malformed instance of an existing type as a new type.
 
-        {_DATAMODEL_MODELING_GUARDRAILS}
+        {DATAMODEL_MODELING_GUARDRAILS}
 
         A converted failure observation proves that a particular seed failed;
         it does not prove
@@ -312,9 +307,9 @@ class DatamodelValidationSteps(PeachStepMixin):
         any other issue. The diagnosis report is the sole source of failure
         evidence for this repair.
 
-        {_DATAMODEL_MODELING_GUARDRAILS}
+        {DATAMODEL_MODELING_GUARDRAILS}
 
-        {_DATAMODEL_DSL_SOURCE_STYLE}
+        {DATAMODEL_DSL_SOURCE_STYLE}
 
         For an existing declaration, use `fixed(...)` only when the diagnosis
         explicitly identifies the field as an exact RFC-mandated fixed value or

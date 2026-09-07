@@ -1,9 +1,14 @@
-import clr
+import importlib
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
-from System.Reflection import BindingFlags, MemberTypes  # type: ignore
+# pythonnet exposes the CLR reflection surface dynamically and does not ship
+# Pyright stubs. Keep that untyped boundary here rather than leaking Unknown
+# through the rest of the tool implementation.
+clr: Any = importlib.import_module("clr")
+_reflection: Any = importlib.import_module("System.Reflection")
 from core.tool_result import (
     ClassSearchData,
     DotNetBuildData,
@@ -12,21 +17,25 @@ from core.tool_result import (
     tool_success,
 )
 
+BindingFlags: Any = _reflection.BindingFlags
+MemberTypes: Any = _reflection.MemberTypes
+
 
 class MultiAssemblyInspector:
-    def __init__(self, target_paths: list):
-        self.all_types = []
-        self.loaded_assemblies = []
+    def __init__(self, target_paths: list[str | Path]):
+        self.all_types: list[Any] = []
+        self.loaded_assemblies: list[Any] = []
 
         for path in target_paths:
-            if os.path.isdir(path):
-                for file in os.listdir(path):
+            path_string = str(path)
+            if os.path.isdir(path_string):
+                for file in os.listdir(path_string):
                     if file.endswith(".dll"):
-                        self._load_assembly(os.path.join(path, file))
-            elif os.path.isfile(path) and path.endswith(".dll"):
-                self._load_assembly(path)
+                        self._load_assembly(os.path.join(path_string, file))
+            elif os.path.isfile(path_string) and path_string.endswith(".dll"):
+                self._load_assembly(path_string)
 
-    def _load_assembly(self, dll_path: str):
+    def _load_assembly(self, dll_path: str) -> None:
         try:
             full_path = os.path.abspath(dll_path)
             dll_dir = os.path.dirname(full_path)
@@ -41,7 +50,7 @@ class MultiAssemblyInspector:
         except Exception as e:
             print(f"Skipped {os.path.basename(dll_path)}: {str(e)[:80]}...")
 
-    def _format_type_name(self, t) -> str:
+    def _format_type_name(self, t: Any) -> str:
         if t is None:
             return "void"
         if not hasattr(t, "IsGenericType") or not t.IsGenericType:
@@ -50,15 +59,15 @@ class MultiAssemblyInspector:
             args = ", ".join([arg.Name for arg in t.GetGenericArguments()])
             base_name = t.Name.split("`")[0]
             return f"{base_name}<{args}>"
-        except:
+        except Exception:
             return t.Name
 
-    def _get_inheritance_info(self, target_type) -> list:
+    def _get_inheritance_info(self, target_type: Any) -> list[str]:
         """Extracts the base class hierarchy and implemented interfaces."""
-        info = []
+        info: list[str] = []
 
         # 1. Base Class Hierarchy
-        hierarchy = []
+        hierarchy: list[str] = []
         current = target_type.BaseType
         while current:
             hierarchy.append(current.FullName or current.Name)
@@ -78,7 +87,7 @@ class MultiAssemblyInspector:
 
         return info
 
-    def _get_member_sig(self, m) -> str:
+    def _get_member_sig(self, m: Any) -> str:
         try:
             if m.MemberType == MemberTypes.Method:
                 params = ", ".join(
@@ -89,7 +98,7 @@ class MultiAssemblyInspector:
                 )
                 return f"{self._format_type_name(m.ReturnType)} {m.Name}({params})"
             elif m.MemberType == MemberTypes.Property:
-                access = []
+                access: list[str] = []
                 if m.CanRead:
                     access.append("get;")
                 if m.CanWrite:
@@ -105,7 +114,7 @@ class MultiAssemblyInspector:
                     ]
                 )
                 return f".ctor({params})"
-        except:
+        except Exception:
             return f"{m.Name} (Parsing failed)"
         return m.Name
 
@@ -157,11 +166,16 @@ if not os.path.exists("./peach/sdk/"):
 
 inspector = MultiAssemblyInspector(["./peach/sdk/"])
 
-from langchain_core.tools import tool
+import langchain_core.tools as _langchain_tools
 from core.log import console
 
 
 import threading
+
+# LangChain's decorator preserves an unknown callable signature. It is an
+# external decorator boundary; decorated functions retain their explicit
+# return types below.
+tool: Any = getattr(_langchain_tools, "tool")
 
 _search_lock = threading.Lock()
 

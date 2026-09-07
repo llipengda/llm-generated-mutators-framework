@@ -12,7 +12,7 @@ from pipeline.peach_steps import (
     MutatorSteps,
     ProtocolDiscoverySteps,
 )
-from pipeline.peach_steps.common import _env_float
+from pipeline.peach_steps.common import env_float
 
 
 class PeachPipeline(
@@ -51,7 +51,7 @@ class PeachPipeline(
             self.save_state()
         peach_model = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
         self.agent_config = AgentConfig(
-            temperature=_env_float("LLM_PEACH_TEMPERATURE", _env_float("LLM_TEMPERATURE", 0.7)),
+            temperature=env_float("LLM_PEACH_TEMPERATURE", env_float("LLM_TEMPERATURE", 0.7)),
             model=peach_model,
             system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
         )

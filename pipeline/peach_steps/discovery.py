@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any, TypeGuard, cast
 
 from core.agent import build_agent_graph
 from core.datamodel_dsl import normalize_symbol
@@ -10,8 +11,29 @@ from core.ui import (
 )
 
 
+def _is_string_record(value: object, keys: tuple[str, ...]) -> TypeGuard[dict[str, str]]:
+    if not isinstance(value, dict):
+        return False
+    record = cast(dict[object, object], value)
+    for key in keys:
+        item = record.get(key)
+        if not isinstance(item, str) or not item.strip():
+            return False
+    return True
+
+
+def _is_custom_element_list(value: object) -> TypeGuard[list[dict[str, str]]]:
+    if not isinstance(value, list):
+        return False
+    items = cast(list[object], value)
+    return bool(items) and all(
+        _is_string_record(item, ("wire_type", "element_name", "class_name"))
+        for item in items
+    )
+
+
 class ProtocolDiscoverySteps(PeachStepMixin):
-    def step_1_packet_types_extraction(self):
+    def step_1_packet_types_extraction(self) -> None:
         UI.title("Step 1: Packet Types Extraction")
 
         step1_prompt = f"""
@@ -28,7 +50,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
 
         response = self.call_agent(step1_prompt, "Step 1: Packet Types Extraction")
 
-        packet_types_raw = response["messages"][-1].content
+        packet_types_raw = str(getattr(response["messages"][-1], "content"))
         packet_types = [t.strip() for t in packet_types_raw.split(",") if t.strip()]
         self.state["packet_types"] = packet_types
         self.save_state()
@@ -74,16 +96,20 @@ class ProtocolDiscoverySteps(PeachStepMixin):
                 "custom Peach DataElement compilation failed:\n" + diagnostics[-12000:]
             )
 
-    def _load_data_type_analysis(self, report_path: Path) -> dict:
+    def _load_data_type_analysis(self, report_path: Path) -> dict[str, Any]:
         with report_path.open("r", encoding="utf-8") as report_file:
-            report = json.load(report_file)
-        if not isinstance(report, dict) or report.get("protocol") != self.protocol_lower:
+            raw_report: object = json.load(report_file)
+        if not isinstance(raw_report, dict):
+            raise ValueError("data type analysis must be an object")
+        report = cast(dict[str, Any], raw_report)
+        if report.get("protocol") != self.protocol_lower:
             raise ValueError("data type analysis has an invalid protocol")
         if report.get("packet_types") != (self.state.get("packet_types") or []):
             raise ValueError("data type analysis packet type scope is stale")
-        types = report.get("unsupported_types")
-        if not isinstance(types, list):
+        raw_types = report.get("unsupported_types")
+        if not isinstance(raw_types, list):
             raise ValueError("data type analysis must contain an unsupported_types list")
+        types = cast(list[object], raw_types)
         required = {
             "wire_type",
             "used_by_fields",
@@ -95,13 +121,16 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             "confidence",
             "custom_type",
         }
-        seen = set()
-        deduplicated_types = []
-        custom_by_symbol: dict[str, dict] = {}
-        custom_by_element: dict[str, dict] = {}
+        seen: set[str] = set()
+        deduplicated_types: list[dict[str, Any]] = []
+        custom_by_symbol: dict[str, dict[str, Any]] = {}
+        custom_by_element: dict[str, dict[str, Any]] = {}
         custom_prefix = normalize_symbol(self.protocol_lower)
-        for index, item in enumerate(types):
-            if not isinstance(item, dict) or not required.issubset(item):
+        for index, raw_item in enumerate(types):
+            if not isinstance(raw_item, dict):
+                raise ValueError(f"data type analysis item {index + 1} has an invalid schema")
+            item = cast(dict[str, Any], raw_item)
+            if not required.issubset(item):
                 raise ValueError(f"data type analysis item {index + 1} has an invalid schema")
             if item["confidence"] not in {"high", "medium", "low"}:
                 raise ValueError(f"data type analysis item {index + 1} has invalid confidence")
@@ -113,7 +142,10 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             if (
                 not isinstance(used_by_fields, list)
                 or not used_by_fields
-                or any(not isinstance(field, str) or not field.strip() for field in used_by_fields)
+                or any(
+                    not isinstance(field, str) or not field.strip()
+                    for field in cast(list[object], used_by_fields)
+                )
             ):
                 raise ValueError(
                     f"data type analysis item {index + 1} has invalid used_by_fields"
@@ -123,15 +155,14 @@ class ProtocolDiscoverySteps(PeachStepMixin):
                     raise ValueError(
                         f"data type analysis item {index + 1} has an empty {field}"
                     )
-            custom_type = item["custom_type"]
-            if not isinstance(custom_type, dict) or not all(
-                isinstance(custom_type.get(field), str)
-                and custom_type[field].strip()
-                for field in ("symbol", "element_name", "value_type")
+            custom_type_value: object = item["custom_type"]
+            if not _is_string_record(
+                custom_type_value, ("symbol", "element_name", "value_type")
             ):
                 raise ValueError(
                     f"data type analysis item {index + 1} needs a custom_type contract"
                 )
+            custom_type = custom_type_value
             if custom_type["value_type"] not in {"int", "float", "str", "bytes"}:
                 raise ValueError(
                     f"data type analysis item {index + 1} has invalid custom value_type"
@@ -157,10 +188,10 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         report["unsupported_types"] = deduplicated_types
         return report
 
-    def _data_type_summary(self, report: dict) -> str:
+    def _data_type_summary(self, report: dict[str, Any]) -> str:
         if not report["unsupported_types"]:
             return "No unsupported protocol field encodings were found."
-        lines = []
+        lines: list[str] = []
         for item in report["unsupported_types"]:
             lines.append(
                 f"- **{item['wire_type']}** ({item['confidence']} confidence): "
@@ -176,7 +207,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         catalog_path = Path("peach") / "peach.txt"
         lines = catalog_path.read_text(encoding="utf-8").splitlines()
         in_elements = False
-        names = set()
+        names: set[str] = set()
         for line in lines:
             if line.startswith("-----Data Element"):
                 in_elements = True
@@ -192,27 +223,21 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         return names
 
     def _reusable_custom_elements(
-        self, source_dir: Path, dll_path: Path, unsupported: list[dict]
-    ) -> list[dict] | None:
+        self, source_dir: Path, dll_path: Path, unsupported: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
         """Return an existing custom runtime manifest when it matches this plan."""
         manifest_path = source_dir / "manifest.json"
         if not manifest_path.is_file():
             return None
         try:
-            custom_elements = json.loads(manifest_path.read_text(encoding="utf-8"))
+            raw_custom_elements: object = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
         except (OSError, json.JSONDecodeError):
             return None
-        if not isinstance(custom_elements, list) or not custom_elements:
+        if not _is_custom_element_list(raw_custom_elements):
             return None
-        if any(
-            not isinstance(item, dict)
-            or not all(
-                isinstance(item.get(key), str) and item[key].strip()
-                for key in ("wire_type", "element_name", "class_name")
-            )
-            for item in custom_elements
-        ):
-            return None
+        custom_elements = raw_custom_elements
         planned_names = {
             item["custom_type"]["element_name"] for item in unsupported
         }
@@ -229,7 +254,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             return None
         return custom_elements
 
-    def _finalize_data_type_support(self, report: dict) -> None:
+    def _finalize_data_type_support(self, report: dict[str, Any]) -> None:
         """Validate a planning audit and prepare any required ExtendedType runtime."""
         report_path, source_dir, dll_path = self._data_type_paths()
         UI.result_markdown("DSL Basic Data Type Support", self._data_type_summary(report))
@@ -371,18 +396,14 @@ class ProtocolDiscoverySteps(PeachStepMixin):
                 "custom DataElement generation left the manifest artifact unchanged"
             )
         with manifest_path.open("r", encoding="utf-8") as manifest_file:
-            custom_elements = json.load(manifest_file)
+            raw_custom_elements: object = json.load(manifest_file)
         if (
-            not isinstance(custom_elements, list)
-            or len(custom_elements) != len(unsupported)
-            or any(
-                not isinstance(item, dict)
-                or not all(isinstance(item.get(key), str) and item[key].strip()
-                           for key in ("wire_type", "element_name", "class_name"))
-                for item in custom_elements
-            )
-            or len({item["element_name"] for item in custom_elements}) != len(custom_elements)
+            not _is_custom_element_list(raw_custom_elements)
+            or len(raw_custom_elements) != len(unsupported)
         ):
+            raise RuntimeError(f"invalid custom DataElement manifest: {manifest_path}")
+        custom_elements = raw_custom_elements
+        if len({item["element_name"] for item in custom_elements}) != len(custom_elements):
             raise RuntimeError(f"invalid custom DataElement manifest: {manifest_path}")
         if {item["wire_type"].casefold() for item in custom_elements} != {
             item["wire_type"].casefold() for item in unsupported

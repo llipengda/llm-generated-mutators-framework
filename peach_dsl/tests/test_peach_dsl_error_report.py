@@ -247,7 +247,13 @@ class PeachErrorReportTests(unittest.TestCase):
             converted,
         )
         self.assertIn("                ! ERROR category=token_mismatch", converted)
-        self.assertIn('MISMATCH seed="ssh_channel_shell.raw"', converted)
+        self.assertIn(
+            'MISMATCH seed="ssh_channel_shell.raw" '
+            'lengths=24/0 diff=0 window=0:24\n'
+            'original=00000014046200000000000000057368656C6C01F697761C\n'
+            '**parsed=\n',
+            converted,
+        )
 
     def test_reports_optional_condition_errors_and_filters_packet_type_cascades(self) -> None:
         converted = format_dsl_error_reports(

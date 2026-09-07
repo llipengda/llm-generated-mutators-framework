@@ -5,13 +5,13 @@ from pipeline.peach_steps.common import PeachStepMixin
 
 
 class CompilationStep(PeachStepMixin):
-    def step_final_compile(self):
+    def step_final_compile(self) -> None:
         UI.title("Final Compilation")
 
         import glob
         import subprocess
 
-        cs_files = []
+        cs_files: list[str] = []
         mutators_dir = f"./llm/peach/{self.protocol_lower}/Mutators/"
         fixers_dir = f"./llm/peach/{self.protocol_lower}/Fixers/"
 

@@ -7,8 +7,10 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any, Callable, cast
 
-from langchain_core.tools import BaseTool, tool
+import langchain_core.tools as _langchain_tools
+from langchain_core.tools import BaseTool
 from langchain_core.retrievers import BaseRetriever
 
 from core.tool_result import (
@@ -34,6 +36,7 @@ from core.tool_result import (
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _MAX_SEARCH_FILE_BYTES = 1_000_000
 _MAX_SEARCH_FILES = 2_000
+tool: Any = getattr(_langchain_tools, "tool")
 def _filesystem_error(
     operation: str,
     filepath: str,
@@ -422,19 +425,21 @@ def validate_peach_xml(xml_path: str) -> ToolResult[XmlValidationData]:
             if not manifest.is_file():
                 continue
             try:
-                entries = json.loads(manifest.read_text(encoding="utf-8"))
+                entries = cast(
+                    list[dict[str, Any]],
+                    json.loads(manifest.read_text(encoding="utf-8")),
+                )
                 custom_names = {
-                    item["element_name"]
+                    cast(str, item["element_name"])
                     for item in entries
-                    if isinstance(item, dict)
-                    and isinstance(item.get("element_name"), str)
+                    if isinstance(item.get("element_name"), str)
                 }
             except (OSError, json.JSONDecodeError):
                 custom_names = set()
             break
         try:
             parsed_root = ET.parse(document).getroot()
-            used_custom = {
+            used_custom: set[str] = {
                 node.tag.rsplit("}", 1)[-1]
                 for node in parsed_root.iter()
                 if node.tag.rsplit("}", 1)[-1] in custom_names
@@ -722,7 +727,12 @@ def get_tools(
                     "Peach DSL compilation failed for "
                     f"{entry}.\n{(result.stdout + result.stderr).strip()}",
                 )
-            xsd_result = validate_peach_xml.invoke({"xml_path": str(output)})
+            xsd_result = cast(
+                ToolResult[XmlValidationData],
+                cast(
+                    Callable[..., object], getattr(validate_peach_xml, "invoke")
+                )({"xml_path": str(output)}),
+            )
             if not xsd_result.get("ok", False):
                 return tool_error(
                     "dsl_xml_invalid",

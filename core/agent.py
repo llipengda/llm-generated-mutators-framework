@@ -1,15 +1,16 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Collection, Mapping, Literal
+from typing import Any, Callable, Collection, Mapping, Literal, cast
 
-from langchain.agents import create_agent
+import langchain.agents as _langchain_agents
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.retrievers import BaseRetriever
 
 from core.config import get_protocol_name
+from core.agent_types import AgentGraph
 from core.tools import get_tools, make_rfc_search
 
 # ---------------------------------------------------------------------------
@@ -17,8 +18,14 @@ from core.tools import get_tools, make_rfc_search
 # ---------------------------------------------------------------------------
 import langchain_openai.chat_models.base as _lc_base
 
-_original_dict_to_message = _lc_base._convert_dict_to_message
-_original_message_to_dict = _lc_base._convert_message_to_dict
+_original_dict_to_message = cast(
+    Callable[[Mapping[str, Any]], BaseMessage],
+    getattr(_lc_base, "_convert_dict_to_message"),
+)
+_original_message_to_dict = cast(
+    Callable[[BaseMessage, Literal["chat/completions", "responses"]], dict[str, Any]],
+    getattr(_lc_base, "_convert_message_to_dict"),
+)
 
 
 def _patched_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
@@ -26,24 +33,28 @@ def _patched_dict_to_message(_dict: Mapping[str, Any]) -> BaseMessage:
     if isinstance(msg, AIMessage):
         reasoning = _dict.get("reasoning_content")
         if reasoning:
-            msg.additional_kwargs["reasoning_content"] = reasoning
+            cast(dict[str, Any], getattr(msg, "additional_kwargs"))[
+                "reasoning_content"
+            ] = reasoning
     return msg
 
 
 def _patched_message_to_dict(
     message: BaseMessage,
     api: Literal["chat/completions", "responses"] = "chat/completions",
-) -> dict:
+) -> dict[str, Any]:
     msg_dict = _original_message_to_dict(message, api)
     if isinstance(message, AIMessage):
-        reasoning = message.additional_kwargs.get("reasoning_content")
+        reasoning = cast(dict[str, Any], getattr(message, "additional_kwargs")).get(
+            "reasoning_content"
+        )
         if reasoning:
             msg_dict["reasoning_content"] = reasoning
     return msg_dict
 
 
-_lc_base._convert_dict_to_message = _patched_dict_to_message
-_lc_base._convert_message_to_dict = _patched_message_to_dict
+setattr(_lc_base, "_convert_dict_to_message", _patched_dict_to_message)
+setattr(_lc_base, "_convert_message_to_dict", _patched_message_to_dict)
 # ---------------------------------------------------------------------------
 
 
@@ -77,7 +88,7 @@ def build_agent_graph(
     read_files: Collection[Path | str] | None = None,
     write_files: Collection[Path | str] | None = None,
     write_roots: Collection[Path | str] | None = None,
-):
+) -> AgentGraph:
     if config is None:
         config = AgentConfig()
 
@@ -102,9 +113,10 @@ def build_agent_graph(
 
     memory = MemorySaver()
 
-    return create_agent(
+    create_agent = cast(Callable[..., object], getattr(_langchain_agents, "create_agent"))
+    return cast(AgentGraph, create_agent(
         model=llm,
         tools=selected_tools,
         checkpointer=memory,
         system_prompt=config.system_prompt
-    )
+    ))

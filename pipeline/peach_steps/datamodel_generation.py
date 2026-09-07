@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+from typing import Any, Callable, cast
 
 from core.agent import build_agent_graph
 from core.datamodel_dsl import (
@@ -12,9 +13,9 @@ from core.datamodel_dsl import (
 )
 from peach_dsl.compiler import DSLValidationError, validate_dsl_dependencies
 from pipeline.peach_steps.common import (
-    _DATAMODEL_DSL_SOURCE_STYLE,
-    _DATAMODEL_MODELING_GUARDRAILS,
-    _env_int,
+    DATAMODEL_DSL_SOURCE_STYLE,
+    DATAMODEL_MODELING_GUARDRAILS,
+    env_int,
     PeachStepMixin,
 )
 from core.tools import validate_peach_xml
@@ -65,7 +66,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
 
     def _prepare_dsl_contract(
         self, packet_types: list[str], dsl_dir: Path, group_size: int
-    ) -> dict:
+    ) -> dict[str, Any]:
         manifest_path = dsl_dir / "schema_manifest.json"
         report_path, _, _ = self._data_type_paths()
         custom_prefix = normalize_symbol(self.protocol_lower)
@@ -240,7 +241,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
 
     def _generate_dsl_modules(
         self,
-        manifest: dict,
+        manifest: dict[str, Any],
         dsl_dir: Path,
     ) -> None:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -275,9 +276,9 @@ class DatamodelGenerationSteps(PeachStepMixin):
             invent a naming decorator. Do not define packet models, packet union,
             ROOT, or family-local structures.
 
-            {_DATAMODEL_MODELING_GUARDRAILS}
+            {DATAMODEL_MODELING_GUARDRAILS}
 
-            {_DATAMODEL_DSL_SOURCE_STYLE}
+            {DATAMODEL_DSL_SOURCE_STYLE}
 
             Do not perform I/O or import any non-DSL module. Call
             Validate_Peach_DSL_Module after writing, repair at most three times,
@@ -310,7 +311,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             validate_dsl_dependencies(shared_path)
             return shared_path
 
-        def generate_family(group: dict, index: int) -> Path:
+        def generate_family(group: dict[str, Any], index: int) -> Path:
             family_path = dsl_dir / f"family_{group['id']}.py"
             family_path.unlink(missing_ok=True)
             prompt = f"""
@@ -337,9 +338,9 @@ class DatamodelGenerationSteps(PeachStepMixin):
             do not express them with a DSL decorator. Do not define shared models,
             packet union, packet array, or ROOT.
 
-            {_DATAMODEL_MODELING_GUARDRAILS}
+            {DATAMODEL_MODELING_GUARDRAILS}
 
-            {_DATAMODEL_DSL_SOURCE_STYLE}
+            {DATAMODEL_DSL_SOURCE_STYLE}
 
             Call Validate_Peach_DSL_Module after writing and use Apply_Patch to
             repair type or syntax failures, at most three times. Never modify
@@ -369,13 +370,13 @@ class DatamodelGenerationSteps(PeachStepMixin):
             validate_dsl_dependencies(family_path)
             return family_path
 
-        workers = max(1, _env_int("LLM_PEACH_DATAMODEL_WORKERS", 6))
+        workers = max(1, env_int("LLM_PEACH_DATAMODEL_WORKERS", 6))
         if not self._reuse_existing_dsl_component(
             shared_path, "shared DSL model"
         ):
             generate_shared()
 
-        pending_families = []
+        pending_families: list[tuple[dict[str, Any], int]] = []
         for index, group in enumerate(manifest["packet_groups"]):
             family_path = dsl_dir / f"family_{group['id']}.py"
             component_name = f"DSL family {group['id']}"
@@ -398,13 +399,13 @@ class DatamodelGenerationSteps(PeachStepMixin):
     def _compile_with_repair(
         self,
         packet_types: list[str],
-        manifest: dict,
+        manifest: dict[str, Any],
         dsl_dir: Path,
         output_dir: Path,
         group_size: int,
-    ) -> dict:
+    ) -> dict[str, Any]:
         manifest_path = dsl_dir / "schema_manifest.json"
-        retries = max(0, _env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2))
+        retries = max(0, env_int("LLM_PEACH_DATAMODEL_ASSEMBLY_RETRIES", 2))
         for attempt in range(retries + 1):
             root_path = write_root_module(dsl_dir, self.protocol_lower, manifest)
             error = "unknown DSL integration error"
@@ -425,9 +426,14 @@ class DatamodelGenerationSteps(PeachStepMixin):
                 if compiler_output:
                     UI.dim(f"DSL XML compiler output:\n{compiler_output}")
                 UI.dim(f"Validating compiled Peach XML: {output_path}")
-                xsd_result = validate_peach_xml.invoke(
+                xsd_result = cast(
+                    dict[str, Any],
+                    cast(
+                        Callable[..., object], getattr(validate_peach_xml, "invoke")
+                    )(
                     {"xml_path": str(output_path)},
                     config={"callbacks": [self.tool_usage_logger]},
+                    ),
                 )
                 if xsd_result.get("ok", False):
                     UI.success(f"DSL compiled to {output_path}")
@@ -460,7 +466,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             editing an existing file, then call
             Validate_Peach_DSL_Module on each changed module. Never write XML.
 
-            {_DATAMODEL_DSL_SOURCE_STYLE}
+            {DATAMODEL_DSL_SOURCE_STYLE}
             """
             agent = build_agent_graph(
                 retriever=self.retriever,
@@ -505,7 +511,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             added = self._packet_type_additions(previous_packet_types, packet_types)
         group_size = max(
             max((len(group.get("packet_types", [])) for group in raw["packet_groups"]), default=1),
-            _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4),
+            env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4),
         )
         manifest, warning = load_manifest(
             manifest_path, self.protocol_lower, packet_types, group_size
@@ -531,7 +537,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
         output_dir = Path("./llm/peach") / self.protocol_lower
         dsl_dir = output_dir / "datamodel_dsl"
         dsl_dir.mkdir(parents=True, exist_ok=True)
-        group_size = max(1, _env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4))
+        group_size = max(1, env_int("LLM_PEACH_DATAMODEL_GROUP_SIZE", 4))
         manifest = self._prepare_dsl_contract(packet_types, dsl_dir, group_size)
         self._generate_dsl_modules(manifest, dsl_dir)
         self._compile_with_repair(

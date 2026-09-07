@@ -1,13 +1,13 @@
 import json
 import os
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 
 from core.ui import UI
 
 
 class PipelineState(TypedDict):
     packet_types: list[str]
-    data_type_analysis: dict
+    data_type_analysis: dict[str, Any]
     constraints: str
     token_usage_total: dict[str, int]
     token_usage_by_step: dict[str, dict[str, int]]
@@ -41,7 +41,7 @@ def add_step_usage(
         total[key] += val
         step_bucket[key] += val
 
-def _pipeline_state_path(protocol_name: str) -> str:
+def pipeline_state_path(protocol_name: str) -> str:
     repo_root = os.path.dirname(os.path.dirname(__file__))
     state_dir = os.path.join(repo_root, "logs", protocol_name)
     os.makedirs(state_dir, exist_ok=True)
@@ -58,7 +58,7 @@ def _pipeline_state_path(protocol_name: str) -> str:
 
 
 def load_pipeline_state(protocol_name: str) -> PipelineState:
-    path = _pipeline_state_path(protocol_name)
+    path = pipeline_state_path(protocol_name)
     if not os.path.exists(path):
         return {
             "packet_types": [],
@@ -71,13 +71,14 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
 
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict) and "packet_types" in data and "constraints" in data:
+            raw_data: object = json.load(f)
+        if isinstance(raw_data, dict) and "packet_types" in raw_data and "constraints" in raw_data:
+            data = cast(dict[str, Any], raw_data)
             data.setdefault("token_usage_total", new_usage_bucket())
             data.setdefault("token_usage_by_step", {})
             data.setdefault("current_step_index", 0)
             data.setdefault("data_type_analysis", {})
-            return data # type: ignore
+            return cast(PipelineState, data)
     except Exception as e:
         UI.warn(
             f"Warning: failed to load pipeline state from {path}: {e}"
@@ -94,7 +95,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
 
 
 def save_pipeline_state(state: PipelineState, protocol_name: str) -> None:
-    path = _pipeline_state_path(protocol_name)
+    path = pipeline_state_path(protocol_name)
     tmp_path = f"{path}.tmp"
 
     UI.dim(f"Saving pipeline state to {path}...")

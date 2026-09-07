@@ -1,10 +1,12 @@
 import subprocess
 import threading
+from typing import Any, cast
 
 import questionary
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.styles import Style
@@ -14,7 +16,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from core.log import console
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph.state import CompiledStateGraph
+from core.agent_types import AgentGraph, AgentResponse
 
 
 QUESTIONARY_BASE_STYLE = questionary.Style(
@@ -48,7 +50,7 @@ class UI:
 
     @staticmethod
     def panel(content: str | Markdown, *, title: str | None = None, border_style: str = "blue", expand: bool = False, style: str | None = None):
-        panel_kwargs = {
+        panel_kwargs: dict[str, Any] = {
             "title": title,
             "border_style": border_style,
             "expand": expand,
@@ -93,7 +95,7 @@ class UI:
     @staticmethod
     def run_with_live_output(
         cmd: list[str], *, title: str = "", max_lines: int = 20
-    ) -> subprocess.CompletedProcess:
+    ) -> subprocess.CompletedProcess[str]:
         """Run a subprocess with live-scrolling output in a Rich panel.
 
         Returns the CompletedProcess (stdout contains all captured output).
@@ -176,7 +178,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     cursor_on = [True]   # set False on Enter to hide █ while keeping ▶
     confirmed = [False]  # set True on Enter: collapse display to selected option only
     extra_buffer = Buffer(multiline=False)
-    result: list = [None]  # will hold (action, extra_text) or None
+    result: list[tuple[str, str | None] | None] = [None]
 
     # ---------- styles ----------
     style = Style(
@@ -190,7 +192,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     )
 
     # ---------- display ----------
-    def _render_line(i: int, label: str, editable: bool) -> list:
+    def _render_line(i: int, label: str, editable: bool) -> list[tuple[str, str]]:
         """Render a single option line. Returns list of (style, text) tuples (no trailing newline)."""
         is_sel = i == selected[0]
         pointer = "▶" if is_sel else " "
@@ -225,7 +227,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
             else:
                 return [("", f"  {pointer} {label}")]
 
-    def _render():
+    def _render() -> list[tuple[str, str]]:
         if confirmed[0]:
             _, label, editable = options[selected[0]]
             lines = [("class:message", f"About to start: {step_name}"),
@@ -243,7 +245,7 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
             lines.extend(_render_line(idx, label, editable))
         return lines
 
-    display_control = FormattedTextControl(_render)
+    display_control = FormattedTextControl(cast(Any, _render))
     display_window = Window(content=display_control, always_hide_cursor=True)
 
     # Hidden input that captures text editing (height=0, invisible cursor)
@@ -256,22 +258,19 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     # ---------- key bindings ----------
     kb = KeyBindings()
 
-    @kb.add("up")
-    def _up(event):
+    def _up(event: KeyPressEvent) -> None:
         selected[0] = (selected[0] - 1) % len(options)
         # Skip disabled "previous step" option
         if selected[0] == 2 and not has_previous:
             selected[0] = (selected[0] - 1) % len(options)
 
-    @kb.add("down")
-    def _down(event):
+    def _down(event: KeyPressEvent) -> None:
         selected[0] = (selected[0] + 1) % len(options)
         # Skip disabled "previous step" option
         if selected[0] == 2 and not has_previous:
             selected[0] = (selected[0] + 1) % len(options)
 
-    @kb.add("enter")
-    def _enter(event):
+    def _enter(event: KeyPressEvent) -> None:
         val, _, editable = options[selected[0]]
         extra = extra_buffer.text if editable else None
         result[0] = (val, extra)
@@ -279,16 +278,20 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
         confirmed[0] = True  # collapse to selected option only
         event.app.exit()
 
-    @kb.add("c-c")
-    def _ctrl_c(event):
+    def _ctrl_c(event: KeyPressEvent) -> None:
         result[0] = ("exit", None)
         event.app.exit()
+
+    kb.add("up")(_up)
+    kb.add("down")(_down)
+    kb.add("enter")(_enter)
+    kb.add("c-c")(_ctrl_c)
 
     # ---------- layout ----------
     root = HSplit([display_window, input_window])
     layout = Layout(root)
 
-    app = Application(
+    app: Application[tuple[str, str | None] | None] = Application(
         layout=layout,
         key_bindings=kb,
         style=style,
@@ -318,7 +321,10 @@ def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60
     return action, extra
 
 
-def _timeout(app: Application, result: list) -> None:
+def _timeout(
+    app: Application[tuple[str, str | None] | None],
+    result: list[tuple[str, str | None] | None],
+) -> None:
     """Called by the timer thread when the auto-continue timeout fires."""
     if result[0] is None:
         result[0] = ("continue", None)
@@ -536,7 +542,13 @@ def ask_for_hint(step_title: str) -> str:
     return hint or ""
 
 
-def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config: RunnableConfig, step_title: str):
+def run_agent_step(
+    *,
+    agent_graph: AgentGraph,
+    prompt_text: str,
+    config: RunnableConfig,
+    step_title: str,
+) -> AgentResponse:
     """Run the agent with a loading spinner and formatted output."""
 
     with UI.status(f"LLM is thinking & coding for {step_title}...", spinner="dots"):
@@ -544,7 +556,7 @@ def run_agent_step(*, agent_graph: CompiledStateGraph, prompt_text: str, config:
             {"messages": [{"role": "user", "content": prompt_text}]},
             config=config,
         )
-        final_response = response["messages"][-1].content
+        final_response = str(getattr(response["messages"][-1], "content"))
 
     UI.result_markdown(step_title, final_response)
 

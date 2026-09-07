@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from langchain_core.callbacks.base import BaseCallbackHandler
 
@@ -32,10 +32,12 @@ def _safe_int(value: Any) -> int:
 def _extract_usage_from_output(llm_output: Any) -> UsageDict:
     if not isinstance(llm_output, dict):
         return _empty_usage()
+    output = cast(dict[str, Any], llm_output)
 
-    token_usage = llm_output.get("token_usage")
+    token_usage = output.get("token_usage")
     if not isinstance(token_usage, dict):
         return _empty_usage()
+    token_usage = cast(dict[str, Any], token_usage)
 
     prompt = _safe_int(
         token_usage.get("prompt_tokens")
@@ -50,7 +52,7 @@ def _extract_usage_from_output(llm_output: Any) -> UsageDict:
     # OpenAI returns cached_tokens in prompt_tokens_details.cached_tokens
     details = token_usage.get("prompt_tokens_details")
     if isinstance(details, dict):
-        cached = _safe_int(details.get("cached_tokens"))
+        cached = _safe_int(cast(dict[str, Any], details).get("cached_tokens"))
     else:
         cached = _safe_int(
             token_usage.get("cached_tokens")
@@ -108,7 +110,7 @@ class TokenUsageTracker(BaseCallbackHandler):
                 for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens", "calls"):
                     self._step_usage[key] += usage.get(key, 0)
 
-    def on_llm_end(self, response, **kwargs: Any) -> Any:
+    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
         usage = _extract_usage_from_output(getattr(response, "llm_output", None))
         self._add_usage(usage)
         return None

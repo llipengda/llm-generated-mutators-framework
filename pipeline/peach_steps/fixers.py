@@ -1,12 +1,10 @@
-import os
-
 from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import UI
 
 
 class FixerSteps(PeachStepMixin):
-    def step_6_constraint_extraction(self):
+    def step_6_constraint_extraction(self) -> None:
         UI.title("Step 6: Constraint Extraction")
 
         prompt = f"""
@@ -24,7 +22,7 @@ class FixerSteps(PeachStepMixin):
         """
 
         response = self.call_agent(prompt, "Step 6: Constraint Extraction")
-        constraints = response["messages"][-1].content
+        constraints = str(getattr(response["messages"][-1], "content"))
         self.state["constraints"] = constraints
         self.save_state()
         UI.success("Constraints extracted successfully.")
@@ -334,7 +332,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
                 self.protocol_lower,
                 self.seed_dir,
             ]
-            result = UI.run_with_live_output(
+            UI.run_with_live_output(
                 cmd, title="Running Fixer Tests"
             )
 
@@ -349,7 +347,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
             if not fail_logs:
                 return True, ""
 
-            parts = []
+            parts: list[str] = []
             for log_file in fail_logs:
                 with open(log_file, "r", encoding="utf-8") as f:
                     parts.append(

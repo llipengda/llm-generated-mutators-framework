@@ -4,7 +4,7 @@ from typing import Callable
 
 from core.state import (
     PipelineState,
-    _pipeline_state_path,
+    pipeline_state_path,
     add_step_usage,
     load_pipeline_state,
     new_usage_bucket,
@@ -20,8 +20,8 @@ from core.rag import build_retriever
 from core.ui import ask_after_fix_failure, ask_before_step, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
 
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph.state import CompiledStateGraph
 from langchain_core.retrievers import BaseRetriever
+from core.agent_types import AgentGraph, AgentResponse
 from core.usage_tracking import TokenUsageTracker
 from core.log import ToolUsageLogger
 
@@ -29,7 +29,7 @@ class BasePipeline:
     protocol_lower: str
     protocol_upper: str
     protocol_name: str
-    agent_graph: CompiledStateGraph
+    agent_graph: AgentGraph
     config: RunnableConfig
     state: PipelineState 
     seed_dir: str
@@ -53,7 +53,7 @@ class BasePipeline:
             "configurable": {"thread_id": "session_001"},
         }
 
-        state_path = _pipeline_state_path(self.protocol_lower)
+        state_path = pipeline_state_path(self.protocol_lower)
         if os.path.exists(state_path):
             existing = load_pipeline_state(self.protocol_lower)
             has_data = bool(
@@ -136,7 +136,13 @@ class BasePipeline:
     def steps(self) -> list[tuple[str, Callable[[], None]]]:
         raise NotImplementedError("Subclasses must implement the steps method.")
     
-    def call_agent(self, prompt_text: str, step_title: str, *, agent_graph: CompiledStateGraph | None = None):
+    def call_agent(
+        self,
+        prompt_text: str,
+        step_title: str,
+        *,
+        agent_graph: AgentGraph | None = None,
+    ) -> AgentResponse:
         extra = getattr(self, "_extra_prompt", None)
         if extra:
             prompt_text = prompt_text + "\n\n" + extra

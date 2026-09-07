@@ -71,9 +71,9 @@ class Diagnostic:
     severity: str
     confidence: float
     message: str
-    evidence: list[str] = field(default_factory=list)
-    log_lines: list[int] = field(default_factory=list)
-    xml_locations: list[XmlLocation] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=lambda: [])
+    log_lines: list[int] = field(default_factory=lambda: [])
+    xml_locations: list[XmlLocation] = field(default_factory=lambda: [])
 
 
 @dataclass
@@ -94,7 +94,7 @@ class XmlNode:
     attributes: dict[str, str]
     line: int
     parent: "XmlNode | None" = None
-    children: list["XmlNode"] = field(default_factory=list)
+    children: list["XmlNode"] = field(default_factory=lambda: [])
 
     @property
     def name(self) -> str | None:
@@ -1221,7 +1221,7 @@ def _numbered_file_context(path: Path | None, max_chars: int) -> str:
     return "".join(rendered)
 
 
-def _compact_llm_report(
+def compact_llm_report(
     report: DiagnosisReport, max_chars: int
 ) -> dict[str, object]:
     compact: dict[str, object] = {
@@ -1233,7 +1233,7 @@ def _compact_llm_report(
     seeds: list[dict[str, object]] = []
     omitted = 0
     for item in report["reports"]:
-        diagnostics = []
+        diagnostics: list[dict[str, object]] = []
         for diagnostic in item["diagnostics"]:
             if diagnostic["severity"] == "summary":
                 continue
@@ -1255,7 +1255,7 @@ def _compact_llm_report(
                     ],
                 }
             )
-        candidate = {"seed": item["seed"], "diagnostics": diagnostics}
+        candidate: dict[str, object] = {"seed": item["seed"], "diagnostics": diagnostics}
         tentative = dict(compact)
         tentative["seeds"] = seeds + [candidate]
         if len(json.dumps(tentative, ensure_ascii=False)) > max_chars:
@@ -1267,7 +1267,7 @@ def _compact_llm_report(
     return compact
 
 
-def _selected_xml_context(
+def selected_xml_context(
     datamodel: Path | None,
     report: DiagnosisReport,
     max_chars: int,
@@ -1307,17 +1307,15 @@ def _message_text(response: LlmResponse) -> str:
     content = response.content
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, Mapping):
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return str(content)
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        else:
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
 
 
 def _parse_llm_json(content: str) -> dict[str, object]:
@@ -1326,7 +1324,7 @@ def _parse_llm_json(content: str) -> dict[str, object]:
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
         stripped = re.sub(r"\s*```$", "", stripped)
     try:
-        parsed = json.loads(stripped)
+        parsed: object = json.loads(stripped)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"LLM returned invalid JSON: {error}") from error
     if not isinstance(parsed, dict):
@@ -1343,19 +1341,20 @@ def _validate_llm_analysis(analysis: dict[str, object]) -> LlmAnalysis:
         )
     if not isinstance(analysis["summary"], str):
         raise RuntimeError("LLM JSON field 'summary' must be a string")
-    if not isinstance(analysis["root_causes"], list):
+    root_causes_value: object = analysis["root_causes"]
+    if not isinstance(root_causes_value, list):
         raise RuntimeError("LLM JSON field 'root_causes' must be a list")
     for key in ("priority_order", "uncertainties"):
         value = analysis[key]
         if not isinstance(value, list) or not all(
-            isinstance(item, str) for item in value
+            isinstance(item, str) for item in cast(list[object], value)
         ):
             raise RuntimeError(f"LLM JSON field '{key}' must be a string list")
-    root_causes = analysis["root_causes"]
-    assert isinstance(root_causes, list)
-    for index, cause in enumerate(root_causes):
-        if not isinstance(cause, dict):
+    root_causes = cast(list[object], root_causes_value)
+    for index, cause_value in enumerate(root_causes):
+        if not isinstance(cause_value, dict):
             raise RuntimeError(f"root_causes[{index}] must be an object")
+        cause = cast(dict[str, object], cause_value)
         for key in ("id", "title", "classification", "confidence", "reasoning"):
             if key not in cause:
                 raise RuntimeError(f"root_causes[{index}] is missing '{key}'")
@@ -1383,22 +1382,31 @@ def _validate_llm_analysis(analysis: dict[str, object]) -> LlmAnalysis:
             value = cause.get(key)
             if value is not None and (
                 not isinstance(value, list)
-                or not all(isinstance(item, str) for item in value)
+                or not all(
+                    isinstance(item, str) for item in cast(list[object], value)
+                )
             ):
                 raise RuntimeError(
                     f"root_causes[{index}].{key} must be a string list"
                 )
-        locations = cause.get("xml_locations")
-        if locations is not None:
-            if not isinstance(locations, list) or not all(
-                isinstance(location, dict)
-                and isinstance(location.get("line"), (int, str))
-                and isinstance(location.get("element"), str)
-                for location in locations
-            ):
+        locations_value = cause.get("xml_locations")
+        if locations_value is not None:
+            if not isinstance(locations_value, list):
                 raise RuntimeError(
                     f"root_causes[{index}].xml_locations must contain line/element objects"
                 )
+            for location_value in cast(list[object], locations_value):
+                if not isinstance(location_value, dict):
+                    raise RuntimeError(
+                        f"root_causes[{index}].xml_locations must contain line/element objects"
+                    )
+                location = cast(dict[str, object], location_value)
+                if not isinstance(location.get("line"), (int, str)) or not isinstance(
+                    location.get("element"), str
+                ):
+                    raise RuntimeError(
+                        f"root_causes[{index}].xml_locations must contain line/element objects"
+                    )
         for key in ("category", "verification"):
             value = cause.get(key)
             if value is not None and not isinstance(value, str):
@@ -1534,7 +1542,7 @@ def _render_llm_judgment(judgment: LlmJudgment) -> list[str]:
         if verification:
             output.append(f"    - Verify: {verification}")
     uncertainties = analysis.get("uncertainties")
-    if isinstance(uncertainties, list) and uncertainties:
+    if uncertainties:
         output.append("\n  Uncertainties:")
         output.extend(f"    - {item}" for item in uncertainties)
     return output

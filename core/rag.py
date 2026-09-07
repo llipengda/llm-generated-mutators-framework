@@ -6,7 +6,9 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
+
+from langchain_core.documents import Document
 
 from pydantic import SecretStr
 
@@ -134,7 +136,7 @@ def build_retriever(rfc_paths: list[str]):
                     return cached.as_retriever(search_kwargs={"k": 4})
 
             # Cache miss -> build index from all RFCs.
-            all_docs = []
+            all_docs: list[Document] = []
             for rfc_path in rfc_paths:
                 if not os.path.exists(rfc_path):
                     UI.warn(f"RFC file not found, skipping: {rfc_path}")
@@ -147,7 +149,9 @@ def build_retriever(rfc_paths: list[str]):
                 # Tag each document with its source for traceability
                 src = os.path.basename(rfc_path)
                 for d in docs:
-                    d.metadata.setdefault("source", src)
+                    cast(dict[str, Any], getattr(d, "metadata")).setdefault(
+                        "source", src
+                    )
                 all_docs.extend(docs)
 
             if not all_docs:

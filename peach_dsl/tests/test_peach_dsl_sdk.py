@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from xml.etree import ElementTree as ET
 import unittest
+from typing import Any, Callable, cast
 
 import peach_dsl
 from peach_dsl import *
@@ -85,20 +86,20 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(len(crc.computed.args), 1)
         self.assertEqual(
             crc.computed.args[0],
-            ComputedReference[bytearray](("header",)),
+            cast(Any, ComputedReference[bytearray])(("header",)),
         )
         self.assertEqual(dict(crc.computed.kwargs), {})
         self.assertFalse(called)
 
     def test_computed_accepts_one_to_four_parameters(self) -> None:
-        def make_function(count: int):
+        def make_function(count: int) -> Callable[..., int]:
             namespace: dict[str, object] = {}
             parameters = ", ".join(f"value{index}: int" for index in range(count))
             exec(  # noqa: S102 - small test-only function factory
                 f"def implementation({parameters}) -> int:\n    raise AssertionError",
                 namespace,
             )
-            return namespace["implementation"]
+            return cast(Callable[..., int], namespace["implementation"])
 
         for count in range(1, 5):
             with self.subTest(count=count):
@@ -107,9 +108,9 @@ class SDKTests(unittest.TestCase):
                 self.assertEqual(captured.args, tuple(range(count)))
 
         with self.assertRaisesRegex(TypeError, "between 1 and 4"):
-            computed(make_function(0))
+            cast(Any, computed)(make_function(0))
         with self.assertRaisesRegex(TypeError, "between 1 and 4"):
-            computed(make_function(5))
+            cast(Any, computed)(make_function(5))
 
     def test_fixed_replaces_const_without_compatibility_alias(self) -> None:
         self.assertIsInstance(fixed(1), Fixed)

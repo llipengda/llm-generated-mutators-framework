@@ -161,7 +161,7 @@ class ToolUsageLogger(BaseCallbackHandler):
             "output_dll",
             "query",
         )
-        parts = []
+        parts: list[str] = []
         for key in visible_keys:
             if key not in inputs:
                 continue

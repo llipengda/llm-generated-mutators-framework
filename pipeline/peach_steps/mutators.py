@@ -1,5 +1,3 @@
-import os
-
 from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
@@ -18,7 +16,7 @@ class MutatorSteps(PeachStepMixin):
         import os
 
         out_dir = f"./llm/peach/{self.protocol_lower}/Mutators/out"
-        types_to_generate = []
+        types_to_generate: list[str] = []
         for pkt_type in packet_types:
             dll_name = (
                 f"{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll"
@@ -239,7 +237,7 @@ class MutatorSteps(PeachStepMixin):
             if not error_logs:
                 return True, ""
 
-            parts = []
+            parts: list[str] = []
             for log_file in error_logs:
                 with open(log_file, "r", encoding="utf-8") as f:
                     parts.append(

@@ -171,12 +171,12 @@ class _MutableNode:
     min_occurs: int | None = None
     max_occurs: int | None = None
     value: str | None = None
-    cache_messages: list[str] = field(default_factory=list)
-    errors: list[ReportError] = field(default_factory=list)
+    cache_messages: list[str] = field(default_factory=lambda: [])
+    errors: list[ReportError] = field(default_factory=lambda: [])
     failed: bool = False
     succeeded: bool = False
     dsl_path: str | None = None
-    children: list[_MutableNode] = field(default_factory=list)
+    children: list[_MutableNode] = field(default_factory=lambda: [])
 
 
 def parse_peach_report(text: str) -> PeachReport:
@@ -605,9 +605,9 @@ def _format_byte_mismatch(mismatch: ParsedByteMismatch) -> str:
     return (
         f"MISMATCH seed={_quoted(mismatch.file_name)} "
         f"lengths={len(mismatch.original)}/{len(mismatch.parsed)} "
-        f"diff={difference_text} window={start}:{end} "
-        f"original={mismatch.original[start:end].hex().upper()} "
-        f"parsed={mismatch.parsed[start:end].hex().upper()}"
+        f"diff={difference_text} window={start}:{end}\n"
+        f"original={mismatch.original[start:end].hex().upper()}\n"
+        f"**parsed={mismatch.parsed[start:end].hex().upper()}"
     )
 
 

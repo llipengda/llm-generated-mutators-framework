@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -45,7 +45,7 @@ def shared_model_name(protocol: str, symbol: str) -> str:
 
 
 def default_manifest(protocol: str, packet_types: list[str], group_size: int = 4) -> dict[str, Any]:
-    groups = []
+    groups: list[dict[str, Any]] = []
     for offset in range(0, len(packet_types), max(1, group_size)):
         members = packet_types[offset : offset + max(1, group_size)]
         groups.append(
@@ -73,7 +73,11 @@ def default_manifest(protocol: str, packet_types: list[str], group_size: int = 4
 def _strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [str(item).strip() for item in value if str(item).strip()]
+    return [
+        str(item).strip()
+        for item in cast(list[object], value)
+        if str(item).strip()
+    ]
 
 
 def _python_symbol(value: object, context: str) -> str:
@@ -90,11 +94,12 @@ def _shared_references(value: object, context: str) -> list[dict[str, str]]:
         raise ValueError(f"{context} must be a list")
     references: list[dict[str, str]] = []
     seen: set[str] = set()
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
+    for index, raw_item in enumerate(cast(list[object], value)):
+        if not isinstance(raw_item, dict):
             raise ValueError(
                 f"{context}[{index}] must contain symbol and usage"
             )
+        item = cast(dict[str, object], raw_item)
         symbol = _python_symbol(item.get("symbol"), f"{context}[{index}].symbol")
         usage = str(item.get("usage", "")).strip()
         if not usage:
@@ -122,17 +127,19 @@ def validate_manifest(
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("schema manifest must be an object")
+    manifest = cast(dict[str, Any], raw)
     if normalize_identifier(protocol) != protocol:
         raise ValueError("protocol must already be an ASCII lower_snake_case identifier")
-    if str(raw.get("protocol", "")).casefold() != protocol.casefold():
+    if str(manifest.get("protocol", "")).casefold() != protocol.casefold():
         raise ValueError("schema manifest protocol does not match the pipeline protocol")
 
-    shared_models = []
+    shared_models: list[dict[str, Any]] = []
     shared_names: set[str] = set()
     shared_symbols: set[str] = set()
-    for index, item in enumerate(raw.get("shared_models", [])):
-        if not isinstance(item, dict):
+    for index, raw_item in enumerate(manifest.get("shared_models", [])):
+        if not isinstance(raw_item, dict):
             raise ValueError(f"shared_models[{index}] must be an object")
+        item = cast(dict[str, Any], raw_item)
         symbol = _python_symbol(item.get("symbol"), f"shared_models[{index}].symbol")
         name = shared_model_name(protocol, symbol)
         if name in shared_names:
@@ -155,19 +162,20 @@ def validate_manifest(
     group_ids: set[str] = set()
     model_names: set[str] = set(shared_names)
     symbols: set[str] = set(shared_symbols)
-    groups = []
-    raw_groups = raw.get("packet_groups")
+    groups: list[dict[str, Any]] = []
+    raw_groups = manifest.get("packet_groups")
     if not isinstance(raw_groups, list) or not raw_groups:
         raise ValueError("packet_groups must be a non-empty list")
-    for index, item in enumerate(raw_groups):
-        if not isinstance(item, dict):
+    for index, raw_item in enumerate(cast(list[object], raw_groups)):
+        if not isinstance(raw_item, dict):
             raise ValueError(f"packet_groups[{index}] must be an object")
+        item = cast(dict[str, Any], raw_item)
         members = _strings(item.get("packet_types"))
         if not members:
             raise ValueError(f"packet_groups[{index}].packet_types must not be empty")
         if max_group_size is not None and len(members) > max(1, max_group_size):
             raise ValueError(f"packet_groups[{index}] exceeds maximum size {max_group_size}")
-        canonical_members = []
+        canonical_members: list[str] = []
         for packet in members:
             key = packet.casefold()
             if key not in expected:
@@ -202,14 +210,15 @@ def validate_manifest(
             )
 
         raw_models = item.get("packet_models")
-        if not isinstance(raw_models, list) or len(raw_models) != len(canonical_members):
+        if not isinstance(raw_models, list) or len(cast(list[object], raw_models)) != len(canonical_members):
             raise ValueError(f"packet_groups[{index}].packet_models must cover every packet type")
-        by_packet = {
-            str(model.get("packet_type", "")).casefold(): model
-            for model in raw_models
+        model_items = cast(list[object], raw_models)
+        by_packet: dict[str, dict[str, Any]] = {
+            str(cast(dict[str, object], model).get("packet_type", "")).casefold(): cast(dict[str, Any], model)
+            for model in model_items
             if isinstance(model, dict)
         }
-        packet_models = []
+        packet_models: list[dict[str, str]] = []
         for packet in canonical_members:
             model = by_packet.get(packet.casefold())
             if model is None:
@@ -340,7 +349,9 @@ def assemble_from_manifest(protocol: str, *, dsl_dir: Path | None = None, output
     protocol = protocol.strip().lower()
     directory = dsl_dir or Path("llm/peach") / protocol / "datamodel_dsl"
     manifest_path = directory / "schema_manifest.json"
-    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = cast(
+        dict[str, Any], json.loads(manifest_path.read_text(encoding="utf-8"))
+    )
     packet_types = [str(packet) for group in raw.get("packet_groups", []) for packet in group.get("packet_types", [])]
     manifest = validate_manifest(raw, protocol, packet_types)
     entry = write_root_module(directory, protocol, manifest)
