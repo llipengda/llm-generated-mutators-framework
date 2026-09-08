@@ -18,9 +18,12 @@ uv sync
 
 # Setup Peach SDK (requires Docker + mono)
 ./setup.sh
+# Or select the .NET 8 backend from llm-peach's modern-sdk branch
+./setup.sh --modern-sdk
 
 # Run full pipeline (interactive, auto-continues after 60s)
 uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
+uv run python main.py --modern-sdk --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 
 # Multiple RFCs can be specified by repeating --rfc-path
 uv run python main.py --protocol someip --seed-dir seeds/someip \

@@ -250,7 +250,9 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
 
         import os
         dll_source = f"./llm/peach/{self.protocol_lower}/Fixers/out/{self.protocol_upper}Fixers.dll"
-        dll_destination = f"./peach/sdk/{self.protocol_upper}Fixers.dll"
+        from core.peach_sdk import peach_sdk_dir
+
+        dll_destination = str(peach_sdk_dir() / f"{self.protocol_upper}Fixers.dll")
         if os.path.exists(dll_source):
             import shutil
             shutil.copy(dll_source, dll_destination)

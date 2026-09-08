@@ -4,6 +4,7 @@ from typing import Any, TypeGuard, cast
 
 from core.agent import build_agent_graph
 from core.datamodel_dsl import normalize_symbol
+from core.peach_sdk import compile_csharp, peach_sdk_dir, peach_sdk_from_environment
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import (
     UI,
@@ -65,31 +66,14 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         )
 
     def _compile_custom_data_elements(self, source_dir: Path, dll_path: Path) -> None:
-        import subprocess
-
         sources = sorted(str(path) for path in source_dir.glob("*.cs") if path.is_file())
-        sdk_dir = Path("peach") / "sdk"
-        references = sorted(
-            f"-r:{path}" for path in sdk_dir.glob("*.dll") if path.is_file()
-        )
+        sdk_dir = peach_sdk_dir()
         if not sources:
             raise RuntimeError(f"no custom DataElement C# sources found in {source_dir}")
-        if not references:
-            raise RuntimeError("Peach SDK is unavailable; run './setup.sh peach' first")
+        if not any(sdk_dir.glob("*.dll")):
+            raise RuntimeError("Peach SDK is unavailable; run './setup.sh' first")
         dll_path.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [
-                "mcs",
-                "-sdk:4.5",
-                "-target:library",
-                "-warnaserror",
-                f"-out:{dll_path}",
-                *references,
-                *sources,
-            ],
-            capture_output=True,
-            text=True,
-        )
+        result = compile_csharp(sources, dll_path)
         if result.returncode != 0 or not dll_path.is_file():
             diagnostics = (result.stdout + result.stderr).strip()
             raise RuntimeError(
@@ -257,6 +241,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
     def _finalize_data_type_support(self, report: dict[str, Any]) -> None:
         """Validate a planning audit and prepare any required ExtendedType runtime."""
         report_path, source_dir, dll_path = self._data_type_paths()
+        selected_sdk = peach_sdk_from_environment()
         UI.result_markdown("DSL Basic Data Type Support", self._data_type_summary(report))
         with report_path.open("w", encoding="utf-8") as report_file:
             json.dump(report, report_file, ensure_ascii=False, indent=2, sort_keys=True)
@@ -270,6 +255,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             unsupported
             and report.get("generation_status")
             in {"approved_and_compiled", "reused_existing"}
+            and report.get("peach_sdk", "legacy") == selected_sdk
             and dll_path.is_file()
         ):
             self.state["data_type_analysis"] = report
@@ -278,6 +264,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             return
         if not unsupported:
             report["generation_status"] = "not_required"
+            report["peach_sdk"] = selected_sdk
             self.state["data_type_analysis"] = report
             self.save_state()
             UI.success("No unsupported protocol field encodings require custom scalars.")
@@ -289,13 +276,17 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         if not ask_generate_custom_data_elements(self.protocol_name, names):
             reusable = self._reusable_custom_elements(source_dir, dll_path, unsupported)
             reuse_error = ""
-            if reusable is not None and not dll_path.is_file():
+            if reusable is not None and (
+                not dll_path.is_file()
+                or report.get("peach_sdk", "legacy") != selected_sdk
+            ):
                 try:
                     self._compile_custom_data_elements(source_dir, dll_path)
                 except RuntimeError as error:
                     reuse_error = str(error)
             if reusable is not None and dll_path.is_file():
                 report["generation_status"] = "reused_existing"
+                report["peach_sdk"] = selected_sdk
                 report["custom_elements"] = reusable
                 report["plugin_dll"] = str(dll_path)
             else:
@@ -453,6 +444,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
                 )
         self._compile_custom_data_elements(source_dir, dll_path)
         report["generation_status"] = "approved_and_compiled"
+        report["peach_sdk"] = selected_sdk
         report["custom_elements"] = custom_elements
         report["plugin_dll"] = str(dll_path)
         with report_path.open("w", encoding="utf-8") as report_file:

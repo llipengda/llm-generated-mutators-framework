@@ -8,6 +8,7 @@ fi
 
 PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/peach_sdk_env.sh"
 
 SEED_DIR="$ROOT/seeds/$PROTO"
 
@@ -48,8 +49,14 @@ if [ -f "$CUSTOM_DLL" ]; then
 fi
 
 set +e
-docker run --rm -i "${DOCKER_ARGS[@]}" pdli/llm-peach:sdk sh -c \
-  'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll ./Plugins/; fi; exec mono Peach.LLM.Validations.DataModel.exe /test/datamodel.xml "$1" /seeds' sh "$DATAMODEL_NAME"
+if [ "$PEACH_IS_MODERN" -eq 1 ]; then
+  DOCKER_ARGS+=(-v "$ROOT/tests/NLog.config:/opt/peach/NLog.config:ro")
+  docker run --rm -i --platform=linux/amd64 --entrypoint sh "${DOCKER_ARGS[@]}" "$PEACH_IMAGE" -c \
+    'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll /opt/peach/Plugins/; fi; exec dotnet /opt/peach/Peach.LLM.Validations.DataModel.dll /test/datamodel.xml "$1" /seeds' sh "$DATAMODEL_NAME"
+else
+  docker run --rm -i "${DOCKER_ARGS[@]}" "$PEACH_IMAGE" sh -c \
+    'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll ./Plugins/; fi; exec mono Peach.LLM.Validations.DataModel.exe /test/datamodel.xml "$1" /seeds' sh "$DATAMODEL_NAME"
+fi
 VALIDATOR_STATUS=$?
 set -e
 

@@ -3,6 +3,7 @@ from typing import override
 
 from core.agent import AgentConfig, build_agent_graph
 from core.config import get_fixer_enabled
+from core.peach_sdk import peach_sdk_from_environment
 from pipeline.base import BasePipeline
 from pipeline.peach_steps import (
     CompilationStep,
@@ -27,6 +28,19 @@ class PeachPipeline(
     def __init__(self):
         super().__init__()
         state_changed = False
+        selected_sdk = peach_sdk_from_environment()
+        previous_sdk = self.state.get("peach_sdk", "legacy")
+        if previous_sdk != selected_sdk:
+            # DataModels are portable, but custom elements and generated C# DLLs
+            # are not interchangeable between .NET Framework and .NET 8.
+            self.state["current_step_index"] = min(
+                self.state.get("current_step_index", 0), 1
+            )
+            self.state["peach_sdk"] = selected_sdk
+            state_changed = True
+        elif "peach_sdk" not in self.state:
+            self.state["peach_sdk"] = selected_sdk
+            state_changed = True
         if self.state.get("peach_step_layout") != "combined-dsl-plan-v2":
             previous_index = self.state.get("current_step_index", 0)
             if previous_index >= 2:

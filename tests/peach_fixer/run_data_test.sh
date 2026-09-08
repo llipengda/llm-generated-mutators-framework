@@ -10,6 +10,7 @@ PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 DATA=$2
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/peach_sdk_env.sh"
 
 PIT_PATH="$ROOT/llm/peach/$PROTO/datamodel.xml"
 DATAMODEL_NAME="${PROTO}_packet_array"
@@ -24,5 +25,10 @@ if [ -f "$CUSTOM_DLL" ]; then
     DOCKER_ARGS+=(-v "$CUSTOM_DLL:/custom-data-elements.dll:ro")
 fi
 
-docker run --rm "${DOCKER_ARGS[@]}" pdli/llm-peach:sdk \
-    sh -c 'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll ./Plugins/; fi; mono Peach.LLM.Validations.Fixer.exe -d /datamodel.xml "$1" "$2" || (cat /logs/fixer.log && exit 1)' sh "$DATAMODEL_NAME" "$DATA" 2>&1
+if [ "$PEACH_IS_MODERN" -eq 1 ]; then
+    docker run --rm --platform=linux/amd64 --entrypoint sh -v "$ROOT/tests/NLog.config:/opt/peach/NLog.config:ro" "${DOCKER_ARGS[@]}" "$PEACH_IMAGE" \
+        -c 'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll /opt/peach/Plugins/; fi; dotnet /opt/peach/Peach.LLM.Validations.Fixer.dll -d /datamodel.xml "$1" "$2" || (cat /logs/fixer.log && exit 1)' sh "$DATAMODEL_NAME" "$DATA" 2>&1
+else
+    docker run --rm "${DOCKER_ARGS[@]}" "$PEACH_IMAGE" \
+        sh -c 'if [ -f /custom-data-elements.dll ]; then cp /custom-data-elements.dll ./Plugins/; fi; mono Peach.LLM.Validations.Fixer.exe -d /datamodel.xml "$1" "$2" || (cat /logs/fixer.log && exit 1)' sh "$DATAMODEL_NAME" "$DATA" 2>&1
+fi

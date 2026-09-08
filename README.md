@@ -7,7 +7,8 @@ LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to p
 - Python 3.10+ (the checked-in `.python-version` selects Python 3.13 by default)
 - [uv](https://docs.astral.sh/uv/) — Python version, virtual environment, and dependency management
 - [Docker](https://docs.docker.com/get-docker/) — for Peach SDK setup and fuzzing images
-- [Mono](https://www.mono-project.com/) — `mono` and `mcs` for compiling and running C# code
+- [Mono](https://www.mono-project.com/) — required by the default legacy SDK
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — required only with `--modern-sdk`
 - `xmllint` (libxml2) — validates DSL-compiled Peach XML against `peach/peach.xsd`
 - Node.js `>=22.13.0` and npm — only required for the bundled Pit visualizer
 
@@ -79,17 +80,35 @@ and `uv lock --upgrade-package <package>` to upgrade one deliberately.
 ./setup.sh
 ```
 
-This step requires Docker and Mono. It:
+The default setup requires Docker and Mono. It:
 
 - Pulls `pdli/llm-peach:sdk` (linux/amd64)
 - Extracts essential DLLs into `peach/sdk/` (Peach.Core, NLog, NUnit, etc.)
 - Generates `peach/README.md` — the LLM-Peach SDK API reference used by the LLM during code generation
 - Generates `peach/peach.txt` — the Peach capability reference used during custom DataElement discovery
 
+To use the .NET 8 SDK from the `llm-peach` `modern-sdk` branch instead, run:
+
+```bash
+./setup.sh --modern-sdk
+```
+
+This pulls `pdli/llm-peach:modern-sdk`, installs its reference assemblies under
+`peach/modern-sdk/`, and generates the matching Peach schema/capability files.
+The two SDK installations are kept separate, so the legacy setup remains usable.
+
 ## Quickstart
 
 ```bash
 uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
+```
+
+Add `--modern-sdk` to compile generated C# with .NET 8 and run validators in
+`pdli/llm-peach:modern-sdk`:
+
+```bash
+uv run python main.py --modern-sdk --protocol mqtt --seed-dir seeds/mqtt \
+  --rfc-path rfc/mqtt-v5.0.pdf
 ```
 
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
@@ -170,6 +189,20 @@ Mutator sanity:
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
 ```
 
+Standalone validation scripts select the modern backend through the same
+environment setting used by the CLI:
+
+```bash
+PEACH_SDK=modern ./tests/datamodel/run_datamodel_test.sh mqtt seeds/mqtt
+PEACH_SDK=modern ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
+```
+
+Generate the final fuzzing images with the matching backend:
+
+```bash
+./peach_gen.sh mqtt --modern-sdk
+```
+
 ## Pit visualizer
 
 The repository includes **Pit Studio**, a browser-based Peach Pit visualizer
@@ -197,8 +230,10 @@ diagnosis-import instructions.
 ## Troubleshooting
 
 - **`peach/sdk/` missing**: run `./setup.sh`.
+- **`peach/modern-sdk/` missing**: run `./setup.sh --modern-sdk`.
 - **Docker not found**: install Docker Desktop or Docker Engine.
 - **Mono not found**: `brew install mono` on macOS, or `apt install mono-complete` on Linux.
+- **dotnet not found**: install the .NET 8 SDK before using `--modern-sdk`.
 - **RAG setup fails**: the pipeline still runs without RAG, but RFC grounding will be weaker. Ensure the RFC file exists and `faiss-cpu` is installed.
 - **OpenAI / API auth errors**: verify `OPENAI_API_KEY` in `.env`. If using a custom endpoint, check `OPENAI_BASE_URL`.
 - **Embedding API errors**: your chat LLM provider may not support embeddings. Set `LLM_EMBEDDING_BASE_URL` and `LLM_EMBEDDING_API_KEY` to point to a provider that does.

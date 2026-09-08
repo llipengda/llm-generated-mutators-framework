@@ -1,5 +1,6 @@
 import os
 
+from core.peach_sdk import compile_csharp
 from core.ui import UI
 from pipeline.peach_steps.common import PeachStepMixin
 
@@ -9,7 +10,6 @@ class CompilationStep(PeachStepMixin):
         UI.title("Final Compilation")
 
         import glob
-        import subprocess
 
         cs_files: list[str] = []
         mutators_dir = f"./llm/peach/{self.protocol_lower}/Mutators/"
@@ -30,25 +30,18 @@ class CompilationStep(PeachStepMixin):
         output_dll = f"./llm/peach/{self.protocol_lower}/{self.protocol_upper}.dll"
         os.makedirs(os.path.dirname(output_dll), exist_ok=True)
 
-        reference_dir = "./peach/sdk/"
-        refs = [
-            f"-r:{os.path.join(reference_dir, f)}"
-            for f in os.listdir(reference_dir)
-            if f.endswith(".dll")
-        ]
         _, _, custom_dll = self._data_type_paths()
-        if custom_dll.is_file():
-            refs.append(f"-r:{custom_dll}")
+        extra_refs = [custom_dll] if custom_dll.is_file() else []
 
         UI.dim(f"Compiling {len(cs_files)} .cs files into {output_dll}...")
 
-        cmd = (
-            ["mcs", "-sdk:4.5", "-target:library", "-out:" + output_dll]
-            + refs
-            + cs_files
+        result = compile_csharp(
+            cs_files,
+            output_dll,
+            additional_references=extra_refs,
+            warnings_as_errors=False,
         )
-        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             UI.success(f"Successfully compiled: {output_dll}")
         else:
-            UI.error(f"Compilation failed:\n{result.stderr}")
+            UI.error(f"Compilation failed:\n{result.stdout}{result.stderr}")

@@ -97,7 +97,7 @@ class MutatorSteps(PeachStepMixin):
             **You must not stop until you have generated mutators for ALL fields of the {self.protocol_lower} {pkt_type} packet, and built the DLL successfully without syntax errors.**
 
             Use "Read_File" to list "./llm/peach/{self.protocol_lower}/datamodel_dsl" and read shared_model.py plus the family module that defines this packet. Treat those DSL files as the DataModel source of truth; do not edit or rely on derived datamodel.xml.
-            Use the "Read_File" tool to read the README of llm-peach SDK in "./peach/README.md".
+            Use the "Read_File" tool to read the llm-peach generated-code API reference in "./docs/llm-peach-sdk.md".
             Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the mutators.
             Use the "Write_File" tool to save the generated mutator code to "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.cs".
             Use the "Build_DotNet_DLL" tool to compile the generated mutators into a DLL "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll" and verify there are no syntax errors.

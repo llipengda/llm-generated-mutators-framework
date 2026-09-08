@@ -4,6 +4,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from core.peach_sdk import compile_csharp, peach_sdk_dir, peach_sdk_from_environment
+
+_peach_sdk = peach_sdk_from_environment()
+if _peach_sdk == "modern":
+    # Modern Peach targets .NET 8. Python.NET otherwise defaults to Mono on
+    # Unix, which cannot reflect over those assemblies.
+    os.environ["PYTHONNET_RUNTIME"] = "coreclr"
+
 # pythonnet exposes the CLR reflection surface dynamically and does not ship
 # Pyright stubs. Keep that untyped boundary here rather than leaking Unknown
 # through the rest of the tool implementation.
@@ -30,7 +38,16 @@ class MultiAssemblyInspector:
             path_string = str(path)
             if os.path.isdir(path_string):
                 for file in os.listdir(path_string):
-                    if file.endswith(".dll"):
+                    if file.endswith(".dll") and (
+                        _peach_sdk == "legacy"
+                        or file
+                        in {
+                            "Peach.Core.dll",
+                            "Peach.LLM.dll",
+                            "Peach.Pro.dll",
+                            "Peach.LLM.Validations.Common.dll",
+                        }
+                    ):
                         self._load_assembly(os.path.join(path_string, file))
             elif os.path.isfile(path_string) and path_string.endswith(".dll"):
                 self._load_assembly(path_string)
@@ -42,7 +59,10 @@ class MultiAssemblyInspector:
             if dll_dir not in sys.path:
                 sys.path.append(dll_dir)
 
-            assembly = clr.AddReference(full_path)  # type: ignore
+            if _peach_sdk == "modern":
+                assembly = clr.AddReference(Path(full_path).stem)  # type: ignore
+            else:
+                assembly = clr.AddReference(full_path)  # type: ignore
             self.loaded_assemblies.append(assembly)
 
             exported_types = assembly.GetExportedTypes()
@@ -158,13 +178,14 @@ class MultiAssemblyInspector:
         return "\n".join(output)
 
 
-if not os.path.exists("./peach/sdk/"):
+_sdk_dir = peach_sdk_dir()
+if not _sdk_dir.exists():
     print(
-        "Error: ./peach/sdk/ not found. Please run `./setup.sh` first to prepare the SDK."
+        f"Error: {_sdk_dir} not found. Please run `./setup.sh` first to prepare the SDK."
     )
     sys.exit(1)
 
-inspector = MultiAssemblyInspector(["./peach/sdk/"])
+inspector = MultiAssemblyInspector([_sdk_dir])
 
 import langchain_core.tools as _langchain_tools
 from core.log import console
@@ -216,8 +237,6 @@ def build_dotnet_dll(
     Returns:
         A structured compilation result with output path or diagnostics.
     """
-    import subprocess
-
     csharp_files = []
     if os.path.isfile(source_file_or_dir):
         csharp_files = (
@@ -234,8 +253,8 @@ def build_dotnet_dll(
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    reference_dir = "./peach/sdk/"
-    refs = [f"-r:{os.path.join(reference_dir, f)}" for f in os.listdir(reference_dir) if f.endswith(".dll")]
+    reference_dir = peach_sdk_dir()
+    refs: list[Path] = []
     source_path = os.path.abspath(source_file_or_dir)
     output_path = os.path.abspath(output_dll)
     search_path = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
@@ -245,9 +264,9 @@ def build_dotnet_dll(
             continue
         for custom_dll in sorted(custom_dir.glob("*DataElements.dll")):
             if str(custom_dll.resolve()) != output_path:
-                refs.append(f"-r:{custom_dll}")
+                refs.append(custom_dll)
         break
-    if not refs:
+    if not any(reference_dir.glob("*.dll")):
         console.log(f"[dim][red]Error: No reference DLLs found in '{reference_dir}'. Please run `./setup.sh` first to prepare the SDK. [/red][/dim]")
         return tool_error(
             "sdk_references_missing",
@@ -260,15 +279,11 @@ def build_dotnet_dll(
             f"No C# source files found in {source_file_or_dir}.",
         )
 
-    cmd = [
-        "mcs",
-        "-sdk:4.5",
-        "-target:library",
-        "-warnaserror",
-        "-out:" + output_dll,
-    ] + refs + csharp_files
-
-    res = subprocess.run(cmd, text=True, capture_output=True)
+    res = compile_csharp(
+        csharp_files,
+        output_dll,
+        additional_references=refs,
+    )
     if res.returncode == 0:
         if not os.path.exists(output_dll):
             result = tool_error(
