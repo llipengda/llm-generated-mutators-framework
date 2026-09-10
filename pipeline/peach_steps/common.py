@@ -24,9 +24,12 @@ class PeachStepMixin:
     diagnosis_agent_config: AgentConfig
     datamodel_autofix_agent_config: AgentConfig
     tool_usage_logger: BaseCallbackHandler
+    resumed_from_saved_state: bool
 
     call_agent: Callable[..., AgentResponse]
     save_state: Callable[[], None]
+    has_completed_checkpoint: Callable[[str], bool]
+    mark_checkpoint_completed: Callable[[str], None]
     fix_verify_loop: Callable[..., bool]
 
     def _data_type_paths(self) -> tuple[Path, Path, Path]:

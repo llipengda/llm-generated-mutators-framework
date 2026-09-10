@@ -67,6 +67,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
     def _prepare_dsl_contract(
         self, packet_types: list[str], dsl_dir: Path, group_size: int
     ) -> dict[str, Any]:
+        checkpoint = "step_2_1_dsl_type_analysis_and_schema_planning"
         manifest_path = dsl_dir / "schema_manifest.json"
         report_path, _, _ = self._data_type_paths()
         custom_prefix = normalize_symbol(self.protocol_lower)
@@ -82,18 +83,30 @@ class DatamodelGenerationSteps(PeachStepMixin):
             except ValueError as error:
                 planning_available = False
                 UI.dim(f"Ignoring stale combined DSL plan: {error}")
-        planner_action, planner_extra = ask_before_step(
-            "Step 2.1: DSL Type Analysis & Schema Planning"
-            + (" (existing result available)" if planning_available else ""),
-            has_previous=False,
-        )
-        if planner_action == "exit":
-            raise RuntimeError("DSL DataModel preparation stopped by user")
-        run_planner = planner_action == "continue"
-        if not run_planner and not planning_available:
-            raise RuntimeError(
-                "DSL planning was skipped without an existing manifest and type analysis"
+        resumed_checkpoint = self.has_completed_checkpoint(checkpoint)
+        # States created before sub-step checkpoints are still recoverable: a
+        # validated plan is conclusive evidence that 2.1 finished.  Do this only
+        # when the user selected resume, so a deliberately fresh run still asks
+        # whether to reuse or regenerate its artifacts.
+        if planning_available and self.resumed_from_saved_state:
+            if not resumed_checkpoint:
+                self.mark_checkpoint_completed(checkpoint)
+            UI.success("Resuming after completed Step 2.1: DSL plan is valid.")
+            run_planner = False
+            planner_extra = None
+        else:
+            planner_action, planner_extra = ask_before_step(
+                "Step 2.1: DSL Type Analysis & Schema Planning"
+                + (" (existing result available)" if planning_available else ""),
+                has_previous=False,
             )
+            if planner_action == "exit":
+                raise RuntimeError("DSL DataModel preparation stopped by user")
+            run_planner = planner_action == "continue"
+            if not run_planner and not planning_available:
+                raise RuntimeError(
+                    "DSL planning was skipped without an existing manifest and type analysis"
+                )
 
         planner_prompt = f"""
         In one coordinated task, identify unsupported protocol field encodings and
@@ -237,6 +250,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             )
         report = self._load_data_type_analysis(report_path)
         self._finalize_data_type_support(report)
+        self.mark_checkpoint_completed(checkpoint)
         return manifest
 
     def _generate_dsl_modules(

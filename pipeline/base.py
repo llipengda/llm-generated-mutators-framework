@@ -20,9 +20,10 @@ from core.rag import build_retriever
 from core.ui import ask_after_fix_failure, ask_before_step, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
 
 from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
 from core.agent_types import AgentGraph, AgentResponse
-from core.usage_tracking import TokenUsageTracker
+from core.usage_tracking import ReasoningContentLogger, TokenUsageTracker
 from core.log import ToolUsageLogger
 
 class BasePipeline:
@@ -34,6 +35,7 @@ class BasePipeline:
     state: PipelineState 
     seed_dir: str
     retriever: BaseRetriever
+    resumed_from_saved_state: bool
 
     def __init__(
         self,
@@ -61,6 +63,7 @@ class BasePipeline:
             )
             if has_data and ask_resume_state(self.protocol_lower):
                 state = existing
+                self.resumed_from_saved_state = True
             else:
                 if has_data:
                     UI.dim(
@@ -75,6 +78,7 @@ class BasePipeline:
                     "token_usage_by_step": {},
                     "current_step_index": 0,
                 }
+                self.resumed_from_saved_state = False
         else:
             state = {
                 "packet_types": [],
@@ -84,6 +88,7 @@ class BasePipeline:
                 "token_usage_by_step": {},
                 "current_step_index": 0,
             }
+            self.resumed_from_saved_state = False
 
         self.seed_dir = os.path.abspath(seed_dir)
         self.retriever = retriever
@@ -96,6 +101,13 @@ class BasePipeline:
     def __call__(self):
         i = self.state.get("current_step_index", 0)
         steps = self.steps()
+        if i >= len(steps):
+            UI.panel(
+                f"Generation pipeline for {self.protocol_name} was already completed.",
+                style="bold green",
+            )
+            self.print_token_usage_summary()
+            return
         if i > 0:
             UI.warning_rule(f"Resuming from step {i + 1}: {steps[i][0]}")
         while i < len(steps):
@@ -126,6 +138,11 @@ class BasePipeline:
             self._extra_prompt = extra_prompt
             step_fn()
             i += 1
+            # A step can contain several agent calls, each of which persists state.
+            # Persist the *next* top-level step separately so a completed step is
+            # never repeated after a restart.
+            self.state["current_step_index"] = i
+            self.save_state()
 
         UI.panel(
             f"Generation pipeline execution for {self.protocol_name} completed successfully.",
@@ -150,9 +167,14 @@ class BasePipeline:
             self._extra_prompt = None
 
         tracker = TokenUsageTracker()
+        callbacks: list[BaseCallbackHandler] = [tracker, self.tool_usage_logger]
+        if os.environ.get("LLM_PRINT_REASONING", "").lower() in {
+            "1", "true", "yes", "on"
+        } or bool(os.environ.get("LLM_REASONING_FORMAT", "").strip()):
+            callbacks.append(ReasoningContentLogger(step_title))
         local_config: RunnableConfig = {
             **self.config,
-            "callbacks": [tracker, self.tool_usage_logger],
+            "callbacks": callbacks,
         }
         tracker.start_step(step_title)
         response = run_agent_step(
@@ -237,6 +259,17 @@ class BasePipeline:
     def save_state(self):
         save_pipeline_state(self.state, self.protocol_lower)
 
+    def has_completed_checkpoint(self, checkpoint: str) -> bool:
+        """Return whether a durable sub-step checkpoint has completed."""
+        return checkpoint in self.state.get("completed_checkpoints", [])
+
+    def mark_checkpoint_completed(self, checkpoint: str) -> None:
+        """Persist a completed sub-step before the following work begins."""
+        checkpoints = self.state.setdefault("completed_checkpoints", [])
+        if checkpoint not in checkpoints:
+            checkpoints.append(checkpoint)
+            self.save_state()
+
     def print_token_usage_summary(self) -> None:
         total = self.state.get("token_usage_total", {})
         by_step = self.state.get("token_usage_by_step", {})
@@ -249,7 +282,8 @@ class BasePipeline:
             f"prompt={prompt_val} (cached={cached_val}, uncached={prompt_val - cached_val}), "
             f"completion={total.get('completion_tokens', 0)}, "
             f"total={total.get('total_tokens', 0)}, "
-            f"LLM_calls={total.get('calls', 0)}"
+            f"LLM_calls={total.get('calls', 0)}, "
+            f"peak_context={total.get('max_prompt_tokens_per_call', 0)}"
         )
 
         if not by_step:
@@ -259,10 +293,15 @@ class BasePipeline:
         for step, usage in by_step.items():
             sp = usage.get("prompt_tokens", 0)
             sc = usage.get("cached_tokens", 0)
+            calls = usage.get("calls", 0)
+            average_context = int(sp) // int(calls) if int(calls) else 0
             UI.print(
                 f"- [bold]{step}[/bold]: "
                 f"prompt={sp} (cached={sc}), "
                 f"completion={usage.get('completion_tokens', 0)}, "
                 f"total={usage.get('total_tokens', 0)}, "
-                f"calls={usage.get('calls', 0)}"
+                f"calls={calls}, "
+                f"context/call(avg={average_context}, "
+                f"peak={usage.get('max_prompt_tokens_per_call', 0)}, "
+                f"peak_with_output={usage.get('max_total_tokens_per_call', 0)})"
             )

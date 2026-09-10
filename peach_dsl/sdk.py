@@ -2149,10 +2149,13 @@ class Flags:
             raise ValueError("Flags endian must be 'big' or 'little'")
         self.layout = FlagsLayout(storage, endian)
 
-    def __call__(self, schema: type[S]) -> type[S]:
+    def __call__(self, schema: type[S]) -> S:
         _validate_flags_schema(schema, self.layout)
         schema.__flags_layout__ = self.layout
-        return schema
+        # Match @Block and @Union: a decorated nested declaration is the
+        # field that its enclosing Schema should collect, rather than merely
+        # a helper class left in the enclosing namespace.
+        return schema()
 
 
 class Default:

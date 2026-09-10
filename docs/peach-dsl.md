@@ -205,6 +205,19 @@ class Control(Schema):
     reserved = Bit[5](fixed(0))
 ```
 
+Like `@Block` and `@Union`, `@Flags` turns its decorated declaration into a
+field. This permits an inline packed field:
+
+```python
+class MqttFixedHeader(Schema):
+    @Flags(Int8, endian="big")
+    class first_byte(Schema):
+        control_packet_type = Bit[4]()
+        flags = Bit[4]()
+
+    remaining_length = MqttVarInt()
+```
+
 `Flags(storage, *, endian)` requires an integer storage type and `"big"` or
 `"little"` endian. Declaration order determines bit positions starting at
 zero; the compiler does not use endian to calculate them. Bit ranges must not

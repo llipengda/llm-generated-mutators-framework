@@ -12,6 +12,7 @@ class PipelineState(TypedDict):
     token_usage_total: dict[str, int]
     token_usage_by_step: dict[str, dict[str, int]]
     current_step_index: int
+    completed_checkpoints: NotRequired[list[str]]
     datamodel_format: NotRequired[str]
     peach_step_layout: NotRequired[str]
     peach_sdk: NotRequired[str]
@@ -24,6 +25,8 @@ def new_usage_bucket() -> dict[str, int]:
         "cached_tokens": 0,
         "total_tokens": 0,
         "calls": 0,
+        "max_prompt_tokens_per_call": 0,
+        "max_total_tokens_per_call": 0,
     }
 
 
@@ -39,8 +42,12 @@ def add_step_usage(
 
     for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens", "calls"):
         val = int(usage.get(key, 0))
-        total[key] += val
-        step_bucket[key] += val
+        total[key] = int(total.get(key, 0)) + val
+        step_bucket[key] = int(step_bucket.get(key, 0)) + val
+    for key in ("max_prompt_tokens_per_call", "max_total_tokens_per_call"):
+        val = int(usage.get(key, 0))
+        total[key] = max(int(total.get(key, 0)), val)
+        step_bucket[key] = max(int(step_bucket.get(key, 0)), val)
 
 def pipeline_state_path(protocol_name: str) -> str:
     repo_root = os.path.dirname(os.path.dirname(__file__))
@@ -79,6 +86,7 @@ def load_pipeline_state(protocol_name: str) -> PipelineState:
             data.setdefault("token_usage_by_step", {})
             data.setdefault("current_step_index", 0)
             data.setdefault("data_type_analysis", {})
+            data.setdefault("completed_checkpoints", [])
             return cast(PipelineState, data)
     except Exception as e:
         UI.warn(

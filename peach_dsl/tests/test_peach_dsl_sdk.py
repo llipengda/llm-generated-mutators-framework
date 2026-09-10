@@ -415,6 +415,34 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(flags.find("Flag[@name='first']").attrib["position"], "0")
         self.assertEqual(flags.find("Flag[@name='second']").attrib["position"], "3")
 
+    def test_flags_decorator_registers_an_inline_schema_as_a_field(self) -> None:
+        CustomVarInt = ExtendedType[int]("CustomVarInt")
+
+        class MqttFixedHeader(Schema):
+            @Flags(Int8, endian="big")
+            class first_byte(Schema):
+                control_packet_type = Bit[4]()
+                flags = Bit[4]()
+
+            remaining_length = CustomVarInt()
+
+        result = evaluate_schema(MqttFixedHeader)
+        self.assertIsInstance(result, SchemaResult)
+        first_byte = result.fields["first_byte"]
+        self.assertIsInstance(first_byte, SchemaResult)
+        self.assertEqual(first_byte.flags_layout, FlagsLayout(Int8, "big"))
+        self.assertEqual(tuple(first_byte.fields), ("control_packet_type", "flags"))
+        self.assertIn("remaining_length", result.fields)
+
+        root = ET.fromstring(to_peach_data_model(MqttFixedHeader, include_header=False))
+        flags = root.find("Flags[@name='first_byte']")
+        self.assertIsNotNone(flags)
+        assert flags is not None
+        self.assertEqual(flags.attrib["size"], "8")
+        self.assertEqual(
+            flags.find("Flag[@name='control_packet_type']").attrib["size"], "4"
+        )
+
     def test_bit_outside_flags_exports_as_number(self) -> None:
         class BitFields(Schema):
             enabled = Bit[1](fixed(1))

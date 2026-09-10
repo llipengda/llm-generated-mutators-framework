@@ -41,6 +41,9 @@ OPENAI_API_KEY=sk-...your key...
 OPENAI_BASE_URL=   # Custom endpoint if not using OpenAI
 LLM_MODEL=                            # Model for chat completion
 LLM_TEMPERATURE=                         # Sampling temperature
+# For OpenAI-compatible local models returning `reasoning_content`:
+# LLM_REASONING_FORMAT=deepseek         # Sends {"reasoning_format":"deepseek"}; also prints it
+# LLM_PRINT_REASONING=1                 # Print returned reasoning_content without sending a format
 
 # Peach-specific model overrides (fall back to LLM_MODEL / LLM_TEMPERATURE above)
 # LLM_PEACH_MODEL=

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from langchain_core.callbacks.base import BaseCallbackHandler
+from core.log import console
 
 
 UsageDict = dict[str, int]
@@ -17,6 +18,10 @@ def _empty_usage() -> UsageDict:
         "cached_tokens": 0,
         "total_tokens": 0,
         "calls": 0,
+        # These are per-request maxima, not cumulative token counters.
+        # prompt_tokens is the provider-reported context supplied to the model.
+        "max_prompt_tokens_per_call": 0,
+        "max_total_tokens_per_call": 0,
     }
 
 
@@ -68,6 +73,8 @@ def _extract_usage_from_output(llm_output: Any) -> UsageDict:
         "cached_tokens": cached,
         "total_tokens": total,
         "calls": 1,
+        "max_prompt_tokens_per_call": prompt,
+        "max_total_tokens_per_call": total,
     }
 
 
@@ -105,12 +112,61 @@ class TokenUsageTracker(BaseCallbackHandler):
         with self._lock:
             for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens", "calls"):
                 self._run_total[key] += usage.get(key, 0)
+            for key in ("max_prompt_tokens_per_call", "max_total_tokens_per_call"):
+                self._run_total[key] = max(self._run_total[key], usage.get(key, 0))
 
             if self._step_name is not None:
                 for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens", "calls"):
                     self._step_usage[key] += usage.get(key, 0)
+                for key in ("max_prompt_tokens_per_call", "max_total_tokens_per_call"):
+                    self._step_usage[key] = max(self._step_usage[key], usage.get(key, 0))
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
         usage = _extract_usage_from_output(getattr(response, "llm_output", None))
         self._add_usage(usage)
+        return None
+
+
+@dataclass
+class ReasoningContentLogger(BaseCallbackHandler):
+    """Print reasoning returned by each completed LLM request in an agent step."""
+
+    step_title: str
+    _call_number: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def on_llm_end(self, response: Any, **kwargs: Any) -> Any:
+        # ``generations`` is a third-party LangChain callback boundary. Each
+        # generation's AIMessage carries reasoning_content via agent.py's
+        # OpenAI-message conversion patch.
+        generations = cast(
+            list[list[object]], getattr(response, "generations", [])
+        )
+
+        reasoning_items: list[str] = []
+        for batch in generations:
+            for generation in batch:
+                message = getattr(generation, "message", None)
+                raw_additional_kwargs: object = cast(
+                    object, getattr(message, "additional_kwargs", {})
+                )
+                if not isinstance(raw_additional_kwargs, dict):
+                    continue
+                additional_kwargs = cast(dict[str, object], raw_additional_kwargs)
+                reasoning = additional_kwargs.get("reasoning_content")
+                if reasoning:
+                    reasoning_items.append(str(reasoning))
+
+        if not reasoning_items:
+            return None
+
+        with self._lock:
+            self._call_number += 1
+            call_number = self._call_number
+        for reasoning in reasoning_items:
+            console.print(
+                f"[reasoning] {self.step_title} (call {call_number})",
+                style="dim",
+            )
+            console.print(reasoning, markup=False)
         return None

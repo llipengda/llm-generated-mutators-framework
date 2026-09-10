@@ -68,6 +68,12 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_reasoning_format() -> str | None:
+    """Return the provider-specific reasoning format requested by the user."""
+    value = os.environ.get("LLM_REASONING_FORMAT", "").strip()
+    return value or None
+
+
 @dataclass
 class AgentConfig:
     model: str = field(
@@ -76,6 +82,7 @@ class AgentConfig:
     temperature: float = field(
         default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.7)
     )
+    reasoning_format: str | None = field(default_factory=_env_reasoning_format)
     system_prompt: str = """
 You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.
 """
@@ -92,7 +99,16 @@ def build_agent_graph(
     if config is None:
         config = AgentConfig()
 
-    llm = ChatOpenAI(temperature=config.temperature, model=config.model)
+    if config.reasoning_format is not None:
+        # The local OpenAI-compatible endpoint expects this as a top-level
+        # chat-completions body field, which ChatOpenAI exposes via extra_body.
+        llm = ChatOpenAI(
+            temperature=config.temperature,
+            model=config.model,
+            extra_body={"reasoning_format": config.reasoning_format},
+        )
+    else:
+        llm = ChatOpenAI(temperature=config.temperature, model=config.model)
     rfc_search = make_rfc_search(retriever)
     selected_read_files = None if read_files is None else tuple(read_files)
     selected_write_files = None if write_files is None else tuple(write_files)
