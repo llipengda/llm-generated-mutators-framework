@@ -96,8 +96,12 @@ field, schema, or module currently being defined.
 
 ### Computed field declarations
 
-Use `@computed` to capture a calculation and its symbolic field or schema
-arguments without executing the Python function:
+Use `@computed` when a field's value is calculated from other fields or
+schemas:
+
+Use this feature only for checksums, CRCs, and similar calculated values.
+Describe lengths and counts with the DSL's built-in references and relations,
+not with `@computed`.
 
 ```python
 @computed
@@ -114,21 +118,10 @@ class Packet(Schema):
     crc = Int16(calc_crc(header))
 ```
 
-A computed function must have one to four required positional parameters.
-Fields satisfy parameters of their logical scalar type, while a `Schema` or
-`Block` satisfies a `bytearray` parameter. Calling the decorated function
-creates `Computed` metadata containing the original function and arguments;
-the function body is not executed by the DSL compiler.
-
-When the Pit is compiled, computed argument paths are resolved and their
-nearest common ancestor becomes the `ref` parameter of a Peach `ScriptFixup`.
-The compiler writes `python_fixup.py` beside `datamodel.xml`, copies each
-computed function into a uniquely named fixup class, and loads each argument
-relative to that common ancestor. The generated Pit imports `python_fixup` and
-searches both `.` (for local runs from the artifact directory) and `/generated`
-(the framework's Docker mount point). `bytes` and `bytearray` parameters use
-the SDK's `Element.Bytes()` extension; scalar parameters use Peach's logical
-`InternalValue`.
+A computed function must have one to four required positional parameters with
+no defaults. Scalar fields use their corresponding Python types; a `Schema` or
+`Block` argument must be annotated as `bytearray`. Its return value must match
+the target field's type.
 
 Prefer references to fields declared earlier in wire order. Anonymous
 `Block(...)` and `Union(...)` members are not path-addressable; use their
