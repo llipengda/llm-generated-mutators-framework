@@ -1,8 +1,12 @@
-"""Console output and structured, per-protocol tool-call logging."""
+"""Console output and unified, per-protocol JSONL logging."""
 
 from __future__ import annotations
 
 import json
+import logging
+import traceback
+from contextlib import contextmanager
+from collections.abc import Generator
 import re
 import threading
 import time
@@ -19,15 +23,15 @@ console = Console()
 
 
 def _json_default(value: Any) -> str:
-    """Keep logging from breaking a tool call on non-JSON LangChain values."""
+    """Serialize untyped LangChain callback payloads without breaking tool calls."""
     try:
         return str(value)
     except Exception:
         return f"<{type(value).__name__}>"
 
 
-class ToolUsageLogger(BaseCallbackHandler):
-    """Write complete tool lifecycle events to one JSONL file per protocol."""
+class PipelineLogger(BaseCallbackHandler):
+    """Write tool lifecycle events and runtime diagnostics to one protocol log."""
 
     def __init__(self, protocol: str, *, log_root: Path | None = None) -> None:
         self.protocol = protocol.lower()
@@ -35,7 +39,7 @@ class ToolUsageLogger(BaseCallbackHandler):
         if not safe_protocol:
             safe_protocol = "unknown"
         root = log_root or Path(__file__).resolve().parent.parent / "logs"
-        self.path = root / safe_protocol / "tool_usage.jsonl"
+        self.path = root / safe_protocol / "log.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.session_id = str(uuid4())
         self._lock = threading.Lock()
@@ -44,13 +48,15 @@ class ToolUsageLogger(BaseCallbackHandler):
 
         # Start a fresh log for this protocol run without touching other protocols.
         self.path.write_text("", encoding="utf-8")
-        self._write({"event": "session_start"})
+        self.write_event({"event": "session_start"})
 
-    def _write(self, payload: dict[str, Any]) -> None:
+    def write_event(self, payload: dict[str, object]) -> None:
+        """Append a structured event with the current session metadata."""
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_id": self.session_id,
             "protocol": self.protocol,
+            "level": "INFO",
             **payload,
         }
         line = json.dumps(record, ensure_ascii=False, default=_json_default)
@@ -79,7 +85,7 @@ class ToolUsageLogger(BaseCallbackHandler):
             style="dim",
             markup=False,
         )
-        self._write(
+        self.write_event(
             {
                 "event": "tool_start",
                 "call_id": call_id,
@@ -99,7 +105,7 @@ class ToolUsageLogger(BaseCallbackHandler):
     ) -> None:
         call_id = str(run_id)
         started_at, tool_name = self._finish(call_id)
-        self._write(
+        self.write_event(
             {
                 "event": "tool_end",
                 "call_id": call_id,
@@ -121,9 +127,11 @@ class ToolUsageLogger(BaseCallbackHandler):
     ) -> None:
         call_id = str(run_id)
         started_at, tool_name = self._finish(call_id)
-        self._write(
+        self.write_event(
             {
                 "event": "tool_error",
+                "level": "ERROR",
+                "traceback": "".join(traceback.format_exception(error)),
                 "call_id": call_id,
                 "parent_call_id": str(parent_run_id) if parent_run_id else None,
                 "tool": tool_name,
@@ -133,6 +141,32 @@ class ToolUsageLogger(BaseCallbackHandler):
                 "error": str(error),
             }
         )
+
+    def on_llm_error(
+        self, error: BaseException, *, run_id: UUID,
+        parent_run_id: UUID | None = None, **kwargs: Any,
+    ) -> None:
+        self._callback_error("llm_error", error, run_id, parent_run_id)
+
+    def on_chain_error(
+        self, error: BaseException, *, run_id: UUID,
+        parent_run_id: UUID | None = None, **kwargs: Any,
+    ) -> None:
+        self._callback_error("chain_error", error, run_id, parent_run_id)
+
+    def _callback_error(
+        self, event: str, error: BaseException, run_id: UUID,
+        parent_run_id: UUID | None,
+    ) -> None:
+        self.write_event({
+            "event": event,
+            "level": "ERROR",
+            "call_id": str(run_id),
+            "parent_call_id": str(parent_run_id) if parent_run_id else None,
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "traceback": "".join(traceback.format_exception(error)),
+        })
 
     def _finish(self, call_id: str) -> tuple[float | None, str]:
         with self._lock:
@@ -170,3 +204,61 @@ class ToolUsageLogger(BaseCallbackHandler):
                 value = value[:117] + "..."
             parts.append(f"{key}={value}")
         return f" ({', '.join(parts)})" if parts else ""
+
+
+# Compatibility for callers that previously used the tool-only callback.
+ToolUsageLogger = PipelineLogger
+
+
+class _JsonlHandler(logging.Handler):
+    def __init__(self, logger: PipelineLogger) -> None:
+        super().__init__(logging.INFO)
+        self.pipeline_logger = logger
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            payload: dict[str, object] = {
+                "event": getattr(record, "event", "log"),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            if record.exc_info:
+                payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))
+                error = record.exc_info[1]
+                if error is not None:
+                    payload["error_type"] = type(error).__name__
+                    payload["error"] = str(error)
+            self.pipeline_logger.write_event(payload)
+        except Exception:
+            self.handleError(record)
+
+
+def get_pipeline_logger(protocol: str) -> PipelineLogger:
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, _JsonlHandler) and handler.pipeline_logger.protocol == protocol.lower():
+            return handler.pipeline_logger
+    return PipelineLogger(protocol)
+
+
+@contextmanager
+def log_session(protocol: str, *, log_root: Path | None = None) -> Generator[PipelineLogger, None, None]:
+    """Capture initialization, worker-thread diagnostics and uncaught CLI errors."""
+    logger = PipelineLogger(protocol, log_root=log_root)
+    handler = _JsonlHandler(logger)
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(min(previous_level, logging.INFO))
+    status = "success"
+    try:
+        yield logger
+    except BaseException:
+        status = "error"
+        logging.getLogger(__name__).exception("Pipeline terminated", extra={"event": "pipeline_error"})
+        raise
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+        handler.close()
+        logger.write_event({"event": "session_end", "status": status})

@@ -227,7 +227,7 @@ diagnosis-import instructions.
 
 ## Logs and state
 
-- `logs/<protocol>/tool_usage.jsonl` — records LLM tool lifecycle events.
+- `logs/<protocol>/log.jsonl` — unified log for tool lifecycle events, pipeline steps, validation/subprocess output, UI warnings/errors, and LLM/runtime exceptions with tracebacks. Each run starts a fresh log; records include UTC timestamps, session IDs, protocol, and severity.
 - `logs/<protocol>/pipeline_state.json` — caches pipeline state (packet types, token usage) so you can resume interrupted runs.
 
 ## Troubleshooting

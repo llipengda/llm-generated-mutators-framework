@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import threading
 from typing import Any, cast
@@ -17,6 +18,9 @@ from rich.panel import Panel
 from core.log import console
 from langchain_core.runnables import RunnableConfig
 from core.agent_types import AgentGraph, AgentResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 QUESTIONARY_BASE_STYLE = questionary.Style(
@@ -42,6 +46,7 @@ class UI:
 
     @staticmethod
     def warning_rule(text: str):
+        logger.warning("%s", text)
         console.rule(f"[yellow]{text}[/yellow]", style="yellow")
 
     @staticmethod
@@ -76,18 +81,22 @@ class UI:
 
     @staticmethod
     def warn(message: str):
+        logger.warning("%s", message)
         console.print(f"[bold yellow]{message}[/bold yellow]")
 
     @staticmethod
     def error(message: str):
+        logger.error("%s", message)
         console.print(f"[bold red]{message}[/bold red]")
 
     @staticmethod
     def success(message: str):
+        logger.info("%s", message)
         console.print(f"[bold green]{message}[/bold green]")
 
     @staticmethod
     def dim(message: str):
+        logger.info("%s", message)
         console.print(f"[dim]{message}[/dim]")
 
     print = staticmethod(console.print)
@@ -147,6 +156,11 @@ class UI:
                 reader_thread.join(timeout=0.15)
 
         proc.wait()
+        logger.log(
+            logging.INFO if proc.returncode == 0 else logging.ERROR,
+            "Subprocess %s exited with code %s:\n%s", cmd, proc.returncode, "\n".join(lines),
+            extra={"event": "subprocess_end"},
+        )
         return subprocess.CompletedProcess(
             args=cmd,
             returncode=proc.returncode,

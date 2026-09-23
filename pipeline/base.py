@@ -1,4 +1,5 @@
 import os
+import logging
 import threading
 from typing import Callable
 
@@ -24,7 +25,9 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
 from core.agent_types import AgentGraph, AgentResponse
 from core.usage_tracking import ReasoningContentLogger, TokenUsageTracker
-from core.log import ToolUsageLogger
+from core.log import get_pipeline_logger
+
+logger = logging.getLogger(__name__)
 
 class BasePipeline:
     protocol_lower: str
@@ -95,7 +98,7 @@ class BasePipeline:
         self.config = config
         self.state = state
         self._state_lock = threading.Lock()
-        self.tool_usage_logger = ToolUsageLogger(self.protocol_lower)
+        self.tool_usage_logger = get_pipeline_logger(self.protocol_lower)
 
 
     def __call__(self):
@@ -136,7 +139,13 @@ class BasePipeline:
             self.state["current_step_index"] = i
             self.save_state()
             self._extra_prompt = extra_prompt
-            step_fn()
+            logger.info("Starting %s", step_title, extra={"event": "step_start"})
+            try:
+                step_fn()
+            except BaseException:
+                logger.exception("Failed %s", step_title, extra={"event": "step_error"})
+                raise
+            logger.info("Completed %s", step_title, extra={"event": "step_end"})
             i += 1
             # A step can contain several agent calls, each of which persists state.
             # Persist the *next* top-level step separately so a completed step is
@@ -177,12 +186,18 @@ class BasePipeline:
             "callbacks": callbacks,
         }
         tracker.start_step(step_title)
-        response = run_agent_step(
-            agent_graph=agent_graph or self.agent_graph,
-            prompt_text=prompt_text,
-            config=local_config,
-            step_title=step_title,
-        )
+        logger.info("Starting agent: %s", step_title, extra={"event": "agent_start"})
+        try:
+            response = run_agent_step(
+                agent_graph=agent_graph or self.agent_graph,
+                prompt_text=prompt_text,
+                config=local_config,
+                step_title=step_title,
+            )
+        except BaseException:
+            logger.exception("Agent failed: %s", step_title, extra={"event": "agent_error"})
+            raise
+        logger.info("Completed agent: %s", step_title, extra={"event": "agent_end"})
         step_usage = tracker.end_step()
         with self._state_lock:
             add_step_usage(self.state, step_title=step_title, usage=step_usage)
@@ -210,7 +225,17 @@ class BasePipeline:
             True if verification passed (with or without fixes).
             False if the user chose to exit the pipeline.
         """
-        success, output = verify_fn()
+        def verify() -> tuple[bool, str]:
+            success, output = verify_fn()
+            logger.log(
+                logging.INFO if success else logging.ERROR,
+                "%s verification %s:\n%s", step_title,
+                "passed" if success else "failed", output,
+                extra={"event": "verification_result"},
+            )
+            return success, output
+
+        success, output = verify()
         if success:
             return True
 
@@ -220,7 +245,7 @@ class BasePipeline:
             )
             fix_fn(output, None)
 
-            success, output = verify_fn()
+            success, output = verify()
             if success:
                 UI.success(f"{step_title} passed after fix attempt {attempt}!")
                 return True
@@ -238,7 +263,7 @@ class BasePipeline:
             if choice == "wait":
                 ask_wait_for_fix(step_title)
                 UI.warning_rule(f"{step_title}: re-verifying after manual fix")
-                success, output = verify_fn()
+                success, output = verify()
                 if success:
                     UI.success(f"{step_title} passed after manual fix!")
                     return True
@@ -249,7 +274,7 @@ class BasePipeline:
             UI.warning_rule(f"{step_title}: retrying with user-provided hint")
             fix_fn(output, hint)
 
-            success, output = verify_fn()
+            success, output = verify()
             if success:
                 UI.success(f"{step_title} passed after manual-hint fix!")
                 return True

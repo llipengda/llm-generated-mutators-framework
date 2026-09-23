@@ -445,6 +445,13 @@ class BlockType:
     def __getitem__(self, length: Length) -> BoundBlockType: ...
 
 
+class FlagsLayout:
+    @property
+    def storage(self) -> ScalarType[int]: ...
+    @property
+    def endian(self) -> Endian: ...
+    def __init__(self, storage: ScalarType[int], endian: Endian) -> None: ...
+
 class Flags:
     """Decorate a Schema whose ``Bit`` members occupy a packed integer."""
     def __init__(self, storage: IntegerType, *, endian: Endian) -> None: ...
@@ -474,6 +481,7 @@ class FieldResult:
     computed: Computed[ScalarValue] | None
     path: str | None
 class SchemaResult:
+    flags_layout: FlagsLayout | None
     name: str
     fields: Mapping[str, FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult]
     packet_union: str | None

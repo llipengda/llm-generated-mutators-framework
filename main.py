@@ -1,5 +1,6 @@
 import click
 from core.config import build_config_from_args, load_env
+from core.log import log_session
 
 @click.command()
 @click.option("--protocol", required=True)
@@ -19,18 +20,19 @@ def main(
     fixer: bool,
     modern_sdk: bool,
 ):
-    load_env()
-    build_config_from_args(
-        protocol,
-        seed_dir,
-        list(rfc_paths),
-        fixer=fixer,
-        modern_sdk=modern_sdk,
-    )
-    from pipeline.peach import PeachPipeline
+    with log_session(protocol):
+        load_env()
+        build_config_from_args(
+            protocol,
+            seed_dir,
+            list(rfc_paths),
+            fixer=fixer,
+            modern_sdk=modern_sdk,
+        )
+        from pipeline.peach import PeachPipeline
 
-    pipeline = PeachPipeline()
-    pipeline()
+        pipeline = PeachPipeline()
+        pipeline()
 
 if __name__ == "__main__":
     main()
