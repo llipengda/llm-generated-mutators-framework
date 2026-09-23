@@ -25,7 +25,7 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.retrievers import BaseRetriever
 from core.agent_types import AgentGraph, AgentResponse
 from core.usage_tracking import ReasoningContentLogger, TokenUsageTracker
-from core.log import get_pipeline_logger
+from core.log import get_pipeline_logger, task_scope
 
 logger = logging.getLogger(__name__)
 
@@ -169,40 +169,41 @@ class BasePipeline:
         *,
         agent_graph: AgentGraph | None = None,
     ) -> AgentResponse:
-        extra = getattr(self, "_extra_prompt", None)
-        if extra:
-            prompt_text = prompt_text + "\n\n" + extra
-            UI.dim(f"  Appended extra prompt: {extra}")
-            self._extra_prompt = None
+        with task_scope(step_title, reuse=True) as task:
+            extra = getattr(self, "_extra_prompt", None)
+            if extra:
+                prompt_text = prompt_text + "\n\n" + extra
+                UI.dim(f"  Appended extra prompt: {extra}")
+                self._extra_prompt = None
 
-        tracker = TokenUsageTracker()
-        callbacks: list[BaseCallbackHandler] = [tracker, self.tool_usage_logger]
-        if os.environ.get("LLM_PRINT_REASONING", "").lower() in {
-            "1", "true", "yes", "on"
-        } or bool(os.environ.get("LLM_REASONING_FORMAT", "").strip()):
-            callbacks.append(ReasoningContentLogger(step_title))
-        local_config: RunnableConfig = {
-            **self.config,
-            "callbacks": callbacks,
-        }
-        tracker.start_step(step_title)
-        logger.info("Starting agent: %s", step_title, extra={"event": "agent_start"})
-        try:
-            response = run_agent_step(
-                agent_graph=agent_graph or self.agent_graph,
-                prompt_text=prompt_text,
-                config=local_config,
-                step_title=step_title,
-            )
-        except BaseException:
-            logger.exception("Agent failed: %s", step_title, extra={"event": "agent_error"})
-            raise
-        logger.info("Completed agent: %s", step_title, extra={"event": "agent_end"})
-        step_usage = tracker.end_step()
-        with self._state_lock:
-            add_step_usage(self.state, step_title=step_title, usage=step_usage)
-            self.save_state()
-        return response
+            tracker = TokenUsageTracker()
+            callbacks: list[BaseCallbackHandler] = [tracker, self.tool_usage_logger.for_task(task)]
+            if os.environ.get("LLM_PRINT_REASONING", "").lower() in {
+                "1", "true", "yes", "on"
+            } or bool(os.environ.get("LLM_REASONING_FORMAT", "").strip()):
+                callbacks.append(ReasoningContentLogger(step_title))
+            local_config: RunnableConfig = {
+                **self.config,
+                "callbacks": callbacks,
+            }
+            tracker.start_step(step_title)
+            logger.info("Starting agent: %s", step_title, extra={"event": "agent_start"})
+            try:
+                response = run_agent_step(
+                    agent_graph=agent_graph or self.agent_graph,
+                    prompt_text=prompt_text,
+                    config=local_config,
+                    step_title=step_title,
+                )
+            except BaseException:
+                logger.exception("Agent failed: %s", step_title, extra={"event": "agent_error"})
+                raise
+            logger.info("Completed agent: %s", step_title, extra={"event": "agent_end"})
+            step_usage = tracker.end_step()
+            with self._state_lock:
+                add_step_usage(self.state, step_title=step_title, usage=step_usage)
+                self.save_state()
+            return response
 
     def fix_verify_loop(
         self,

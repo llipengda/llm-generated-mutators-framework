@@ -1,3 +1,4 @@
+from core.log import run_logged_task
 from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import UI
@@ -142,7 +143,7 @@ class FixerSteps(PeachStepMixin):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = [executor.submit(run_fixer_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
+            futures = [executor.submit(run_logged_task, f"Fixer chunk {idx + 1}", run_fixer_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
             for future in as_completed(futures):
                 future.result()
 
@@ -318,7 +319,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = [executor.submit(run_test_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
+            futures = [executor.submit(run_logged_task, f"Fixer tests {idx + 1}", run_test_chunk, chunk, idx) for idx, chunk in enumerate(chunks)]
             for future in as_completed(futures):
                 future.result()
 

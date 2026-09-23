@@ -1,3 +1,4 @@
+from core.log import run_logged_task
 import json
 from pathlib import Path
 import subprocess
@@ -404,7 +405,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             max_workers=min(workers, len(pending_families))
         ) as executor:
             futures = [
-                executor.submit(generate_family, group, index)
+                executor.submit(run_logged_task, f"DSL {group['id']}", generate_family, group, index)
                 for group, index in pending_families
             ]
             for future in as_completed(futures):

@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pipeline Log Viewer</title>
+<style>
+:root{color-scheme:dark;--bg:#1c1c1c;--panel:#222;--line:#333;--muted:#999;--text:#ddd;--blue:#bbb;--red:#e88b8b;--green:#99b99c;--yellow:#d6bb84}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:flex;flex-direction:column;background:var(--bg);color:var(--text);font:13px/1.5 system-ui,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line)}
+.file{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font:12px ui-monospace,monospace}
+button,select,input{font:inherit;color:inherit;background:transparent;border:1px solid var(--line);border-radius:3px;padding:5px 8px}
+button{cursor:pointer}button:hover{background:#303030}button:disabled{opacity:.35;cursor:default}:focus-visible{outline:1px solid #aaa;outline-offset:2px}
+.filters{padding:8px 16px;display:flex;gap:8px;flex-wrap:wrap}#search{flex:1;min-width:160px}#session,#task{max-width:220px}#notice{padding:0 16px;color:var(--yellow);white-space:pre-wrap}#notice:empty{display:none}
+main{display:grid;grid-template-columns:minmax(250px,27%) minmax(0,1fr);border-top:1px solid var(--line);flex:1;min-height:0}
+.timeline{border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}#list{overflow:auto;flex:1}
+.row{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #2b2b2b;border-radius:0;padding:10px 14px}.row.selected{background:#303030;box-shadow:inset 2px 0 #aaa}
+.meta{font:11px ui-monospace,monospace;color:var(--muted);display:flex;gap:9px;align-items:center;flex-wrap:wrap}.summary{margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.badge{font:11px ui-monospace,monospace;color:var(--muted)}.error{color:var(--red)}.warning{color:var(--yellow)}.success{color:var(--muted)}
+.params{color:var(--muted);font:11px/1.6 ui-monospace,monospace;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+#detail{overflow:auto;padding:18px 24px}h2{font-size:16px;font-weight:600;margin:0;overflow-wrap:anywhere}h3{font-size:12px;font-weight:500;color:var(--muted);margin:0 0 8px}.detail-meta{margin:6px 0 20px;color:var(--muted);font:12px ui-monospace,monospace}
+.block{margin:0 0 20px}.block.failure{border-left:2px solid var(--red);padding-left:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace}.output-line{display:block;min-height:1.7em}
+details{margin:12px 0}details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-bottom:8px}.kv{display:grid;grid-template-columns:minmax(80px,140px) 1fr;gap:6px 14px;margin:0}.kv dt{color:var(--muted);overflow-wrap:anywhere}.kv dd{margin:0;min-width:0}
+.code-lines{background:#191919;padding:8px 0}.code-line{display:flex;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 ui-monospace,monospace}.line-number{flex:0 0 48px;color:#777;text-align:right;padding-right:14px;user-select:none}.code-text{min-width:0}.removed{background:#302324}.added{background:#243026}
+.empty{padding:30px 20px;color:var(--muted);text-align:center}.drop{outline:2px dashed #999;outline-offset:-4px}#file-input,[hidden]{display:none!important}
+@media(max-width:780px){body{height:auto;min-height:100vh}main{grid-template-columns:1fr;flex:initial}.timeline{height:350px;border-right:0}#detail{min-height:300px;padding:16px}.filters,header{padding:8px 12px}}
+</style>
+</head>
+<body>
+<header><div id="filename" class="file"></div><button id="choose">打开文件</button><input id="file-input" type="file" accept=".jsonl,.log,.txt"></header>
+<div class="filters"><input id="search" type="search" placeholder="搜索" aria-label="搜索日志"><select id="category" aria-label="日志类型"><option value="">所有类型</option><option value="tool">工具调用</option><option value="step">步骤</option><option value="validation">验证结果</option><option value="subprocess">子进程输出</option><option value="exception">异常</option><option value="session">会话</option><option value="log">其他日志</option></select><select id="session" aria-label="会话"><option value="">所有会话</option></select><select id="task" aria-label="任务"><option value="">所有任务</option></select><select id="severity" aria-label="日志级别"><option value="">所有级别</option><option value="error">错误</option><option value="warning">错误和警告</option></select><button id="reset">重置</button></div>
+<div id="notice" role="status"></div>
+<main><section class="timeline" aria-label="日志列表"><div id="list"></div></section><article id="detail" aria-label="日志详情"></article></main>
+<script id="payload" type="application/json">__LOG_PAYLOAD__</script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+let entries = [], filtered = [], selected = null;
+const text = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? '';
+function element(tag, content, className) { const node = document.createElement(tag); if(content !== undefined) node.textContent = content; if(className) node.className = className; return node; }
+function decodeValue(value) {
+  if(typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch {}
+  // Older logs contain Python's ToolMessage repr. Decode only its quoted content,
+  // never evaluate a Python/JavaScript expression from a log.
+  const match = value.match(/^content=(['"])/);
+  if(!match) return value;
+  const quote = match[1]; let result = '';
+  for(let i = match[0].length; i < value.length; i++) {
+    const ch = value[i];
+    if(ch === quote) { try { return JSON.parse(result); } catch { return result; } }
+    if(ch !== '\\') { result += ch; continue; }
+    const next = value[++i];
+    const escapes = {n:'\n',r:'\r',t:'\t',b:'\b',f:'\f',v:'\v',a:'\x07','\\':'\\',"'":"'",'"':'"'};
+    if(Object.hasOwn(escapes,next)) result += escapes[next];
+    else if(['x','u','U'].includes(next)) {
+      const size = {x:2,u:4,U:8}[next], hex = value.slice(i+1,i+1+size);
+      if(!new RegExp(`^[0-9a-fA-F]{${size}}$`).test(hex) || parseInt(hex,16)>0x10ffff) return value;
+      result += String.fromCodePoint(parseInt(hex,16)); i += size;
+    } else result += '\\' + next;
+  }
+  return value;
+}
+function toolOutput(value) {
+  const decoded = decodeValue(value);
+  if(decoded && typeof decoded === 'object' && 'content' in decoded && !('ok' in decoded)) return decodeValue(decoded.content);
+  return decoded;
+}
+function localTime(value, compact = false, timeZone) {
+  if(!value) return '无时间';
+  const date = new Date(value);
+  if(Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat('zh-CN', {year:compact ? undefined : 'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23',timeZone}).format(date);
+}
+function inputSummary(input) {
+  input = decodeValue(input);
+  if(!input || typeof input !== 'object') return text(input).replace(/\s+/g,' ').slice(0,180);
+  const parts = [];
+  for(const key of ['filepath','entry_path','xml_path','query','paths','source_file_or_dir','output_dll']) {
+    if(input[key] != null) parts.push(`${key}: ${Array.isArray(input[key]) ? input[key].join(', ') : input[key]}`);
+  }
+  if(input.start_line != null || input.line_count != null) parts.push(`行 ${input.start_line ?? 1} · ${input.line_count === -1 || input.line_count == null ? '至末尾' : input.line_count + ' 行'}`);
+  if(typeof input.content === 'string') parts.push(`${input.content.split('\n').length} 行内容`);
+  if(typeof input.old_text === 'string') parts.push(`替换 ${input.old_text.split('\n').length} → ${String(input.new_text ?? '').split('\n').length} 行`);
+  if(!parts.length) for(const [key,value] of Object.entries(input).slice(0,3)) parts.push(`${key}: ${text(value)}`);
+  return parts.join(' · ').replace(/\s+/g,' ').slice(0,240);
+}
+
+function category(record) {
+  const event = String(record.event || 'log');
+  if(event.startsWith('tool_')) return 'tool';
+  if(event === 'verification_result') return 'validation';
+  if(event === 'subprocess_end') return 'subprocess';
+  if(event.endsWith('_error') || record.traceback) return 'exception';
+  if(event.startsWith('step_') || event.startsWith('agent_') || event.startsWith('task_')) return 'step';
+  if(event.startsWith('session_')) return 'session';
+  return 'log';
+}
+function severity(record) {
+  if(String(record.event || '').endsWith('_error') || record.status === 'error' || record.traceback) return 'ERROR';
+  return String(record.level || 'INFO').toUpperCase();
+}
+function isError(level) { return ['ERROR','CRITICAL','FATAL'].includes(level); }
+function parseLog(source) {
+  const records = [], invalid = [];
+  source.replace(/^\uFEFF/, '').split(/\r?\n/).forEach((line, index) => {
+    if(!line.trim()) return;
+    try { const data = JSON.parse(line); if(!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('预期 JSON 对象'); records.push({data, line:index + 1}); }
+    catch(error) { invalid.push(index + 1); }
+  });
+  const items = [], calls = new Map();
+  for(const record of records) {
+    const data = record.data;
+    // Session is part of the key: separate runs may reuse a call ID.
+    const key = JSON.stringify([data.session_id || '', data.call_id]);
+    let item = data.call_id && category(data) === 'tool' ? calls.get(key) : null;
+    if(!item) {
+      item = {id:items.length, records:[], category:category(data), level:'INFO', data};
+      items.push(item);
+      if(data.call_id && item.category === 'tool') calls.set(key, item);
+    }
+    item.records.push(record);
+  }
+  for(const item of items) {
+    const start = item.records.find(r => r.data.event === 'tool_start');
+    const finish = item.records.findLast(r => ['tool_end','tool_error'].includes(r.data.event));
+    item.data = finish?.data || item.records.at(-1).data;
+    item.start = start?.data;
+    item.output = toolOutput(item.data.output);
+    const levels = item.records.map(r => severity(r.data));
+    if(item.category === 'tool' && item.output?.ok === false) levels.push('ERROR');
+    item.level = levels.find(isError) || levels.find(l => ['WARNING','WARN'].includes(l)) || severity(item.data);
+    item.title = item.category === 'tool' ? String(item.start?.tool || item.data.tool || '未知工具') : String(item.data.message || item.data.error || item.data.event || '日志');
+    item.status = item.category === 'tool' ? (isError(item.level) ? '失败' : finish ? '完成' : '未结束') : String(item.data.event || 'log');
+    item.taskId = String(item.data.task_id || item.start?.task_id || '');
+    item.taskName = String(item.data.task_name || item.start?.task_name || item.taskId);
+    item.taskKey = item.taskId ? JSON.stringify([item.data.session_id || '',item.taskId]) : 'unassigned';
+    item.params = item.category === 'tool' ? inputSummary(item.start?.input) : '';
+    item.search = (JSON.stringify(item.records) + text(item.output)).toLowerCase();
+    item.sortTimestamp = Date.parse(item.data.timestamp || item.start?.timestamp || '');
+    item.sortLine = item.records.at(-1).line;
+  }
+  // Keep the newest completed event at the top. Records without timestamps
+  // retain their source order so legacy logs remain predictable.
+  items.sort((left, right) => {
+    const leftTimed = Number.isFinite(left.sortTimestamp), rightTimed = Number.isFinite(right.sortTimestamp);
+    if(leftTimed && rightTimed) return right.sortTimestamp - left.sortTimestamp || right.sortLine - left.sortLine;
+    if(leftTimed !== rightTimed) return leftTimed ? -1 : 1;
+    return left.sortLine - right.sortLine;
+  });
+  return {items, invalid, recordCount:records.length};
+}
+function load(source, name) {
+  const result = parseLog(source);
+  entries = result.items; selected = null;
+  $('filename').textContent = name || '尚未打开文件';
+  $('notice').textContent = result.invalid.length ? `跳过 ${result.invalid.length} 行无效 JSON（可能是尚未写完的记录）。行号：${result.invalid.slice(0,20).join(', ')}${result.invalid.length > 20 ? '…' : ''}` : '';
+  $('session').replaceChildren(new Option('所有会话', ''));
+  const sessions = [...new Set(entries.map(e => String(e.data.session_id || '')).filter(Boolean))];
+  for(const session of sessions) $('session').add(new Option(session, session));
+  $('session').hidden = sessions.length < 2;
+  $('task').replaceChildren(new Option('所有任务',''));
+  const tasks = new Map(entries.map(e => [e.taskKey, e.taskName]));
+  for(const [id,label] of tasks) $('task').add(new Option(id === 'unassigned' ? '无任务标识' : `${label} · ${JSON.parse(id)[1].slice(0,8)}`,id));
+  $('task').hidden = !entries.some(e => e.taskId);
+  $('filename').title = name;
+  applyFilters();
+}
+function applyFilters() {
+  const query = $('search').value.toLowerCase().trim();
+  filtered = entries.filter(e => (!$('category').value || e.category === $('category').value)
+    && (!$('task').value || e.taskKey === $('task').value)
+    && (!$('session').value || e.data.session_id === $('session').value)
+    && (!$('severity').value || isError(e.level) || ($('severity').value === 'warning' && ['WARNING','WARN'].includes(e.level)))
+    && (!query || e.search.includes(query)));
+  if(!filtered.some(e => e.id === selected)) selected = filtered[0]?.id ?? null;
+  renderList(); renderDetail();
+}
+function renderList() {
+  $('list').replaceChildren();
+  for(const item of filtered) {
+    const row = element('button', undefined, 'row' + (item.id === selected ? ' selected' : ''));
+    row.setAttribute('aria-pressed', String(item.id === selected));
+    const meta = element('div', undefined, 'meta');
+    const stamp = String(item.start?.timestamp || item.data.timestamp || '无时间');
+    meta.append(element('span', localTime(stamp, true)), element('span', item.status, 'badge ' + (isError(item.level) ? 'error' : item.status === '完成' ? 'success' : '')));
+    if(item.data.duration_ms != null) meta.append(element('span', `${item.data.duration_ms} ms`));
+    row.append(meta, element('div', item.title, 'summary'));
+    if(item.taskName) { const label = element('div', item.taskName, 'params'); label.title = item.taskId; row.append(label); }
+    if(item.params) { const params = element('div', item.params, 'params'); params.title = item.params; row.append(params); }
+    row.onclick = () => { selected = item.id; renderList(); renderDetail(); };
+    $('list').append(row);
+  }
+  if(!filtered.length) $('list').append(element('div', entries.length ? '没有符合筛选条件的日志' : '打开或拖入日志文件', 'empty'));
+}
+function block(title, value, options = {}) {
+  const box = element('section', undefined, 'block' + (options.error ? ' failure' : ''));
+  box.append(element('h3', title));
+  if(options.fields && value && typeof value === 'object' && !Array.isArray(value)) {
+    const dl = element('dl', undefined, 'kv');
+    for(const [key, data] of Object.entries(value)) { const dd = element('dd'); dd.append(element('pre', text(data))); dl.append(element('dt', key), dd); }
+    box.append(dl);
+  } else if(options.output) {
+    const pre = element('pre');
+    for(const line of text(value).split('\n')) pre.append(element('span', line, 'output-line ' + (/\[(FAIL|ERROR)\]/.test(line) ? 'error' : /\[PASS\]/.test(line) ? 'success' : /\bwarning\b/i.test(line) ? 'warning' : '')));
+    box.append(pre);
+  } else box.append(element('pre', text(value)));
+  $('detail').append(box);
+}
+function codeBlock(title, content, {numbered = false, start = 1, style = ''} = {}) {
+  const box = element('section', undefined, 'block'); box.append(element('h3',title));
+  const code = element('div', undefined, 'code-lines ' + style);
+  String(content ?? '').split('\n').forEach((line,index) => {
+    const match = numbered ? line.match(/^\s*(\d+): ?(.*)$/) : null;
+    const row = element('div', undefined, 'code-line');
+    row.append(element('span', match ? match[1] : String(start+index), 'line-number'), element('span',match ? match[2] : line,'code-text'));
+    code.append(row);
+  });
+  box.append(code); $('detail').append(box);
+}
+function structuredBlock(title, value) {
+  if(!value || typeof value !== 'object') { block(title,value,{output:true}); return; }
+  const box = element('section', undefined, 'block'); box.append(element('h3',title));
+  function tree(value) {
+    if(value === null || typeof value !== 'object') return element('pre',text(value));
+    if(Array.isArray(value) && value.every(v => v === null || typeof v !== 'object')) return element('pre',value.map(text).join('\n'));
+    const dl = element('dl',undefined,'kv');
+    for(const [key,child] of Object.entries(value)) {
+      const dd = element('dd');
+      if(child && typeof child === 'object' && !(Array.isArray(child) && child.every(v => v === null || typeof v !== 'object'))) {
+        const details = element('details'); details.open = true;
+        details.append(element('summary', Array.isArray(child) ? `${child.length} 项` : '字段'), tree(child)); dd.append(details);
+      } else dd.append(tree(child));
+      dl.append(element('dt',key), dd);
+    }
+    return dl;
+  }
+  box.append(tree(value)); $('detail').append(box);
+}
+function foldedFields(title, value) {
+  structuredBlock(title, value);
+  const content = $('detail').lastElementChild;
+  content.querySelector('h3').remove();
+  const details = element('details'); details.append(element('summary',title),content);
+  $('detail').append(details);
+}
+function renderTool(item) {
+  const name = item.title, input = decodeValue(item.start?.input), output = item.output;
+  const args = input && typeof input === 'object' && !Array.isArray(input) ? {...input} : input;
+  if(args && typeof args === 'object') {
+    if(name === 'Write_File') delete args.content;
+    if(name === 'Apply_Patch') { delete args.old_text; delete args.new_text; }
+  }
+  structuredBlock('调用参数', args ?? '当前文件未包含该调用的开始记录。');
+  if(name === 'Write_File' && input?.content != null) codeBlock('写入内容',input.content);
+  if(name === 'Apply_Patch') {
+    if(input?.old_text != null) codeBlock('替换前',input.old_text,{style:'removed'});
+    if(input?.new_text != null) codeBlock('替换后',input.new_text,{style:'added'});
+  }
+  if(!('output' in item.data)) return;
+  if(!output || typeof output !== 'object' || !('ok' in output)) { structuredBlock('工具输出',output); return; }
+  if(!output.ok || !['Read_File','RFC_Search','Search_Class','Search_Files'].includes(name)) block(output.ok ? '结果' : '错误',output.message || output.code || '',{error:output.ok === false,output:true});
+  const data = output.data;
+  if(!data || typeof data !== 'object') { if(data != null) structuredBlock('结果数据',data); return; }
+  const metadata = {...data};
+  if(['Read_File','RFC_Search','Search_Class'].includes(name)) delete metadata.content;
+  if(name === 'Search_Files') delete metadata.matches;
+  if(name === 'Validate_Peach_DSL') delete metadata.validation;
+  const labels = {Read_File:'文件信息',Write_File:'写入结果',Apply_Patch:'文件与校验摘要',Search_Files:'搜索统计',RFC_Search:'RFC 检索信息',Search_Class:'类检索信息',Validate_Peach_XML:'XML 验证信息',Validate_Peach_DSL_Module:'模块与 Schema',Validate_Peach_DSL:'DSL 编译产物',Build_DotNet_DLL:'DLL 编译产物'};
+  if(Object.keys(metadata).length) {
+    if(['Read_File','RFC_Search','Search_Class','Apply_Patch'].includes(name)) foldedFields(labels[name] || '详情',metadata);
+    else structuredBlock(labels[name] || '结果',metadata);
+  }
+  if(name === 'Read_File' && data.content != null) codeBlock(data.kind === 'directory' ? '目录条目' : '文件内容',data.content,{numbered:true,start:data.start_line || 1});
+  if(['RFC_Search','Search_Class'].includes(name) && data.content != null) block(name === 'RFC_Search' ? 'RFC 原文片段' : '类定义 / API',data.content,{output:true});
+  if(name === 'Search_Files' && Array.isArray(data.matches)) {
+    for(const match of data.matches) {
+      if(!match || typeof match !== 'object') { structuredBlock('搜索结果',match); continue; }
+      const lines = Array.isArray(match.context) && match.context.length ? match.context : [{line:match.line,text:match.text}];
+      codeBlock(`${match.path || '匹配'}:${match.line ?? ''}`,lines.map(line => `${line.line}: ${line.text}`).join('\n'),{numbered:true});
+    }
+  }
+  if(name === 'Validate_Peach_DSL' && data.validation != null) structuredBlock('派生 XML 验证',data.validation);
+}
+
+function renderDetail() {
+  const item = entries.find(e => e.id === selected);
+  $('detail').replaceChildren();
+  if(!item) { $('detail').append(element('div', '选择一条日志', 'empty')); return; }
+  const data = item.data;
+  $('detail').append(element('h2', item.title.split('\n')[0]));
+  const meta = element('div', undefined, 'detail-meta');
+  meta.textContent = [item.taskName, localTime(data.timestamp), item.status, data.duration_ms == null ? null : `${data.duration_ms} ms`].filter(Boolean).join(' · ');
+  meta.title = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  $('detail').append(meta);
+  if(item.category === 'tool') {
+    renderTool(item);
+    if(item.status === '未结束') block('调用状态', '未收到结束记录');
+  }
+  if(data.error) block(data.error_type || '错误', data.error, {error:true});
+  if(data.message) block(item.category === 'validation' ? '验证报告' : item.category === 'subprocess' ? '进程输出' : '消息', data.message, {output:true, error:isError(item.level)});
+  if(data.traceback) block('异常堆栈', data.traceback, {error:true});
+  if(item.category === 'session') block('会话状态', data.status || 'start');
+  const raw = element('details'); raw.title = '日志行号：' + item.records.map(r => r.line).join(', '); raw.append(element('summary', '原始记录'), element('pre', JSON.stringify(item.records.map(r => r.data), null, 2))); $('detail').append(raw);
+  $('detail').scrollTop = 0;
+}
+$('choose').onclick = () => { $('file-input').value = ''; $('file-input').click(); };
+async function readFile(file) { try { load(await file.text(), file.name); } catch(error) { $('notice').textContent = `读取文件失败：${error.message}`; } }
+$('file-input').onchange = event => { const file = event.target.files[0]; if(file) readFile(file); };
+for(const name of ['category','session','severity','task']) $(name).onchange = applyFilters;
+let searchTimer; $('search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(applyFilters, 120); };
+$('reset').onclick = () => { $('search').value = ''; $('category').value = ''; $('session').value = ''; $('severity').value = ''; $('task').value = ''; applyFilters(); };
+document.addEventListener('dragover', event => { event.preventDefault(); document.body.classList.add('drop'); });
+document.addEventListener('dragleave', event => { if(!event.relatedTarget) document.body.classList.remove('drop'); });
+document.addEventListener('drop', event => { event.preventDefault(); document.body.classList.remove('drop'); const file = event.dataTransfer.files[0]; if(file) readFile(file); });
+const initial = JSON.parse($('payload').textContent);
+load(initial.source, initial.name);
+</script>
+</body>
+</html>

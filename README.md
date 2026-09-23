@@ -230,6 +230,51 @@ diagnosis-import instructions.
 - `logs/<protocol>/log.jsonl` — unified log for tool lifecycle events, pipeline steps, validation/subprocess output, UI warnings/errors, and LLM/runtime exceptions with tracebacks. Each run starts a fresh log; records include UTC timestamps, session IDs, protocol, and severity.
 - `logs/<protocol>/pipeline_state.json` — caches pipeline state (packet types, token usage) so you can resume interrupted runs.
 
+### Log viewer
+
+Generate and open a self-contained, offline HTML viewer (no frontend dependencies
+or server needed):
+
+```bash
+uv run python -m core.log_viewer mqtt
+uv run python -m core.log_viewer logs/mqtt/log.jsonl
+# Open an empty viewer, then choose or drag in a JSONL file:
+uv run python -m core.log_viewer
+# Generate a snapshot without launching the browser:
+uv run python -m core.log_viewer mqtt --no-open --output tmp/mqtt-log.html
+```
+
+The default output is `tmp/log-viewer.html`. The viewer groups tool start/end/error
+records by session and call ID, shows inputs, outputs and duration together, and
+highlights exceptions and tracebacks. Validation and subprocess output use colored
+`[PASS]`, `[FAIL]`, and `[ERROR]` lines. Filter by event category or session, search
+full record contents, or show errors only (optionally including warnings).
+The compact left column includes file paths, search queries, line ranges, and patch
+sizes. Timestamps use the browser's local timezone (shown on hover over the detail timestamp); original
+UTC timestamps remain in the raw JSON. Tool details have dedicated layouts for
+file contents with line numbers, before/after patches, search matches and RFC
+passages, DSL/XML validation, and DLL compilation. Legacy ToolMessage string
+wrappers are decoded, and structured `ok: false` results count as failures even
+when the tool callback itself completed normally. Original JSON and source line
+numbers remain available for every entry. New logs include `task_id` and
+`task_name` for each parallel worker and Agent invocation. Worker setup, tool
+callbacks, diagnostics, and postchecks share the same task; retries get a new ID.
+The viewer displays a compact task label and can filter by task. Older records
+without task fields remain available under “无任务标识”.
+
+Legacy `tool_usage.jsonl` files can be opened by path as well. Invalid or unfinished
+JSON lines are skipped with a visible line-number report; unmatched calls remain
+visible. The full filtered list is shown newest first. This is a snapshot viewer: choose/drop the file again or rerun the command
+to see newly appended logs. Files are read locally and no data is uploaded; generated
+HTML includes the loaded log contents.
+
+Viewer checks:
+
+```bash
+uv run python -m unittest tests.test_log_viewer
+node --test tests/test_log_viewer.mjs
+```
+
 ## Troubleshooting
 
 - **`peach/sdk/` missing**: run `./setup.sh`.

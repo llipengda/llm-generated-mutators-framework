@@ -1,3 +1,4 @@
+from core.log import run_logged_task
 from core.agent import build_agent_graph
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
@@ -117,7 +118,7 @@ class MutatorSteps(PeachStepMixin):
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(run_one, pkt_type, idx) for idx, pkt_type in enumerate(types_to_generate)]
+            futures = [executor.submit(run_logged_task, f"Mutator {pkt_type}", run_one, pkt_type, idx) for idx, pkt_type in enumerate(types_to_generate)]
             for future in as_completed(futures):
                 future.result()
 
@@ -196,7 +197,7 @@ class MutatorSteps(PeachStepMixin):
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(fix_one, log_file) for log_file in error_logs]
+                futures = [executor.submit(run_logged_task, f"Mutator fix {log_file}", fix_one, log_file) for log_file in error_logs]
                 for future in as_completed(futures):
                     future.result()
 

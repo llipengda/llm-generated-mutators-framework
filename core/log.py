@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from copy import copy
+from contextvars import ContextVar
+from dataclasses import dataclass
 import logging
 import traceback
 from contextlib import contextmanager
@@ -12,7 +15,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, ParamSpec, TypeVar
 from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -20,6 +23,42 @@ from rich.console import Console
 
 
 console = Console()
+
+
+@dataclass(frozen=True)
+class LogTask:
+    task_id: str
+    task_name: str
+
+
+_current_task: ContextVar[LogTask | None] = ContextVar("log_task", default=None)
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+@contextmanager
+def task_scope(name: str, *, reuse: bool = False) -> Generator[LogTask, None, None]:
+    existing = _current_task.get()
+    task = existing if reuse and existing is not None else LogTask(str(uuid4()), name)
+    token = _current_task.set(task)
+    try:
+        yield task
+    finally:
+        _current_task.reset(token)
+
+
+def run_logged_task(name: str, function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    """Establish context inside executor workers, including setup and postchecks."""
+    with task_scope(name):
+        logger = logging.getLogger(__name__)
+        logger.info("Starting %s", name, extra={"event": "task_start"})
+        try:
+            result = function(*args, **kwargs)
+        except BaseException:
+            logger.exception("Failed %s", name, extra={"event": "task_error"})
+            raise
+        logger.info("Completed %s", name, extra={"event": "task_end"})
+        return result
 
 
 def _json_default(value: Any) -> str:
@@ -34,6 +73,7 @@ class PipelineLogger(BaseCallbackHandler):
     """Write tool lifecycle events and runtime diagnostics to one protocol log."""
 
     def __init__(self, protocol: str, *, log_root: Path | None = None) -> None:
+        self.bound_task: LogTask | None = None
         self.protocol = protocol.lower()
         safe_protocol = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.protocol).strip("._")
         if not safe_protocol:
@@ -50,13 +90,23 @@ class PipelineLogger(BaseCallbackHandler):
         self.path.write_text("", encoding="utf-8")
         self.write_event({"event": "session_start"})
 
+    def for_task(self, task: LogTask) -> PipelineLogger:
+        """Bind callbacks without reopening the file or sharing mutable task state."""
+        bound = copy(self)
+        bound.bound_task = task
+        return bound
+
     def write_event(self, payload: dict[str, object]) -> None:
         """Append a structured event with the current session metadata."""
+        task = self.bound_task or _current_task.get()
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "session_id": self.session_id,
             "protocol": self.protocol,
             "level": "INFO",
+            "task_id": task.task_id if task else None,
+            "task_name": task.task_name if task else None,
+            "thread_name": threading.current_thread().name,
             **payload,
         }
         line = json.dumps(record, ensure_ascii=False, default=_json_default)

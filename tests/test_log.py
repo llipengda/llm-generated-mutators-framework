@@ -74,3 +74,104 @@ class PipelineLogTests(unittest.TestCase):
             self.assertEqual([r["level"] for r in results], ["ERROR", "INFO"])
             self.assertIn("seed.raw: parse failed", results[0]["message"])
             fix.assert_called_once_with("seed.raw: parse failed", None)
+
+    def test_parallel_task_context_and_detached_callbacks(self) -> None:
+        from threading import Barrier
+        from core.log import run_logged_task, task_scope
+
+        barrier = Barrier(2)
+        with tempfile.TemporaryDirectory() as directory:
+            with log_session("demo", log_root=Path(directory)) as logger:
+                def worker(name: str) -> None:
+                    with task_scope("agent", reuse=True) as task:
+                        self.assertEqual(task.task_name, name)
+                        callback = logger.for_task(task)
+                        barrier.wait(timeout=5)
+                        UI.error(name)
+                        # Callbacks can run on another executor without inherited context.
+                        with ThreadPoolExecutor(max_workers=1) as callbacks:
+                            callbacks.submit(callback.on_tool_start, {"name": name}, "", run_id=uuid4()).result()
+                        logging.getLogger(__name__).info("after callback %s", name)
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    futures = [pool.submit(run_logged_task, name, worker, name) for name in ("family_a", "family_b")]
+                    for future in futures:
+                        future.result()
+                UI.warn("outside task")
+
+            records = [json.loads(line) for line in logger.path.read_text().splitlines()]
+            for name in ("family_a", "family_b"):
+                own = [r for r in records if r.get("task_name") == name]
+                self.assertEqual(len(own), 5)
+                self.assertEqual(len({r["task_id"] for r in own}), 1)
+                self.assertEqual(next(r["tool"] for r in own if r["event"] == "tool_start"), name)
+            ids = {r["task_id"] for r in records if r.get("task_id")}
+            self.assertEqual(len(ids), 2)
+            self.assertIsNone(next(r for r in records if r.get("message") == "outside task")["task_id"])
+
+    def test_failed_tasks_reset_context_and_retries_get_new_ids(self) -> None:
+        from core.log import run_logged_task
+
+        def fail() -> None:
+            raise ValueError("postcheck failed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with log_session("demo", log_root=Path(directory)) as logger:
+                for _ in range(2):
+                    with self.assertRaises(ValueError):
+                        run_logged_task("same family", fail)
+                UI.warn("after failures")
+            records = [json.loads(line) for line in logger.path.read_text().splitlines()]
+            failures = [r for r in records if r["event"] == "task_error"]
+            self.assertEqual(len({r["task_id"] for r in failures}), 2)
+            self.assertTrue(all("ValueError: postcheck failed" in r["traceback"] for r in failures))
+            self.assertIsNone(next(r for r in records if r.get("message") == "after failures")["task_id"])
+
+    def test_agent_call_binds_callbacks_and_runtime_logs_to_worker(self) -> None:
+        from threading import Lock
+        from langchain_core.messages import AIMessage
+        from langchain_core.runnables import RunnableConfig
+        from core.agent_types import AgentResponse
+        from core.log import PipelineLogger, run_logged_task
+        from core.state import new_usage_bucket
+
+        class Agent:
+            def invoke(self, input: object, config: RunnableConfig | None = None) -> AgentResponse:
+                assert config is not None
+                callbacks = config.get("callbacks")
+                assert isinstance(callbacks, list)
+                callback = next(c for c in callbacks if isinstance(c, PipelineLogger))
+                run_id = uuid4()
+                callback.on_tool_start({"name": "RFC_Search"}, "query", run_id=run_id)
+                logging.getLogger(__name__).warning("inside agent")
+                callback.on_tool_end("result", run_id=run_id)
+                return {"messages": [AIMessage(content="done")]}
+
+        class Pipeline(BasePipeline):
+            def __init__(self, callback: PipelineLogger) -> None:
+                self.tool_usage_logger = callback
+                self.config = {}
+                self.agent_graph = Agent()
+                self._state_lock = Lock()
+                self.state = {
+                    "packet_types": [], "data_type_analysis": {}, "constraints": "",
+                    "token_usage_total": new_usage_bucket(), "token_usage_by_step": {},
+                    "current_step_index": 0,
+                }
+
+            def save_state(self) -> None:
+                logging.getLogger(__name__).info("saved agent state")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with log_session("demo", log_root=Path(directory)) as logger:
+                pipeline = Pipeline(logger)
+                run_logged_task("DSL publish", pipeline.call_agent, "prompt", "Generate family")
+                pipeline.call_agent("prompt", "Standalone retry")
+            records = [json.loads(line) for line in logger.path.read_text().splitlines()]
+            worker = [r for r in records if r.get("task_name") == "DSL publish"]
+            self.assertEqual(len({r["task_id"] for r in worker}), 1)
+            self.assertTrue({"task_start", "agent_start", "tool_start", "tool_end", "agent_end", "task_end"}.issubset({r["event"] for r in worker}))
+            self.assertTrue(any(r.get("message") == "inside agent" for r in worker))
+            retry = [r for r in records if r.get("task_name") == "Standalone retry"]
+            self.assertTrue(retry)
+            self.assertNotEqual(retry[0]["task_id"], worker[0]["task_id"])
