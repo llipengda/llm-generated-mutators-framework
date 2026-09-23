@@ -27,6 +27,10 @@ then
     echo "Docker could not be found, please install it first."
     exit 1
 fi
+if ! command -v xmllint &> /dev/null; then
+    echo "xmllint could not be found, please install libxml2 first."
+    exit 1
+fi
 if [ "$SDK_VARIANT" = "legacy" ]; then
     if ! command -v mono &> /dev/null; then
         echo "Mono could not be found, please install it first."
