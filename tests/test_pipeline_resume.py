@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from typing import Mapping
 
@@ -116,3 +119,19 @@ class PipelineResumeTests(unittest.TestCase):
 
         printed.assert_any_call("[reasoning] demo (call 1)", style="dim")
         printed.assert_any_call("inspect the tool output", markup=False)
+
+    def test_reasoning_logger_writes_structured_event(self) -> None:
+        from core.log import PipelineLogger
+
+        with tempfile.TemporaryDirectory() as directory:
+            event_logger = PipelineLogger("demo", log_root=Path(directory))
+            logger = ReasoningContentLogger(
+                "demo", event_logger=event_logger, print_to_console=False
+            )
+            logger.on_llm_end(_ReasoningResponse("inspect the tool output"))
+
+            records = [json.loads(line) for line in event_logger.path.read_text().splitlines()]
+            reasoning = next(record for record in records if record["event"] == "reasoning")
+            self.assertEqual(reasoning["step_title"], "demo")
+            self.assertEqual(reasoning["call_number"], 1)
+            self.assertEqual(reasoning["reasoning"], "inspect the tool output")

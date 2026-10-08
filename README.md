@@ -227,7 +227,7 @@ diagnosis-import instructions.
 
 ## Logs and state
 
-- `logs/<protocol>/log.jsonl` — unified log for tool lifecycle events, pipeline steps, validation/subprocess output, UI warnings/errors, and LLM/runtime exceptions with tracebacks. Each run starts a fresh log; records include UTC timestamps, session IDs, protocol, and severity.
+- `logs/<protocol>/log.jsonl` — unified log for tool lifecycle events, pipeline steps, validation/subprocess output, UI warnings/errors, model reasoning, and LLM/runtime exceptions with tracebacks. Runs are appended rather than overwritten; records include UTC timestamps, session IDs, protocol, and severity, and the viewer can filter each run separately.
 - `logs/<protocol>/pipeline_state.json` — caches pipeline state (packet types, token usage) so you can resume interrupted runs.
 
 ### Log viewer

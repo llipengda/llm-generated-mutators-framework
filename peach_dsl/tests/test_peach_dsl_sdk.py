@@ -5,8 +5,11 @@ from xml.etree import ElementTree as ET
 import unittest
 from typing import Any, Callable, cast
 
-import peach_dsl
-from peach_dsl import *
+if __package__ in ("", "tests"):
+    __package__ = "peach_dsl.tests"
+
+from .. import *
+from .. import sdk as dsl_sdk
 
 
 @Flags(Int16, endian="big")
@@ -57,10 +60,297 @@ class PacketEnvelope(Schema):
 
 
 class SDKTests(unittest.TestCase):
-    def test_computed_captures_schema_argument_without_calling_function(self) -> None:
+    def test_string_length_units_validate_every_value_and_length_kind(self) -> None:
+        @compute
+        def identity(value: str) -> str:
+            return value
+
+        for unit in ("characters", "byte", "", "bogus"):
+            for length_kind in ("unbounded", "constant", "dynamic"):
+                for value_kind in ("omitted", "default", "fixed", "computed"):
+                    source = String("A")
+                    count = Int8(2)
+                    factory = String if length_kind == "unbounded" else String[2 if length_kind == "constant" else count]
+                    value = {"omitted": None, "default": "A", "fixed": fixed("A"), "computed": identity(source)}[value_kind]
+                    packet = type("InvalidStringUnits", (Schema,), {
+                        "source": source, "count": count, "text": factory(value, length_type=unit),
+                    })
+                    with self.subTest(unit=unit, length=length_kind, value=value_kind):
+                        with self.assertRaisesRegex(ValueError, "String.*bytes, bits or chars"):
+                            to_peach_data_model(packet, include_header=False)
+
+        for unit, length in (("bytes", 2), ("bits", 16), ("chars", 2), ("BYTES", 2)):
+            packet = type("ValidStringUnits", (Schema,), {"text": String[length]("AB", length_type=unit)})
+            with self.subTest(unit=unit):
+                root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                self.assertEqual(root.find("String").get("lengthType"), unit.lower())
+
+    def test_blob_length_units_normalize_case(self) -> None:
+        for unit, length in (("BYTES", 2), ("Bits", 16)):
+            for dynamic in (False, True):
+                class Packet(Schema):
+                    count = Int8(length)
+                    data = Blob[count if dynamic else length](b"AB", length_type=unit)
+
+                with self.subTest(unit=unit, dynamic=dynamic):
+                    root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+                    self.assertEqual(root.find("Blob").get("lengthType"), unit.lower())
+                    relation = root.find("Number/Relation")
+                    if dynamic and unit.lower() == "bits":
+                        self.assertEqual(relation.get("lengthType"), "bits")
+
+    def test_blob_byte_defaults_must_fit_declared_capacity(self) -> None:
+        for field in (
+            Blob[1](b"AB"), Blob[1](fixed(b"AB")),
+            Blob[7](b"A", length_type="bits"),
+            Blob[3](b"\xc0\0\x02\x01", value_type="ipv4"),
+        ):
+            packet = type("OversizedBlob", (Schema,), {"data": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "Blob.*exceeds.*length"):
+                    to_peach_data_model(packet, include_header=False)
+
+        class Base(Schema):
+            data = Blob[2](b"AB")
+
+        with self.assertRaisesRegex(ValueError, "Blob.*exceeds.*length"):
+            to_peach_data_model(Base(data=b"ABC"), include_header=False)
+
+        for field in (Blob[2](b"AB"), Blob[3](b"AB"), Blob[12](b"A", length_type="bits"),
+                      Blob[0](b""), Blob[7](length_type="bits")):
+            packet = type("ValidBlobCapacity", (Schema,), {"data": field})
+            with self.subTest(field=field):
+                self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)).find("Blob"))
+
+    def test_blob_rejects_non_byte_or_bit_length_units(self) -> None:
+        for unit in ("chars", "characters", "", "byte"):
+            for dynamic in (False, True):
+                class Packet(Schema):
+                    count = Int8()
+                    data = Blob[count if dynamic else 2](length_type=unit)
+
+                with self.subTest(unit=unit, dynamic=dynamic):
+                    with self.assertRaisesRegex(ValueError, "Blob.*bytes or bits"):
+                        to_peach_data_model(Packet, include_header=False)
+
+    def test_blob_explicit_text_formats_preserve_raw_bytes(self) -> None:
+        for value in (b"AB", b"", b"\xab\xcd", b"\0\xff", b"\\n", b"\n\"'\\"):
+            for mode in ("string", "literal", "hex", "HEX"):
+                for token in (False, True):
+                    packet = type("RawBytes", (Schema,), {
+                        "data": Blob[len(value)](fixed(value) if token else value, value_type=mode),
+                    })
+                    with self.subTest(value=value, mode=mode, token=token):
+                        root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                        element = root.find("Blob")
+                        actual_mode = element.get("valueType").lower()
+                        text = element.get("value")
+                        if actual_mode == "hex":
+                            actual = bytes.fromhex(text)
+                        elif actual_mode == "string":
+                            actual = text.encode("ascii")
+                        else:
+                            actual = eval(text.replace("\\\\", "\\")).encode("ascii")
+                        self.assertEqual(actual, value)
+                        self.assertEqual(element.get("token"), str(token).lower())
+
+    def test_blob_ip_formats_convert_packed_addresses(self) -> None:
+        cases = (
+            ("ipv4", b"\xc0\0\x02\x01", "192.0.2.1"),
+            ("ipv6", bytes.fromhex("20010db8000000000000000000000001"), "2001:db8::1"),
+        )
+        for mode, value, expected in cases:
+            for token in (False, True):
+                packet = type("Address", (Schema,), {
+                    "data": Blob[len(value)](fixed(value) if token else value, value_type=mode),
+                })
+                with self.subTest(mode=mode, token=token):
+                    root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                    self.assertEqual(root.find("Blob").get("value"), expected)
+                    self.assertEqual(root.find("Blob").get("valueType"), mode)
+
+            packet = type("InvalidAddress", (Schema,), {"data": Blob[2](b"AB", value_type=mode)})
+            with self.assertRaisesRegex(ValueError, "Blob.*" + mode + ".*bytes"):
+                to_peach_data_model(packet, include_header=False)
+
+    def test_utf7_matches_peach_shift_terminators(self) -> None:
+        cases = {
+            "é!": b"+AOk-!", "é\0!": b"+AOkAAA-!", "😀!": b"+2D3eAA-!",
+            "éé!": b"+AOkA6Q-!", "é+!": b"+AOkAKw-!", "é\r": b"+AOk-\r",
+            "é\t": b"+AOk-\t", "é \0": b"+AOk- +AAA-", "+é": b"+-+AOk-",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(dsl_sdk._encode_peach_string(value, "utf7"), expected)
+
+        class Valid(Schema):
+            text = String[6]("é!", type="utf7")
+
+        self.assertIsNotNone(ET.fromstring(to_peach_data_model(Valid, include_header=False)).find("String"))
+
+        class TooShort(Schema):
+            text = String[5]("é!", type="utf7")
+
+        with self.assertRaisesRegex(ValueError, "does not fit"):
+            to_peach_data_model(TooShort, include_header=False)
+
+        class Escaped(Schema):
+            text = String("é!\\", type="utf7")
+
+        root = ET.fromstring(to_peach_data_model(Escaped, include_header=False))
+        self.assertEqual(bytes.fromhex(root.find("String").get("value")), b"+AOk-!+AFw")
+
+        class ExplicitHex(Schema):
+            shifted = String("2b414f6b2d", type="utf7", value_type="hex")
+            literal_plus = String("2b2d", type="utf7", value_type="hex")
+            literal_minus = String("2b414f6b2d2d", type="utf7", value_type="hex")
+
+        root = ET.fromstring(to_peach_data_model(ExplicitHex, include_header=False))
+        self.assertEqual(root.find("String[@name='shifted']").get("value"), "2b414f6b")
+        self.assertEqual(root.find("String[@name='literal_plus']").get("value"), "2b2d")
+        self.assertEqual(root.find("String[@name='literal_minus']").get("value"), "2b414f6b2d2d")
+
+    def test_utf7_padding_must_preserve_declared_byte_length(self) -> None:
+        invalid = (
+            String[10]("", type="utf7", pad_character="é"),
+            String[10](fixed("é"), type="utf7", pad_character="é"),
+            String[10](type="utf7"),
+            String[10]("", type="utf7", pad_character="é", null_terminated=True),
+            String[10**12](type="utf7", pad_character="é"),
+        )
+        for field in invalid:
+            packet = type("InvalidUtf7Padding", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "UTF-7 padding changes.*length"):
+                    to_peach_data_model(packet, include_header=False)
+
+        for field in (
+            String[5]("", type="utf7", pad_character="é"),
+            String[10]("ééé", type="utf7", pad_character="é"),
+            String[6]("", type="utf7", pad_character="+"),
+            String[10]("é", type="utf7", pad_character="A"),
+            String[10]("é", type="utf7", pad_character="!"),
+            String[5]("", type="utf7", null_terminated=True),
+        ):
+            packet = type("ValidUtf7Padding", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)).find("String"))
+
+    def test_omitted_string_defaults_validate_empty_value_capacity(self) -> None:
+        for field in (
+            String[7](length_type="bits"), String[3](type="utf16"),
+            String[3](type="utf8", pad_character="é"),
+            String[0](null_terminated=True), String[1](type="utf16", null_terminated=True),
+        ):
+            packet = type("InvalidEmptyString", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "String.*(length|padding)"):
+                    to_peach_data_model(packet, include_header=False)
+
+        for field in (
+            String[8](length_type="bits"), String[4](type="utf16"),
+            String[4](type="utf8", pad_character="é"), String[0](),
+            String[2](type="utf16", null_terminated=True),
+        ):
+            packet = type("ValidEmptyString", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                self.assertIsNone(root.find("String").get("value"))
+
+    def test_bounded_string_defaults_fit_encoded_length_and_padding(self) -> None:
+        invalid = (
+            String[3]("abcd"), String[3](fixed("abcd")),
+            String[1]("é", type="utf8"), String[3]("A", type="utf16"),
+            String[2]("A", type="utf16", null_terminated=True),
+            String[1]("😀", length_type="chars"),
+            String[7]("", length_type="bits"),
+            String[4]("A", type="utf8", pad_character="é"),
+            String[1]("4142", value_type="hex"),
+        )
+        for field in invalid:
+            packet = type("InvalidStringLength", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "String.*(length|padding)"):
+                    to_peach_data_model(packet, include_header=False)
+
+        valid = (
+            String[2]("é", type="utf8"), String[2]("😀", length_type="chars"),
+            String[4]("A", type="utf16", null_terminated=True),
+            String[3]("A", type="utf8", pad_character="é"),
+            String[1]("\0", type="ascii", null_terminated=True),
+            String[1]("", type="ascii", null_terminated=True),
+            String[16]("é", length_type="bits"), String[2]("4142", value_type="hex"),
+        )
+        for field in valid:
+            packet = type("ValidStringLength", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)).find("String"))
+
+        class Base(Schema):
+            text = String[2]("A")
+
+        with self.assertRaisesRegex(ValueError, "declared length"):
+            to_peach_data_model(Base(text="abc"), include_header=False)
+
+    def test_builtin_fields_reject_unknown_value_types(self) -> None:
+        for factory in (Int8, Bit[3], Double, String, String[4], DecimalString,
+                        DecimalString[4], Blob[4]):
+            for value_type in ("", "bytes", "base64", "hex "):
+                with self.subTest(factory=factory, value_type=value_type):
+                    with self.assertRaisesRegex(ValueError, "unsupported Peach value_type"):
+                        factory(value_type=value_type)
+
+    def test_builtin_fields_preserve_supported_value_types(self) -> None:
+        for factory in (Int8, Bit[3], Double, String, String[4], DecimalString,
+                        DecimalString[4], Blob[4]):
+            for value_type in ("string", "hex", "literal", "ipv4", "ipv6", "HEX", "String"):
+                with self.subTest(factory=factory, value_type=value_type):
+                    packet = type("ValueFormat", (Schema,), {
+                        "field": factory(value_type=value_type),
+                    })
+                    root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                    self.assertEqual(root[0].get("valueType"), value_type)
+
+    def test_integer_literals_must_fit_effective_width_and_signedness(self) -> None:
+        invalid = (Int8(256), Int8(-1), Int8(128, signed=True), Int8(-129, signed=True),
+                   Int64(2**64), Int8(fixed(256)), Bit[3](8))
+        for field in invalid:
+            packet = type("InvalidInteger", (Schema,), {"number": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "number.*does not fit"):
+                    to_peach_data_model(packet, include_header=False)
+
+        @Default(signed=True)
+        class SignedDefaults(Schema):
+            number = Int8(128)
+
+        with self.assertRaisesRegex(ValueError, "signed 8-bit"):
+            to_peach_data_model(SignedDefaults, include_header=False)
+
+        class Base(Schema):
+            number = Int8(1)
+
+        with self.assertRaisesRegex(ValueError, "number.*does not fit"):
+            to_peach_data_model(Base(number=300), include_header=False)
+
+        for field in (Int8(255), Int8(-128, signed=True), Int8(127, signed=True),
+                      Int64(2**64 - 1), Int64(-(2**63), signed=True)):
+            packet = type("BoundaryInteger", (Schema,), {"number": field})
+            self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)).find("Number"))
+
+    def test_flag_literal_must_fit_its_own_width(self) -> None:
+        @Flags(Int8, endian="big")
+        class InvalidFlags(Schema):
+            first = Bit[3](8)
+            rest = Bit[5]()
+
+        with self.assertRaisesRegex(ValueError, "first.*unsigned 3-bit"):
+            to_peach_data_model(InvalidFlags, include_header=False)
+
+    def test_compute_captures_schema_argument_without_calling_function(self) -> None:
         called = False
 
-        @computed
+        @compute
         def calc_crc(header: bytearray) -> int:
             nonlocal called
             called = True
@@ -91,7 +381,7 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(dict(crc.computed.kwargs), {})
         self.assertFalse(called)
 
-    def test_computed_accepts_one_to_four_parameters(self) -> None:
+    def test_compute_accepts_one_to_four_parameters(self) -> None:
         def make_function(count: int) -> Callable[..., int]:
             namespace: dict[str, object] = {}
             parameters = ", ".join(f"value{index}: int" for index in range(count))
@@ -103,19 +393,19 @@ class SDKTests(unittest.TestCase):
 
         for count in range(1, 5):
             with self.subTest(count=count):
-                declaration = computed(make_function(count))
+                declaration = compute(make_function(count))
                 captured = declaration(*range(count))
                 self.assertEqual(captured.args, tuple(range(count)))
 
         with self.assertRaisesRegex(TypeError, "between 1 and 4"):
-            cast(Any, computed)(make_function(0))
+            cast(Any, compute)(make_function(0))
         with self.assertRaisesRegex(TypeError, "between 1 and 4"):
-            cast(Any, computed)(make_function(5))
+            cast(Any, compute)(make_function(5))
 
     def test_fixed_replaces_const_without_compatibility_alias(self) -> None:
         self.assertIsInstance(fixed(1), Fixed)
-        self.assertFalse(hasattr(peach_dsl, "const"))
-        self.assertFalse(hasattr(peach_dsl, "Const"))
+        self.assertFalse(hasattr(dsl_sdk, "const"))
+        self.assertFalse(hasattr(dsl_sdk, "Const"))
 
     def test_schema_member_references_and_block_length(self) -> None:
         result = evaluate_schema(Hello)
@@ -187,7 +477,97 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(default_value.attrib["value"], "1234")
         self.assertEqual(default_value.attrib["valueType"], "hex")
         self.assertEqual(default_value.attrib["token"], "false")
-        self.assertEqual(explicit_value_type.attrib["valueType"], "string")
+        self.assertEqual(explicit_value_type.attrib["valueType"], "hex")
+        self.assertEqual(explicit_value_type.attrib["value"], "abcd")
+
+    def test_string_control_characters_export_as_encoded_hex(self) -> None:
+        for encoding, codec in (("ascii", "ascii"), ("utf8", "utf-8"),
+                                ("utf16", "utf-16-le"), ("utf16be", "utf-16-be"),
+                                ("utf32", "utf-32-le"), ("utf32be", "utf-32-be")):
+            for token in (False, True):
+                text = "A\0B\x01\x0b"
+                field = String(fixed(text) if token else text, type=encoding)
+                packet = type("ControlText", (Schema,), {"text": field})
+                with self.subTest(encoding=encoding, token=token):
+                    root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                    element = root.find("String")
+                    assert element is not None
+                    self.assertEqual(element.get("valueType"), "hex")
+                    self.assertEqual(bytes.fromhex(element.attrib["value"]), text.encode(codec))
+                    self.assertEqual(element.get("token"), str(token).lower())
+
+    def test_string_xml_conversion_preserves_explicit_encodings_and_valid_text(self) -> None:
+        class Values(Schema):
+            whitespace = String("\t\r\n<&")
+            encoded = String("410042", value_type="hex")
+            noncharacter = String("\uffff")
+
+        root = ET.fromstring(to_peach_data_model(Values, include_header=False))
+        self.assertEqual(root.find("String[@name='whitespace']").get("value"), "\t\r\n<&")
+        self.assertEqual(root.find("String[@name='encoded']").get("value"), "410042")
+        self.assertEqual(root.find("String[@name='noncharacter']").get("value"), "efbfbf")
+        for field in (String("\ud800"), String("\0", value_type="hex")):
+            packet = type("InvalidText", (Schema,), {"text": field})
+            with self.assertRaisesRegex(ValueError, "String.*(encoded|invalid XML)"):
+                to_peach_data_model(packet, include_header=False)
+
+    def test_null_padding_uses_peach_default_without_invalid_xml_attribute(self) -> None:
+        class Padding(Schema):
+            text = String[4]("A", pad_character="\0")
+            decimal = DecimalString[4](7, pad_character="\0")
+
+        root = ET.fromstring(to_peach_data_model(Padding, include_header=False))
+        for element in root.findall("String"):
+            self.assertNotIn("padCharacter", element.attrib)
+        for padding in ("\x01", "\x0b", "\ud800", "\uffff", "😀"):
+            with self.subTest(padding=repr(padding)):
+                with self.assertRaisesRegex(ValueError, "pad_character.*Peach"):
+                    String[4]("A", pad_character=padding)
+
+    def test_string_defaults_are_checked_against_declared_encoding(self) -> None:
+        for text in ("é", "中文", "😀"):
+            for token in (False, True):
+                field = String(fixed(text) if token else text, type="ascii")
+                packet = type("InvalidAscii", (Schema,), {"text": field})
+                with self.subTest(text=text, token=token):
+                    with self.assertRaisesRegex(ValueError, "String.*cannot be encoded as ascii"):
+                        to_peach_data_model(packet, include_header=False)
+            packet = type("ValidUnicode", (Schema,), {"text": String(text, type="utf8")})
+            root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+            self.assertEqual(root.find("String").get("value"), text)
+
+        class ExplicitBytes(Schema):
+            text = String("c3a9", type="utf8", value_type="hex")
+
+        root = ET.fromstring(to_peach_data_model(ExplicitBytes, include_header=False))
+        self.assertEqual(root.find("String").get("value"), "c3a9")
+
+    def test_literal_backslashes_survive_peach_value_unescaping(self) -> None:
+        for text in (r"\n", r"\r\t", r"A\nB\\C", "\\", r"C:\temp\new"):
+            for token in (False, True):
+                for encoding, codec in (("utf8", "utf8"), ("utf16be", "utf-16-be")):
+                    field = String(fixed(text) if token else text, type=encoding)
+                    packet = type("LiteralSlash", (Schema,), {"text": field})
+                    with self.subTest(text=text, token=token, encoding=encoding):
+                        root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                        element = root.find("String")
+                        assert element is not None
+                        self.assertEqual(element.get("valueType"), "hex")
+                        self.assertEqual(bytes.fromhex(element.attrib["value"]), text.encode(codec))
+                        self.assertEqual(element.get("token"), str(token).lower())
+
+    def test_hex_string_values_validate_bytes_and_declared_encoding(self) -> None:
+        for value, encoding in (("zz", "utf8"), ("abc", "utf8"), ("ff", "utf8"),
+                                ("e9", "ascii"), ("41", "utf16"), ("00d8", "utf16"),
+                                ("00001100", "utf32")):
+            packet = type("InvalidHex", (Schema,), {"text": String(value, type=encoding, value_type="hex")})
+            with self.subTest(value=value, encoding=encoding):
+                with self.assertRaisesRegex(ValueError, "String.*(hex|decoded)"):
+                    to_peach_data_model(packet, include_header=False)
+        for value in ("c3a9", "0xc3, 0xa9", r"\xc3\xa9", r"c3\na9", "{c3:a9}h", ""):
+            packet = type("ValidHex", (Schema,), {"text": String(value, type="utf8", value_type="hex")})
+            root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+            self.assertEqual(root.find("String").get("value"), value)
 
     def test_union_accepts_inline_scalar_fields(self) -> None:
         class TextChoice(Schema):
@@ -359,7 +739,7 @@ class SDKTests(unittest.TestCase):
         assert customized_xml is not None
         self.assertIsNotNone(customized_xml.find("p:Block[@name='scalar']", peach))
         self.assertIsNotNone(customized_xml.find("p:Number[@name='schema']", peach))
-        self.assertIsNotNone(customized_xml.find("p:Block[@name='union']", peach))
+        self.assertIsNotNone(customized_xml.find("p:Choice[@name='union']", peach))
         self.assertIsNotNone(customized_xml.find("p:Block[@name='array']", peach))
         self.assertIsNotNone(customized_xml.find("p:Choice[@name='optional']", peach))
         self.assertIsNotNone(customized_xml.find("p:Block[@name='block']", peach))
@@ -486,6 +866,44 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(array.count, Occurs(0, 3))
         self.assertEqual(optional.condition.operation, "==")
 
+    def test_unconditional_optionals_emit_choice_with_empty_last(self) -> None:
+        class Nested(Schema):
+            value = Int8()
+
+        class First(Schema):
+            value = Int16()
+
+        class Container(Schema):
+            scalar = Optional[Int8]()
+            schema = Optional[Nested]()
+            union = Optional[
+                Union(first=First(), empty=Block(marker=Int8(fixed(0))))
+            ]()
+            array = Optional[Array[Int8, Occurs(1, 2)]()]()
+
+        root = ET.fromstring(to_peach_data_model(Container, include_header=False))
+
+        scalar = root.find("Choice[@name='scalar']")
+        schema = root.find("Choice[@name='schema']")
+        union = root.find("Choice[@name='union']")
+        array = root.find("Choice[@name='array']")
+        assert scalar is not None and schema is not None
+        assert union is not None and array is not None
+
+        self.assertEqual([child.attrib["name"] for child in scalar], ["value", "empty"])
+        self.assertEqual(
+            [child.attrib["name"] for child in schema],
+            ["schema_internal", "empty"],
+        )
+        self.assertEqual(
+            [child.attrib["name"] for child in union],
+            ["first", "empty", "optional_empty"],
+        )
+        self.assertEqual([child.attrib["name"] for child in array], ["value", "empty"])
+        self.assertIsNone(scalar.get("minOccurs"))
+        self.assertEqual(array[0].get("minOccurs"), "1")
+        self.assertEqual(array[0].get("maxOccurs"), "2")
+
     def test_array_without_count_is_unbounded(self) -> None:
         class Item(Schema):
             value = Int8()
@@ -507,7 +925,7 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(array.get("minOccurs"), "0")
         self.assertEqual(array.get("maxOccurs"), "-1")
 
-    def test_wrapped_members_are_accessed_explicitly(self) -> None:
+    def test_optional_members_expose_fields_directly(self) -> None:
         class LengthHeader(Schema):
             value = Int16()
 
@@ -539,7 +957,7 @@ class SDKTests(unittest.TestCase):
 
         class SizedPacket(Schema):
             container = Container()
-            optional_length: MemberRef[int] = container.optional.internal().value
+            optional_length: MemberRef[int] = container.optional.value
             array_length: MemberRef[int] = container.entries.internal().value
             union_array_length: MemberRef[int] = (
                 container.union_entries.internal().first.value
@@ -847,6 +1265,35 @@ class SDKTests(unittest.TestCase):
         assert relation is not None
         self.assertEqual(relation.attrib["of"], "server_reference.value")
 
+    def test_named_union_block_collects_nested_schema_model(self) -> None:
+        class Pair(Schema):
+            first = Int8()
+            second = Int8()
+
+        @Union
+        class Item(Schema):
+            pair = Block(identifier=Int8(fixed(1)), value=Pair())
+            scalar = Block(identifier=Int8(fixed(2)), value=Int8())
+
+        class Packet(Schema):
+            items = Array[Item]()
+
+        class OtherPacket(Schema):
+            value = Int8()
+
+        @PacketUnion
+        class Root(Schema):
+            packet_union = Union(packet=Packet, other=OtherPacket)
+
+        root = ET.fromstring(to_peach_data_model(Root))
+        peach = "http://peachfuzzer.com/2012/Peach"
+        pair_model = root.find(f"{{{peach}}}DataModel[@name='Pair']")
+        self.assertIsNotNone(pair_model)
+        pair_reference = root.find(
+            f".//{{{peach}}}Block[@name='value'][@ref='Pair']"
+        )
+        self.assertIsNotNone(pair_reference)
+
     def test_packet_union_validation(self) -> None:
         with self.assertRaisesRegex(TypeError, "exactly one Union"):
 
@@ -1055,7 +1502,7 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(optional)
         assert optional is not None
-        self.assertEqual(optional.attrib["src"], "header.flags")
+        self.assertEqual(optional.attrib["src"], "../../../header.flags")
 
     def test_deep_external_relation_is_emitted_through_model_references(self) -> None:
         class LengthValue(Schema):
@@ -1076,7 +1523,7 @@ class SDKTests(unittest.TestCase):
             headers = Headers()
             body = Body(
                 framed=BodyData(
-                    data=Blob[headers.content_length.internal().value](),
+                    data=Blob[headers.content_length.value](),
                 ),
             )
 
@@ -1097,7 +1544,8 @@ class SDKTests(unittest.TestCase):
         assert request is not None
         relation = request.find(
             f"{{{peach}}}Block[@name='headers'][@ref='Headers']/"
-            f"{{{peach}}}Block[@name='content_length'][@ref='LengthValue']/"
+            f"{{{peach}}}Choice[@name='content_length']/"
+            f"{{{peach}}}Block[@name='content_length_internal'][@ref='LengthValue']/"
             f"{{{peach}}}Number[@name='value']/"
             f"{{{peach}}}Relation[@type='size']"
             "[@of='request.body.framed.data']"
@@ -1113,6 +1561,51 @@ class SDKTests(unittest.TestCase):
         self.assertIsNotNone(packets_ref)
         assert packets_ref is not None
         self.assertEqual(len(packets_ref), 0)
+
+    def test_external_relation_survives_same_named_optional_union_branch(self) -> None:
+        class ContentLength(Schema):
+            value = DecimalString(type="ascii")
+
+        @Union
+        class HeaderLine(Schema):
+            content_length = ContentLength()
+            generic = Block(value=String(type="ascii"))
+
+        class Headers(Schema):
+            lines = Array[HeaderLine]()
+
+        class Request(Schema):
+            headers = Headers()
+            body = Optional[
+                Union(
+                    content_length=Blob[
+                        headers.lines.internal().content_length.value
+                    ](),
+                    chunked=Blob(),
+                )
+            ]()
+
+        class Other(Schema):
+            kind = Int8(fixed(0))
+
+        @PacketUnion
+        class Packets(Schema):
+            packet_union = Union(request=Request, other=Other)
+
+        root = ET.fromstring(to_peach_data_model(Packets))
+        peach = "http://peachfuzzer.com/2012/Peach"
+        request = root.find(f"{{{peach}}}DataModel[@name='Request']")
+        self.assertIsNotNone(request)
+        assert request is not None
+        relation = request.find(
+            f"{{{peach}}}Block[@name='headers'][@ref='Headers']/"
+            f"{{{peach}}}Choice[@name='lines']/"
+            f"{{{peach}}}Block[@name='content_length'][@ref='ContentLength']/"
+            f"{{{peach}}}String[@name='value']/"
+            f"{{{peach}}}Relation[@type='size']"
+            "[@of='request.body.content_length']"
+        )
+        self.assertIsNotNone(relation)
 
     def test_peach_size_relation_with_expr_length(self) -> None:
         class Sized(Schema):
@@ -1178,7 +1671,77 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(optional)
         assert optional is not None
-        self.assertEqual(optional.attrib["src"], "publish.header.type_flags.flags")
+        self.assertEqual(optional.attrib["src"], "../../header.type_flags.flags")
+
+    def test_optional_nested_block_resolves_nearest_enclosing_scope(self) -> None:
+        class Gates(Schema):
+            enabled = Int8()
+
+        class Request(Schema):
+            gates = Gates()
+
+            @Block
+            class body(Schema):
+                gates = Gates()
+                value = Optional[Int8](when=gates.enabled != 0)
+
+                @Block
+                class nested(Schema):
+                    count = Int8()
+                    value = Optional[Int8](when=count != 0)
+
+        @PacketUnion
+        class Packets(Schema):
+            packet_union = Union(request=Request, empty=EmptyPacket)
+
+        root = ET.fromstring(to_peach_data_model(Packets))
+        ns = {"p": "http://peachfuzzer.com/2012/Peach"}
+        body = root.find("p:DataModel[@name='Request']/p:Block[@name='body']", ns)
+        assert body is not None
+        local = body.find("p:Optional[@name='value']", ns)
+        nested = body.find("p:Block/p:Optional[@name='value']", ns)
+        assert local is not None and nested is not None
+        self.assertEqual(local.get("src"), "request.body.gates.enabled")
+        self.assertEqual(nested.get("src"), "request.body.nested.count")
+
+    def test_optional_does_not_resolve_unrelated_sibling_by_suffix(self) -> None:
+        class Gates(Schema):
+            enabled = Int8()
+
+        class UnrelatedGates(Schema):
+            enabled = Int8()
+
+        missing = Gates()
+
+        class Request(Schema):
+            @Block
+            class sibling(Schema):
+                gates = UnrelatedGates()
+
+            value = Optional[Int8](when=missing.enabled != 0)
+
+        @PacketUnion
+        class Packets(Schema):
+            packet_union = Union(request=Request, empty=EmptyPacket)
+
+        with self.assertRaisesRegex(ValueError, "cannot resolve condition field"):
+            to_peach_data_model(Packets)
+
+    def test_optional_rejects_ambiguous_class_field_reference(self) -> None:
+        class Gates(Schema):
+            enabled = Int8()
+
+        class Request(Schema):
+            first = Gates()
+            second = Gates()
+            value = Optional[Int8](when=Gates.enabled != 0)
+
+        @PacketUnion
+        class Packets(Schema):
+            packet_union = Union(request=Request, empty=EmptyPacket)
+
+        with self.assertRaisesRegex(ValueError, "ambiguous condition field"):
+            to_peach_data_model(Packets)
 
     def test_peach_optional_internal_block_name_and_relation_path(self) -> None:
         class Properties(Schema):
@@ -1224,6 +1787,37 @@ class SDKTests(unittest.TestCase):
             "[@type='size'][@of='props_optional.props_optional_internal.properties']"
         )
         self.assertIsNotNone(relation)
+
+    def test_conditional_optional_keeps_local_and_external_relations(self) -> None:
+        class Limits(Schema):
+            body_size = Int16()
+            local_size = Int8()
+            local_data = Blob[local_size]()
+
+        class Header(Schema):
+            flags = Int8()
+            limits = Optional[Limits](when=flags != 0)
+
+        class Packet(Schema):
+            header = Header()
+            body = Blob[header.limits.body_size]()
+
+        root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+        limits = root.find(
+            "Block[@name='header']/Optional[@name='limits']/"
+            "Block[@name='limits_internal']"
+        )
+        self.assertIsNotNone(limits)
+        assert limits is not None
+        self.assertIsNotNone(
+            limits.find("Number[@name='body_size']/Relation[@type='size'][@of='body']")
+        )
+        self.assertIsNotNone(
+            limits.find(
+                "Number[@name='local_size']/Relation[@type='size']"
+                "[@of='header.limits.limits_internal.local_data']"
+            )
+        )
 
     def test_typed_constraints_and_extra_peach_types(self) -> None:
         class Extra(Schema):
@@ -1273,7 +1867,7 @@ class SDKTests(unittest.TestCase):
             Bit[1](position=0)  # type: ignore[call-arg]
 
     def test_bool_is_not_a_dsl_field_type(self) -> None:
-        self.assertFalse(hasattr(peach_dsl, "Bool"))
+        self.assertFalse(hasattr(dsl_sdk, "Bool"))
         with self.assertRaisesRegex(TypeError, "not a built-in Peach DSL field type"):
             Optional[bool]()
         BoolExtension = ExtendedType[bool]("BoolExtension")
@@ -1345,6 +1939,59 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(optional.attrib["src"], "header.code")
         self.assertEqual(optional.attrib["expression"], "(value == 'L')")
 
+    def test_optional_conditions_render_nonfinite_literals_as_executable_python(self) -> None:
+        for limit in (float("inf"), float("-inf"), float("nan"), 0.5, -0.0):
+            class Packet(Schema):
+                value = Int8()
+                payload = Optional[Int8](when=value < limit)
+
+            root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+            optional = root.find("Optional")
+            assert optional is not None
+            expression = optional.attrib["expression"]
+            with self.subTest(limit=limit):
+                for value in (0, 127, 255):
+                    self.assertEqual(eval(expression, {"value": value}), value < limit)
+
+    def test_double_defaults_must_fit_finite_range(self) -> None:
+        maximum = float.fromhex("0x1.fffffep+127")
+        for value in (1e40, -1e40, maximum + 2**104, -maximum - 2**104):
+            for token in (False, True):
+                packet = type("OverflowFloat", (Schema,), {
+                    "number": Double(fixed(value) if token else value, size=32),
+                })
+                with self.subTest(value=value, token=token):
+                    with self.assertRaisesRegex(ValueError, "number.*finite 32-bit"):
+                        to_peach_data_model(packet, include_header=False)
+
+        class Base(Schema):
+            number = Double(0.0, size=32)
+
+        with self.assertRaisesRegex(ValueError, "finite 32-bit"):
+            to_peach_data_model(Base(number=1e40), include_header=False)
+
+        for value in (maximum, -maximum, 0.0, -0.0, 1e-45):
+            self.assertIsNotNone(ET.fromstring(to_peach_data_model(
+                Base(number=value), include_header=False,
+            )).find("Double"))
+
+        class Wide(Schema):
+            number = Double(1e40, size=64)
+
+        self.assertIsNotNone(ET.fromstring(to_peach_data_model(Wide, include_header=False)).find("Double"))
+
+    def test_double_nonfinite_values_use_peach_numeric_spelling(self) -> None:
+        for value, expected in ((float("inf"), "Infinity"), (float("-inf"), "-Infinity"),
+                                (float("nan"), "NaN"), (-0.0, "-0.0"), (1.25, "1.25")):
+            for size, token in ((32, False), (32, True), (64, False), (64, True)):
+                packet = type("Floating", (Schema,), {"value": Double(fixed(value) if token else value, size=size)})
+                with self.subTest(value=value, token=token, size=size):
+                    root = ET.fromstring(to_peach_data_model(packet, include_header=False))
+                    element = root.find("Double")
+                    assert element is not None
+                    self.assertEqual(element.get("value"), expected)
+                    self.assertEqual(element.get("token"), str(token).lower())
+
     def test_decimal_string_size_relation_preserves_numeric_expressions(self) -> None:
         class Packet(Schema):
             length = DecimalString[3](
@@ -1363,15 +2010,14 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(length.attrib["padCharacter"], "0")
         self.assertEqual(
             length.attrib["constraint"],
-            "0 <= int(value) <= 999",
+            "0 <= int(value.rstrip('\\x00')) <= 999",
         )
         relation = length.find("Relation[@type='size'][@of='payload']")
         self.assertIsNotNone(relation)
         assert relation is not None
         self.assertEqual(relation.attrib["expressionGet"], "(size + 2)")
-        self.assertEqual(relation.attrib["expressionSet"], "(size - 2)")
+        self.assertEqual(eval(relation.attrib["expressionSet"], {"size": 44}), "042")
         self.assertNotIn("int(", relation.attrib["expressionGet"])
-        self.assertNotIn("str(", relation.attrib["expressionSet"])
 
     def test_decimal_string_count_relation_and_optional_condition(self) -> None:
         class Packet(Schema):
@@ -1388,12 +2034,12 @@ class SDKTests(unittest.TestCase):
         self.assertIsNotNone(relation)
         assert relation is not None
         self.assertNotIn("expressionGet", relation.attrib)
-        self.assertNotIn("expressionSet", relation.attrib)
+        self.assertEqual(eval(relation.attrib["expressionSet"], {"count": 3}), "3")
         optional = root.find("Optional[@name='trailer']")
         self.assertIsNotNone(optional)
         assert optional is not None
         self.assertEqual(optional.attrib["src"], "count")
-        self.assertEqual(optional.attrib["expression"], "(int(value) > 0)")
+        self.assertEqual(optional.attrib["expression"], "(int(value.rstrip('\\0')) > 0)")
 
     def test_extended_type_preserves_custom_attributes(self) -> None:
         Asn1 = ExtendedType[str]("Asn1")

@@ -28,7 +28,7 @@ details{margin:12px 0}details summary{cursor:pointer;color:var(--muted);font-siz
 </head>
 <body>
 <header><div id="filename" class="file"></div><button id="choose">打开文件</button><input id="file-input" type="file" accept=".jsonl,.log,.txt"></header>
-<div class="filters"><input id="search" type="search" placeholder="搜索" aria-label="搜索日志"><select id="category" aria-label="日志类型"><option value="">所有类型</option><option value="tool">工具调用</option><option value="step">步骤</option><option value="validation">验证结果</option><option value="subprocess">子进程输出</option><option value="exception">异常</option><option value="session">会话</option><option value="log">其他日志</option></select><select id="session" aria-label="会话"><option value="">所有会话</option></select><select id="task" aria-label="任务"><option value="">所有任务</option></select><select id="severity" aria-label="日志级别"><option value="">所有级别</option><option value="error">错误</option><option value="warning">错误和警告</option></select><button id="reset">重置</button></div>
+<div class="filters"><input id="search" type="search" placeholder="搜索" aria-label="搜索日志"><select id="category" aria-label="日志类型"><option value="">所有类型</option><option value="tool">工具调用</option><option value="step">步骤</option><option value="reasoning">思维链</option><option value="validation">验证结果</option><option value="subprocess">子进程输出</option><option value="exception">异常</option><option value="session">运行会话</option><option value="log">其他日志</option></select><select id="session" aria-label="运行"><option value="">所有运行</option></select><select id="task" aria-label="任务"><option value="">所有任务</option></select><select id="severity" aria-label="日志级别"><option value="">所有级别</option><option value="error">错误</option><option value="warning">错误和警告</option></select><button id="reset">重置</button></div>
 <div id="notice" role="status"></div>
 <main><section class="timeline" aria-label="日志列表"><div id="list"></div></section><article id="detail" aria-label="日志详情"></article></main>
 <script id="payload" type="application/json">__LOG_PAYLOAD__</script>
@@ -89,6 +89,7 @@ function inputSummary(input) {
 function category(record) {
   const event = String(record.event || 'log');
   if(event.startsWith('tool_')) return 'tool';
+  if(event === 'reasoning') return 'reasoning';
   if(event === 'verification_result') return 'validation';
   if(event === 'subprocess_end') return 'subprocess';
   if(event.endsWith('_error') || record.traceback) return 'exception';
@@ -108,6 +109,17 @@ function parseLog(source) {
     try { const data = JSON.parse(line); if(!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('预期 JSON 对象'); records.push({data, line:index + 1}); }
     catch(error) { invalid.push(index + 1); }
   });
+  const sessions = new Map();
+  for(const record of records) {
+    const data = record.data, id = String(data.session_id || '');
+    if(!id) continue;
+    let session = sessions.get(id);
+    if(!session) { session = {id, startedAt:data.timestamp || '', endedAt:'', status:'', count:0}; sessions.set(id, session); }
+    session.count += 1;
+    if(!session.startedAt || Date.parse(data.timestamp || '') < Date.parse(session.startedAt || '')) session.startedAt = data.timestamp || session.startedAt;
+    if(data.event === 'session_start') session.startedAt = data.timestamp || session.startedAt;
+    if(data.event === 'session_end') { session.endedAt = data.timestamp || ''; session.status = String(data.status || ''); }
+  }
   const items = [], calls = new Map();
   for(const record of records) {
     const data = record.data;
@@ -130,8 +142,8 @@ function parseLog(source) {
     const levels = item.records.map(r => severity(r.data));
     if(item.category === 'tool' && item.output?.ok === false) levels.push('ERROR');
     item.level = levels.find(isError) || levels.find(l => ['WARNING','WARN'].includes(l)) || severity(item.data);
-    item.title = item.category === 'tool' ? String(item.start?.tool || item.data.tool || '未知工具') : String(item.data.message || item.data.error || item.data.event || '日志');
-    item.status = item.category === 'tool' ? (isError(item.level) ? '失败' : finish ? '完成' : '未结束') : String(item.data.event || 'log');
+    item.title = item.category === 'tool' ? String(item.start?.tool || item.data.tool || '未知工具') : item.category === 'reasoning' ? `思维链 · ${item.data.step_title || item.data.task_name || 'Agent'}` : String(item.data.message || item.data.error || item.data.event || '日志');
+    item.status = item.category === 'tool' ? (isError(item.level) ? '失败' : finish ? '完成' : '未结束') : item.category === 'reasoning' ? `调用 ${item.data.call_number || '?'}` : String(item.data.event || 'log');
     item.taskId = String(item.data.task_id || item.start?.task_id || '');
     item.taskName = String(item.data.task_name || item.start?.task_name || item.taskId);
     item.taskKey = item.taskId ? JSON.stringify([item.data.session_id || '',item.taskId]) : 'unassigned';
@@ -148,16 +160,20 @@ function parseLog(source) {
     if(leftTimed !== rightTimed) return leftTimed ? -1 : 1;
     return left.sortLine - right.sortLine;
   });
-  return {items, invalid, recordCount:records.length};
+  return {items, invalid, recordCount:records.length, sessions:[...sessions.values()]};
+}
+function sessionLabel(session) {
+  const state = session.status === 'error' ? '失败' : session.endedAt ? '完成' : '进行中';
+  return `${localTime(session.startedAt || session.endedAt || '', true)} · ${state} · ${session.id.slice(0,8)}`;
 }
 function load(source, name) {
   const result = parseLog(source);
   entries = result.items; selected = null;
   $('filename').textContent = name || '尚未打开文件';
   $('notice').textContent = result.invalid.length ? `跳过 ${result.invalid.length} 行无效 JSON（可能是尚未写完的记录）。行号：${result.invalid.slice(0,20).join(', ')}${result.invalid.length > 20 ? '…' : ''}` : '';
-  $('session').replaceChildren(new Option('所有会话', ''));
-  const sessions = [...new Set(entries.map(e => String(e.data.session_id || '')).filter(Boolean))];
-  for(const session of sessions) $('session').add(new Option(session, session));
+  $('session').replaceChildren(new Option('所有运行', ''));
+  const sessions = result.sessions.sort((left, right) => Date.parse(right.startedAt || '') - Date.parse(left.startedAt || ''));
+  for(const session of sessions) { const option = new Option(sessionLabel(session), session.id); option.title = session.id; $('session').add(option); }
   $('session').hidden = sessions.length < 2;
   $('task').replaceChildren(new Option('所有任务',''));
   const tasks = new Map(entries.map(e => [e.taskKey, e.taskName]));
@@ -297,6 +313,7 @@ function renderDetail() {
     renderTool(item);
     if(item.status === '未结束') block('调用状态', '未收到结束记录');
   }
+  if(item.category === 'reasoning') block('思维链', data.reasoning || data.message || '', {output:true});
   if(data.error) block(data.error_type || '错误', data.error, {error:true});
   if(data.message) block(item.category === 'validation' ? '验证报告' : item.category === 'subprocess' ? '进程输出' : '消息', data.message, {output:true, error:isError(item.level)});
   if(data.traceback) block('异常堆栈', data.traceback, {error:true});

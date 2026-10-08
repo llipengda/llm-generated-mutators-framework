@@ -177,11 +177,20 @@ class BasePipeline:
                 self._extra_prompt = None
 
             tracker = TokenUsageTracker()
-            callbacks: list[BaseCallbackHandler] = [tracker, self.tool_usage_logger.for_task(task)]
-            if os.environ.get("LLM_PRINT_REASONING", "").lower() in {
+            task_logger = self.tool_usage_logger.for_task(task)
+            callbacks: list[BaseCallbackHandler] = [tracker, task_logger]
+            print_reasoning = os.environ.get("LLM_PRINT_REASONING", "").lower() in {
                 "1", "true", "yes", "on"
-            } or bool(os.environ.get("LLM_REASONING_FORMAT", "").strip()):
-                callbacks.append(ReasoningContentLogger(step_title))
+            } or bool(os.environ.get("LLM_REASONING_FORMAT", "").strip())
+            # Reasoning is always retained in the structured log when the model
+            # provides it; terminal output remains opt-in.
+            callbacks.append(
+                ReasoningContentLogger(
+                    step_title,
+                    event_logger=task_logger,
+                    print_to_console=print_reasoning,
+                )
+            )
             local_config: RunnableConfig = {
                 **self.config,
                 "callbacks": callbacks,

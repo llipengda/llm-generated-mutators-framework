@@ -1,14 +1,14 @@
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
+from xml.etree import ElementTree as ET
 
-from core.datamodel_dsl import (
-    compile_dsl_subprocess,
-    default_manifest,
-    render_root_module,
-    validate_manifest,
-)
-from peach_dsl.compiler import (
+if __package__ in ("", "tests"):
+    __package__ = "peach_dsl.tests"
+
+from ..compiler import (
     DSLValidationError,
     validate_dsl_dependencies,
     validate_dsl_module,
@@ -16,7 +16,104 @@ from peach_dsl.compiler import (
 )
 
 
+def compile_dsl_subprocess(entry: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    """Exercise the package CLI using the active Python environment."""
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "peach_dsl.compiler",
+            "--entry",
+            str(entry),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 class PeachDSLCompilerTests(unittest.TestCase):
+    def test_module_validation_rejects_detached_relation_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "family.py"
+            path.write_text(
+                "from peach_dsl import Schema, Int8, Blob\n"
+                "class Other(Schema):\n    length = Int8()\n"
+                "class Packet(Schema):\n"
+                "    length = Int8()\n"
+                "    data = Blob[Other.length]()\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(DSLValidationError) as raised:
+                validate_dsl_module(path)
+            self.assertIn("Schema Packet", str(raised.exception))
+            self.assertIn("cannot resolve relation source field 'length'", str(raised.exception))
+            self.assertFalse((root / "datamodel.xml").exists())
+
+    def test_module_validation_checks_imported_type_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "shared_model.py").write_text(
+                "from peach_dsl import Schema, Int8\n"
+                "wrong: int = 'bad'\n"
+                "class Header(Schema):\n    value = Int8()\n",
+                encoding="utf-8",
+            )
+            path = root / "family.py"
+            path.write_text(
+                "from peach_dsl import Schema\n"
+                "from shared_model import Header\n"
+                "class Packet(Schema):\n    header = Header()\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(DSLValidationError) as raised:
+                validate_dsl_module(path)
+            self.assertIn("shared_model.py:2:", str(raised.exception))
+            self.assertIn("(reportAssignmentType)", str(raised.exception))
+
+    def test_recompile_without_computation_removes_script_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            entry = root / "root.py"
+            output = root / "datamodel.xml"
+            entry.write_text(
+                "from peach_dsl import *\n"
+                "@compute\n"
+                "def increment(value: int) -> int:\n"
+                "    return value + 1\n"
+                "class Packet(Schema):\n"
+                "    source = Int8()\n"
+                "    result = Int8(increment(source))\n"
+                "ROOT = Packet\n",
+                encoding="utf-8",
+            )
+            first = compile_dsl_subprocess(entry, output)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertTrue((root / "python_fixup.py").is_file())
+            self.assertIn("ScriptFixup", output.read_text(encoding="utf-8"))
+
+            entry.write_text(
+                "from peach_dsl import *\n"
+                "class Packet(Schema):\n"
+                "    source = Int8()\n"
+                "    result = Int8(fixed(9))\n"
+                "ROOT = Packet\n",
+                encoding="utf-8",
+            )
+            second = compile_dsl_subprocess(entry, output)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            xml = ET.fromstring(output.read_text(encoding="utf-8"))
+            ns = {"p": "http://peachfuzzer.com/2012/Peach"}
+            self.assertIsNone(xml.find("p:Import[@import='python_fixup']", ns))
+            self.assertIsNone(xml.find(".//p:Fixup", ns))
+            result = xml.find("p:DataModel/p:Number[@name='result']", ns)
+            assert result is not None
+            self.assertEqual(result.get("value"), "9")
+            self.assertEqual(result.get("token"), "true")
+
     def test_module_validation_evaluates_every_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "family.py"
@@ -59,55 +156,6 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 ("Outer", "Outer.Helper"),
             )
 
-    def test_split_modules_compile_with_stable_model_names(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "shared_model.py").write_text(
-                "from peach_dsl import *\n"
-                "class Header(Schema):\n"
-                "    kind = Int8()\n",
-                encoding="utf-8",
-            )
-            (root / "family_request.py").write_text(
-                "from peach_dsl import *\n"
-                "from shared_model import Header\n"
-                "class RequestPacket(Schema):\n"
-                "    header = Header(kind=fixed(1))\n"
-                "    payload = Blob()\n",
-                encoding="utf-8",
-            )
-            manifest = default_manifest("demo", ["request"])
-            manifest["shared_models"] = [
-                {"symbol": "Header", "purpose": "header", "fields": []}
-            ]
-            manifest["packet_groups"][0]["id"] = "request"
-            manifest["packet_groups"][0]["shared_refs"] = [
-                {"symbol": "Header", "usage": "RequestPacket.header"}
-            ]
-            validated = validate_manifest(manifest, "demo", ["request"])
-            root_source = render_root_module("demo", validated)
-            self.assertNotIn("MODEL_NAMES", root_source)
-            (root / "root.py").write_text(root_source, encoding="utf-8")
-            output = root / "datamodel.xml"
-            result = compile_dsl_subprocess(
-                root / "root.py", output
-            )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            xml = output.read_text(encoding="utf-8")
-            self.assertIn('DataModel name="Header"', xml)
-            self.assertIn('DataModel name="RequestPacket"', xml)
-            self.assertIn('DataModel name="demo_packet_array"', xml)
-            self.assertIn('DataModel name="DemoPacket"', xml)
-            self.assertIn('ref="Header"', xml)
-            self.assertIn('ref="RequestPacket"', xml)
-            self.assertNotIn("compiler_single_packet_duplicate", xml)
-            self.assertFalse((root / "datamodel.map.json").exists())
-            second = compile_dsl_subprocess(
-                root / "root.py", output
-            )
-            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
-            self.assertEqual(output.read_text(encoding="utf-8"), xml)
-
     def test_pyright_rejects_syntax_and_type_errors(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "root.py"
@@ -125,21 +173,21 @@ class PeachDSLCompilerTests(unittest.TestCase):
             path.write_text("import os\nvalue = os.path.basename('/tmp/x')\n")
             validate_dsl_source(path)
 
-    def test_computed_type_checks_one_to_four_symbolic_parameters(self) -> None:
+    def test_compute_type_checks_one_to_four_symbolic_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "computed.py"
             path.write_text(
                 "from peach_dsl import *\n"
-                "@computed\n"
+                "@compute\n"
                 "def one(a: int) -> int:\n"
                 "    return a\n"
-                "@computed\n"
+                "@compute\n"
                 "def two(a: int, b: str) -> int:\n"
                 "    return a + len(b)\n"
-                "@computed\n"
+                "@compute\n"
                 "def three(a: int, b: str, c: bytearray) -> int:\n"
                 "    return a + len(b) + sum(c)\n"
-                "@computed\n"
+                "@compute\n"
                 "def four(a: int, b: str, c: bytearray, d: int) -> int:\n"
                 "    return a + len(b) + sum(c) + d\n"
                 "class Packet(Schema):\n"
@@ -164,32 +212,34 @@ class PeachDSLCompilerTests(unittest.TestCase):
             with self.assertRaises(DSLValidationError):
                 validate_dsl_source(path)
 
-    def test_computed_rejects_five_parameters_statically(self) -> None:
+    def test_compute_rejects_five_parameters_statically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "computed_five.py"
             path.write_text(
                 "from peach_dsl import *\n"
-                "@computed\n"
+                "@compute\n"
                 "def five(a: int, b: int, c: int, d: int, e: int) -> int:\n"
                 "    return a + b + c + d + e\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "overload"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportCallIssue)", str(raised.exception))
+            self.assertIn("(reportArgumentType)", str(raised.exception))
 
-    def test_computed_generates_script_fixup_with_common_ancestor(self) -> None:
+    def test_compute_generates_script_fixup_with_common_ancestor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             entry = root / "computed_root.py"
             entry.write_text(
                 "from peach_dsl import *\n"
-                "@computed\n"
+                "@compute\n"
                 "def calc_crc(header: bytearray, kind: int) -> int:\n"
                 "    return (sum(header) + kind) % 65536\n"
-                "@computed\n"
+                "@compute\n"
                 "def add_fields(left: int, right: int) -> int:\n"
                 "    return left + right\n"
-                "@computed\n"
+                "@compute\n"
                 "def block_crc(block: bytearray) -> int:\n"
                 "    return sum(block) % 256\n"
                 "class Header(Schema):\n"
@@ -229,13 +279,13 @@ class PeachDSLCompilerTests(unittest.TestCase):
             self.assertIn("def func(self, header, kind):", script)
             self.assertIn("return (sum(header) + kind) % 65536", script)
             self.assertIn("header = bytearray(element.Bytes())", script)
-            self.assertIn('kind = int(element.find("kind").InternalValue)', script)
-            self.assertIn("return self.func(header, kind)", script)
-            self.assertIn('left = int(element.find("prefix").InternalValue)', script)
-            self.assertIn('right = int(element.find("crc").InternalValue)', script)
-            self.assertIn("return self.func(left, right)", script)
+            self.assertIn('kind = int(str(element.find("kind").InternalValue).rstrip(\'\\0\'))', script)
+            self.assertIn("return self._convert_result(self.func(header, kind))", script)
+            self.assertIn('left = int(str(element.find("prefix").InternalValue).rstrip(\'\\0\'))', script)
+            self.assertIn('right = int(str(element.find("crc").InternalValue).rstrip(\'\\0\'))', script)
+            self.assertIn("return self._convert_result(self.func(left, right))", script)
             self.assertIn("block = bytearray(element.Bytes())", script)
-            self.assertIn("return self.func(block)", script)
+            self.assertIn("return self._convert_result(self.func(block))", script)
 
     def test_pyright_checks_imported_sibling_dsl_modules(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -249,8 +299,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 "from shared_model import value\nROOT = value\n", encoding="utf-8"
             )
 
-            with self.assertRaisesRegex(DSLValidationError, "unknown"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_dependencies(entry)
+            self.assertIn("(reportUnknownVariableType)", str(raised.exception))
 
     def test_pyright_preserves_decorated_block_internal_type(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -278,8 +329,36 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 + "bad = Packet().envelope.body.missing\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "missing"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportAttributeAccessIssue)", str(raised.exception))
+
+    def test_pyright_preserves_optional_member_type_without_internal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "optional.py"
+            path.write_text(
+                "from peach_dsl import *\n"
+                "class Header(Schema):\n"
+                "    length = Int16()\n"
+                "class Packet(Schema):\n"
+                "    header = Optional[Header]()\n"
+                "    count = Optional[Int8]()\n"
+                "class Frame(Schema):\n"
+                "    packet = Packet()\n"
+                "    length: MemberRef[int] = packet.header.length\n"
+                "    count: MemberRef[int] = packet.count\n",
+                encoding="utf-8",
+            )
+            validate_dsl_source(path)
+
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "missing = Frame.packet.header.unknown\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(DSLValidationError) as raised:
+                validate_dsl_source(path)
+            self.assertIn("(reportAttributeAccessIssue)", str(raised.exception))
 
     def test_public_field_and_schema_member_aliases_are_type_checked(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -297,8 +376,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 path.read_text(encoding="utf-8") + "bad: AnyField = object()\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "object"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportAssignmentType)", str(raised.exception))
 
     def test_override_accepts_every_schema_member_kind(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -350,8 +430,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 "    payload = Blob[length]()\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "Length"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportArgumentType)", str(raised.exception))
 
     def test_field_override_can_be_forwarded_to_schema_constructor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -421,8 +502,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 "    enabled = Bool()\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "Bool"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportUndefinedVariable)", str(raised.exception))
 
             path.write_text(
                 "from peach_dsl import *\n"
@@ -491,8 +573,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
                 "    value = Int8(constraint=lambda value: len(value) > 0)\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(DSLValidationError, "__len__"):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportArgumentType)", str(raised.exception))
 
     def test_constraint_lambda_uses_the_field_logical_type(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -521,11 +604,9 @@ class PeachDSLCompilerTests(unittest.TestCase):
             path.write_text(
                 'from peach_dsl import *\nCustom = ExtendedType[list]("Custom")\n'
             )
-            with self.assertRaisesRegex(
-                DSLValidationError,
-                "cannot be assigned to type variable",
-            ):
+            with self.assertRaises(DSLValidationError) as raised:
                 validate_dsl_source(path)
+            self.assertIn("(reportInvalidTypeArguments)", str(raised.exception))
 
             path.write_text(
                 'from peach_dsl import *\nCustom = ExtendedType[bool]("Custom")\n'
@@ -563,12 +644,11 @@ class PeachDSLCompilerTests(unittest.TestCase):
             root = Path(directory)
             entry = root / "family_invalid.py"
             entry.write_text(
-                "from typing import Any\n"
                 "from peach_dsl import *\n"
-                "value: BlockField[Any] = Block(data=Blob())\n"
                 "class Root(Schema):\n"
                 "    data = Blob()\n"
-                "ROOT = Root\n",
+                "ROOT = Root\n"
+                "raise TypeError('deliberate DSL failure')\n",
                 encoding="utf-8",
             )
             output = root / "datamodel.xml"
@@ -577,10 +657,10 @@ class PeachDSLCompilerTests(unittest.TestCase):
 
             detail = result.stdout + result.stderr
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("TypeError: type 'BlockField' is not subscriptable", detail)
-            self.assertIn(f"root cause: {entry.resolve()}:3", detail)
+            self.assertIn("TypeError: deliberate DSL failure", detail)
+            self.assertIn(f"root cause: {entry.resolve()}:5", detail)
             self.assertIn(
-                "value: BlockField[Any] = Block(data=Blob())",
+                "raise TypeError('deliberate DSL failure')",
                 detail,
             )
 
@@ -627,60 +707,6 @@ class PeachDSLCompilerTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('DataModel name="DemoPacket"', output.read_text())
-
-    def test_manifest_derives_runtime_names_and_allows_prefixed_custom_refs(self) -> None:
-        manifest = default_manifest("demo", ["request"])
-        manifest["shared_models"] = [
-            {"symbol": "DemoHeader", "purpose": "header", "fields": []}
-        ]
-        manifest["packet_groups"][0]["shared_refs"] = [
-            {"symbol": "DemoHeader", "usage": "RequestPacket.header"},
-            {"symbol": "DemoVarInt", "usage": "RequestPacket.payload_length"},
-        ]
-        manifest["packet_groups"][0]["packet_models"][0]["model_name"] = "wrong"
-        validated = validate_manifest(manifest, "demo", ["request"])
-
-        self.assertEqual(validated["shared_models"][0]["name"], "demo_header_t")
-        self.assertEqual(
-            validated["packet_groups"][0]["packet_models"][0]["model_name"],
-            "demo_request_packet_t",
-        )
-
-    def test_manifest_omits_choice_name_and_derives_keyword_safe_union_name(self) -> None:
-        manifest = default_manifest("demo", ["class"])
-
-        validated = validate_manifest(manifest, "demo", ["class"])
-        root_source = render_root_module("demo", validated)
-
-        self.assertNotIn("choice_name", validated["packet_groups"][0]["packet_models"][0])
-        self.assertIn("class_packet=ClassPacket", root_source)
-
-        manifest["packet_groups"][0]["packet_models"][0]["choice_name"] = "class_packet"
-        with self.assertRaisesRegex(ValueError, "must not specify choice_name"):
-            validate_manifest(manifest, "demo", ["class"])
-
-    def test_manifest_requires_group_description_and_shared_ref_usage(self) -> None:
-        manifest = default_manifest("demo", ["request"])
-        manifest["shared_models"] = [
-            {"symbol": "Header", "purpose": "header", "fields": []}
-        ]
-        manifest["packet_groups"][0]["description"] = ""
-        with self.assertRaisesRegex(ValueError, "description must not be empty"):
-            validate_manifest(manifest, "demo", ["request"])
-
-        manifest["packet_groups"][0]["description"] = "Request packet framing."
-        manifest["packet_groups"][0]["shared_refs"] = [
-            {"symbol": "Header", "usage": ""}
-        ]
-        with self.assertRaisesRegex(ValueError, "usage must not be empty"):
-            validate_manifest(manifest, "demo", ["request"])
-
-    def test_manifest_rejects_python_keyword_symbols(self) -> None:
-        manifest = default_manifest("demo", ["request"])
-        manifest["packet_groups"][0]["packet_models"][0]["symbol"] = "class"
-
-        with self.assertRaisesRegex(ValueError, "must not be a Python keyword"):
-            validate_manifest(manifest, "demo", ["request"])
 
 if __name__ == "__main__":
     unittest.main()

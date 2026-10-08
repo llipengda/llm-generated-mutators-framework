@@ -52,16 +52,17 @@ if [ -n "$MUTATOR_FILTER" ]; then
 fi
 
 if [ "$PEACH_IS_MODERN" -eq 1 ]; then
-  docker run --rm -i --platform=linux/amd64 --entrypoint sh -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
+  docker run --rm -i --entrypoint sh -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
     -v "$ROOT/tests/NLog.config:/opt/peach/NLog.config:ro" \
     -v "$ROOT/llm/peach/$PROTO/mutator_test_logs:/logs" "$PEACH_IMAGE" \
     -c "cp /generated/Mutators/out/${PROTO_UPPER}Mutators.dll /opt/peach/Plugins && \
     if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll /opt/peach/Plugins; fi && \
     if [ -f /generated/python_fixup.py ]; then cp /generated/python_fixup.py /opt/peach/; fi && \
-    dotnet /opt/peach/Peach.LLM.Validations.Mutator.dll /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG} && \
+    cd /opt/peach && \
+    dotnet Peach.LLM.Validations.Mutator.dll /generated/datamodel.xml /seeds ${PROTO}_packet_array 100 ${FILTER_ARG} && \
     chmod -R 777 /logs"
 else
-  docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
+  docker run --rm -i --platform=linux/amd64 -v "$ROOT/llm/peach/$PROTO":/generated -v "$SEED_DIR":/seeds \
     -v "$ROOT/llm/peach/$PROTO/mutator_test_logs:/logs" "$PEACH_IMAGE" \
     sh -c "cp /generated/Mutators/out/${PROTO_UPPER}Mutators.dll ./Plugins && \
     if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \

@@ -37,7 +37,7 @@ mkdir -p "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 chmod u+rwx "$ROOT/llm/peach/$PROTO/fixer_test_logs"
 
 if [ "$PEACH_IS_MODERN" -eq 1 ]; then
-  docker run --rm -i --platform=linux/amd64 --entrypoint sh -v "$ROOT/llm/peach/$PROTO":/generated \
+  docker run --rm -i --entrypoint sh -v "$ROOT/llm/peach/$PROTO":/generated \
     -v "$ROOT/tests/NLog.config:/opt/peach/NLog.config:ro" \
     -v "$ROOT/llm/peach/$PROTO/fixer_test_logs:/logs" "$PEACH_IMAGE" \
     -c "cp /generated/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll /opt/peach/Plugins && \
@@ -46,7 +46,7 @@ if [ "$PEACH_IS_MODERN" -eq 1 ]; then
     if [ -f /generated/python_fixup.py ]; then cp /generated/python_fixup.py /opt/peach/; fi && \
     cd /opt/peach && dotnet Peach.LLM.Validations.Fixer.dll"
 else
-  docker run --rm -i -v "$ROOT/llm/peach/$PROTO":/generated \
+  docker run --rm -i --platform=linux/amd64 -v "$ROOT/llm/peach/$PROTO":/generated \
     -v "$ROOT/llm/peach/$PROTO/fixer_test_logs:/logs" "$PEACH_IMAGE" \
     sh -c "cp /generated/Fixers/Validations/out/${PROTO_UPPER}FixerTests.dll ./Plugins && \
     if [ -f /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ]; then cp /generated/DataElements/out/${PROTO_UPPER}DataElements.dll ./Plugins; fi && \

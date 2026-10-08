@@ -86,8 +86,9 @@ class PipelineLogger(BaseCallbackHandler):
         self._started_at: dict[str, float] = {}
         self._tool_names: dict[str, str] = {}
 
-        # Start a fresh log for this protocol run without touching other protocols.
-        self.path.write_text("", encoding="utf-8")
+        # Keep prior runs in the protocol log.  The session markers and IDs make
+        # each invocation independently filterable in the log viewer.
+        self.path.touch(exist_ok=True)
         self.write_event({"event": "session_start"})
 
     def for_task(self, task: LogTask) -> PipelineLogger:
@@ -267,11 +268,30 @@ class _JsonlHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            message = record.getMessage()
+            if record.name == "httpx" and message.startswith("HTTP Request:"):
+                return
+
+            # faiss emits a two-line import progress message. Keep one concise,
+            # searchable event instead of recording both implementation details.
+            if record.name == "faiss.loader":
+                if message == "Loading faiss.":
+                    return
+                if message == "Successfully loaded faiss.":
+                    self.pipeline_logger.write_event(
+                        {
+                            "event": "faiss_loaded",
+                            "level": record.levelname,
+                            "logger": record.name,
+                            "message": "FAISS loaded.",
+                        }
+                    )
+                    return
             payload: dict[str, object] = {
                 "event": getattr(record, "event", "log"),
                 "level": record.levelname,
                 "logger": record.name,
-                "message": record.getMessage(),
+                "message": message,
             }
             if record.exc_info:
                 payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))

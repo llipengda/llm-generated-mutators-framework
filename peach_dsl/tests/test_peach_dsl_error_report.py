@@ -2,16 +2,21 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from peach_dsl.error_report import (
+if __package__ in ("", "tests"):
+    __package__ = "peach_dsl.tests"
+
+from ..error_report import (
     attach_report,
     convert_reports_subprocess,
     evaluate_with_report,
     format_dsl_error_reports,
     parse_peach_report,
 )
-from peach_dsl import (
+from .. import (
     Array,
+    Bit,
     Default,
+    Flags,
     Int8,
     Occurs,
     Optional,
@@ -174,6 +179,119 @@ X
 
 
 class PeachErrorReportTests(unittest.TestCase):
+    def test_root_flags_wrapper_does_not_bind_to_same_named_flag(self) -> None:
+        @Flags(Int8, endian="big")
+        class Header(Schema):
+            value = Bit[1]()
+            reserved = Bit[7]()
+
+        report = """-+ DataModel 'Header', Bytes: 0/1, Bits: 0/8
+ |-+ Flags 'value', Bytes: 0/1, Bits: 0/8
+ | |-- Flag 'value', Bytes: 0/1, Bits: 0/1
+ | |-- Flag 'reserved', Bytes: 0/1, Bits: 1/7
+"""
+        evaluated = evaluate_with_report(Header, report)
+        observations = evaluated.for_path("value")
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].kind, "Flag")
+        wrapper = evaluated.report.roots[0].children[0]
+        self.assertIsNone(wrapper.dsl_path)
+        formatted = format_dsl_error_reports(Header, {"flags.log": report})
+        self.assertIn('Flags name="value"', formatted)
+        self.assertIn('Field<bit> path="value"', formatted)
+
+    def test_plain_wrapped_schema_paths_preserve_container_types(self) -> None:
+        class Header(Schema):
+            code = Int8()
+
+        class Packet(Schema):
+            flags = Int8()
+            items = Array[Header, 1]()
+            optional = Optional[Header](when=flags != 0)
+
+        report = """-+ DataModel 'Packet', Bytes: 0/3, Bits: 0/24
+ |-+ Array 'items', Bytes: 1/3, Bits: 8/24
+ | |-+ DataModel 'items_0', Bytes: 1/3, Bits: 8/24
+ | | |-- Number 'code', Bytes: 1/3, Bits: 8/24
+ |-+ Optional 'optional', Bytes: 2/3, Bits: 16/24
+ | |-+ Block 'optional_internal', Bytes: 2/3, Bits: 16/24
+ | | |-- Number 'code', Bytes: 2/3, Bits: 16/24
+"""
+        evaluated = evaluate_with_report(Packet, report)
+        self.assertEqual(len(evaluated.for_path("code")), 1)
+        self.assertEqual(len(evaluated.for_path("optional.code")), 1)
+        formatted = format_dsl_error_reports(Packet, {"wrapped.log": report})
+        self.assertIn('Array path="items"', formatted)
+        self.assertIn('Optional path="optional"', formatted)
+
+    def test_plain_schema_report_has_nested_dsl_paths(self) -> None:
+        class Header(Schema):
+            code = Int8()
+
+        class Packet(Schema):
+            header = Header()
+
+        report = """-+ DataModel 'Packet', Bytes: 0/1, Bits: 0/8
+ |-+ Block 'header', Bytes: 0/1, Bits: 0/8
+ | |-- Number 'code', Bytes: 0/1, Bits: 0/8
+ | |   Failed: invalid code
+"""
+        original = evaluate_schema(Packet)
+        evaluated = attach_report(original, report)
+        self.assertIs(evaluated.result, original)
+        self.assertEqual(len(evaluated.for_path("header.code")), 1)
+        self.assertEqual(len(evaluated.for_path("header")), 1)
+        formatted = format_dsl_error_reports(Packet, {"plain.log": report})
+        self.assertIn('Field<int8> path="header.code" state=FAIL', formatted)
+        self.assertIn('Schema<Header> path="header"', formatted)
+
+    def test_reused_array_element_paths_do_not_create_false_ambiguity(self) -> None:
+        class Item(Schema):
+            code = Int8()
+
+        class Part(Schema):
+            left = Array[Item, 1]()
+            right = Array[Item, 1]()
+
+        class Other(Schema):
+            tag = Int8()
+
+        @PacketUnion
+        class Packet(Schema):
+            kind = Union(part=Part(), other=Other())
+
+        report = """-+ DataModel 'Packet', Bytes: 0/2, Bits: 0/16
+ |-+ Choice 'kind', Bytes: 0/2, Bits: 0/16
+ | |-+ DataModel 'part', Bytes: 0/2, Bits: 0/16
+ | | |-+ Array 'left', Bytes: 0/1, Bits: 0/8
+ | | | |-+ DataModel 'left_0', Bytes: 0/1, Bits: 0/8
+ | | | | |-- Number 'code', Bytes: 0/1, Bits: 0/8
+ | | |-+ Array 'right', Bytes: 1/2, Bits: 8/16
+ | | | |-+ DataModel 'right_0', Bytes: 1/2, Bits: 8/16
+ | | | | |-- Number 'code', Bytes: 1/2, Bits: 8/16
+"""
+        evaluated = evaluate_with_report(Packet, report)
+        observations = evaluated.for_path("code")
+        self.assertEqual(len(observations), 2)
+        self.assertEqual([node.byte_start for node in observations], [0, 1])
+        self.assertEqual(len(evaluated.for_path("part.left")), 1)
+        self.assertEqual(len(evaluated.for_path("part.right")), 1)
+
+    def test_unknown_report_container_does_not_bind_a_same_named_dsl_field(self) -> None:
+        report = SAMPLE_REPORT.replace("'packet_length_target'", "'unknown_container'")
+        evaluated = evaluate_with_report(make_test_schema(), report)
+        nodes = [node for node in evaluated.report.walk() if node.name == "want_reply"]
+        self.assertEqual(len(nodes), 1)
+        self.assertIsNone(nodes[0].dsl_path)
+        self.assertEqual(
+            evaluated.for_path("ssh_msg_channel_request.packet_length_target.want_reply"),
+            (),
+        )
+        formatted = format_dsl_error_reports(make_test_schema(), {"unknown.log": report})
+        self.assertIn('name="want_reply" state=FAIL', formatted)
+        self.assertIn("Token did not match", formatted)
+        self.assertNotIn('path="ssh_msg_channel_request.packet_length_target.want_reply"', formatted)
+
     def test_parses_tree_failures_and_byte_mismatch(self) -> None:
         report = parse_peach_report(SAMPLE_REPORT)
 
@@ -238,7 +356,7 @@ class PeachErrorReportTests(unittest.TestCase):
             'Schema<TestPacketArray> path="$root" state=PASS',
             converted,
         )
-        self.assertIn('  Array name="packets" state=FAIL', converted)
+        self.assertIn('  Array path="packets" state=FAIL', converted)
         self.assertIn('      Union name="packet_union" state=FAIL', converted)
         self.assertIn(
             '              Field<int8> '
@@ -288,8 +406,8 @@ class PeachErrorReportTests(unittest.TestCase):
             {"union.log": FAILED_UNION_REPORT},
         )
 
-        self.assertIn('Schema name="short"', converted)
-        self.assertIn('Schema name="long"', converted)
+        self.assertIn('Schema<short> path="choice.short"', converted)
+        self.assertIn('Schema<long> path="choice.long"', converted)
 
     def test_isolated_report_conversion_writes_compact_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from langchain_core.callbacks.base import BaseCallbackHandler
-from core.log import console
+from core.log import PipelineLogger, console
 
 
 UsageDict = dict[str, int]
@@ -129,9 +129,11 @@ class TokenUsageTracker(BaseCallbackHandler):
 
 @dataclass
 class ReasoningContentLogger(BaseCallbackHandler):
-    """Print reasoning returned by each completed LLM request in an agent step."""
+    """Persist reasoning returned by each completed LLM request in an agent step."""
 
     step_title: str
+    event_logger: PipelineLogger | None = None
+    print_to_console: bool = True
     _call_number: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -164,9 +166,19 @@ class ReasoningContentLogger(BaseCallbackHandler):
             self._call_number += 1
             call_number = self._call_number
         for reasoning in reasoning_items:
-            console.print(
-                f"[reasoning] {self.step_title} (call {call_number})",
-                style="dim",
-            )
-            console.print(reasoning, markup=False)
+            if self.event_logger is not None:
+                self.event_logger.write_event(
+                    {
+                        "event": "reasoning",
+                        "step_title": self.step_title,
+                        "call_number": call_number,
+                        "reasoning": reasoning,
+                    }
+                )
+            if self.print_to_console:
+                console.print(
+                    f"[reasoning] {self.step_title} (call {call_number})",
+                    style="dim",
+                )
+                console.print(reasoning, markup=False)
         return None

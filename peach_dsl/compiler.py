@@ -4,23 +4,29 @@ from __future__ import annotations
 
 import argparse
 import ast
+from collections.abc import Sequence
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import json
+import linecache
 import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import traceback
-from types import ModuleType
+from threading import RLock
+from types import CodeType, ModuleType
 from typing import Any, cast
 import xml.etree.ElementTree as ET
 
-from .sdk import Schema, evaluate_schema, to_peach_artifacts
+from .sdk import Schema, to_peach_artifacts
 
 
 PEACH_NAMESPACE = "http://peachfuzzer.com/2012/Peach"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DSL_IMPORT_LOCK = RLock()
 
 
 class DSLValidationError(ValueError):
@@ -74,8 +80,8 @@ def _format_compile_error(error: BaseException, entry: Path) -> str:
     return "\n".join(lines)
 
 
-def _run_pyright(path: Path) -> None:
-    """Run strict Pyright checking against one generated DSL entry module."""
+def _run_pyright(path: Path, dependencies: Sequence[Path] = ()) -> None:
+    """Run one strict Pyright check over the entry and its local dependencies."""
 
     path = path.resolve()
     config = {
@@ -96,6 +102,7 @@ def _run_pyright(path: Path) -> None:
                     str(config_path),
                     "--outputjson",
                     str(path),
+                    *(str(dependency) for dependency in dependencies),
                 ],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
@@ -174,10 +181,10 @@ def _module_schema_classes(module: ModuleType) -> tuple[type[Schema], ...]:
 
 
 def validate_dsl_module(path: Path) -> tuple[str, ...]:
-    """Type-check, load, and evaluate every Schema defined in one DSL module."""
+    """Type-check dependencies and render every local Schema without writing files."""
 
     path = path.resolve()
-    validate_dsl_source(path)
+    validate_dsl_dependencies(path)
     try:
         module = _load_entry(path)
     except Exception as error:
@@ -191,7 +198,7 @@ def validate_dsl_module(path: Path) -> tuple[str, ...]:
         schema_name = schema.__qualname__
         schema_names.append(schema_name)
         try:
-            evaluate_schema(schema)
+            to_peach_artifacts(schema)
         except Exception as error:
             failures.append(
                 f"{path}: Schema {schema_name} failed to evaluate: "
@@ -202,11 +209,52 @@ def validate_dsl_module(path: Path) -> tuple[str, ...]:
     return tuple(schema_names)
 
 
+def _local_import_paths(
+    node: ast.Import | ast.ImportFrom, source: Path, directory: Path
+) -> tuple[Path, ...]:
+    base = directory
+    if isinstance(node, ast.ImportFrom) and node.level:
+        base = source.parent
+        for _ in range(node.level - 1):
+            base = base.parent
+        if not base.is_relative_to(directory):
+            return ()
+    if isinstance(node, ast.Import):
+        modules = [alias.name for alias in node.names]
+    else:
+        module = node.module or ""
+        modules = [module] if module else []
+        modules.extend(
+            f"{module}.{alias.name}" if module else alias.name
+            for alias in node.names if alias.name != "*"
+        )
+        if not module and (base / "__init__.py").is_file():
+            modules.insert(0, "")
+
+    paths: set[Path] = set()
+    for module in modules:
+        if module.split(".")[0] == "peach_dsl":
+            continue
+        current = base
+        parts = module.split(".") if module else []
+        if not parts:
+            paths.add(current / "__init__.py")
+        for index, part in enumerate(parts):
+            current = current / part
+            package = current / "__init__.py"
+            if package.is_file():
+                paths.add(package)
+            elif index == len(parts) - 1 and current.with_suffix(".py").is_file():
+                paths.add(current.with_suffix(".py"))
+            elif not current.is_dir():
+                break
+    return tuple(sorted(paths))
+
+
 def validate_dsl_dependencies(entry: Path) -> dict[Path, ast.Module]:
-    """Type-check an entry and collect its imported sibling syntax trees."""
+    """Type-check an entry and validate its local imported syntax trees."""
 
     entry = entry.resolve()
-    _run_pyright(entry)
     pending = [entry]
     trees: dict[Path, ast.Module] = {}
     while pending:
@@ -220,28 +268,79 @@ def validate_dsl_dependencies(entry: Path) -> dict[Path, ast.Module]:
         _validate_language_rules(path, tree)
         trees[path] = tree
         for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or node.level != 0:
-                continue
-            module = node.module or ""
-            sibling = path.parent / f"{module}.py"
-            if module != "peach_dsl" and sibling.is_file():
-                pending.append(sibling)
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                pending.extend(_local_import_paths(node, path, entry.parent))
+    _run_pyright(entry, tuple(sorted(path for path in trees if path != entry)))
     return trees
+
+
+class _FreshDSLLoader(importlib.machinery.SourceFileLoader):
+    def get_code(self, fullname: str) -> CodeType:
+        # DSL repairs may preserve both size and timestamp; pyc validation is
+        # insufficient to guarantee that we execute the current source.
+        linecache.cache.pop(self.path, None)
+        return self.source_to_code(self.get_data(self.path), self.path)
+
+
+class _DSLSourceFinder(importlib.abc.MetaPathFinder):
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+
+    def find_spec(
+        self, fullname: str, path: Sequence[str] | None = None,
+        target: ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path, target)
+        if (
+            spec is not None
+            and spec.origin is not None
+            and isinstance(spec.loader, importlib.machinery.SourceFileLoader)
+            and Path(spec.origin).resolve().is_relative_to(self.directory)
+        ):
+            spec.loader = _FreshDSLLoader(fullname, spec.origin)
+            return spec
+        return None
 
 
 def _load_entry(entry: Path) -> ModuleType:
     # TODO(sandbox): Run DSL import and compilation in a hardened Docker
     # container. It is intentionally local for now; Pyright is not a sandbox.
+    entry = entry.resolve()
     module_name = f"peach_generated_{os.getpid()}_{entry.stat().st_mtime_ns}"
-    spec = importlib.util.spec_from_file_location(module_name, entry)
+    spec = importlib.util.spec_from_file_location(
+        module_name, entry, loader=_FreshDSLLoader(module_name, str(entry))
+    )
     if spec is None or spec.loader is None:
         raise DSLValidationError(f"cannot load DSL entry module {entry}")
     module = importlib.util.module_from_spec(spec)
-    sys.path.insert(0, str(entry.parent))
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.path.pop(0)
+    local_names = {
+        path.stem if path.is_file() else path.name
+        for path in entry.parent.iterdir()
+        if (path.suffix == ".py" or path.is_dir())
+    } - {"peach_dsl", "__pycache__"}
+    local_names.add(module_name)
+    finder = _DSLSourceFinder(entry.parent)
+    with _DSL_IMPORT_LOCK:
+        saved_modules = {
+            name: value for name, value in tuple(sys.modules.items())
+            if name.partition(".")[0] in local_names
+        }
+        for name in saved_modules:
+            del sys.modules[name]
+        saved_path = sys.path[:]
+        sys.path.insert(0, str(entry.parent))
+        sys.meta_path.insert(0, finder)
+        sys.modules[module_name] = module
+        importlib.invalidate_caches()
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.meta_path.remove(finder)
+            sys.path[:] = saved_path
+            for name in tuple(sys.modules):
+                if name.partition(".")[0] in local_names:
+                    del sys.modules[name]
+            sys.modules.update(saved_modules)
     return module
 
 

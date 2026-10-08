@@ -44,6 +44,10 @@ fixed-width integer is still `Int16`, `Int32`, etc., not an `ExtendedType`.
 
 ## Values, constraints, and references
 
+Integer defaults and fixed values must fit the field's effective width and
+signedness. Compilation checks inherited defaults and instance overrides as
+well. Flag values must fit their own unsigned bit width.
+
 ### Fixed and initial values
 
 ```python
@@ -68,10 +72,21 @@ code = String(
 )
 ```
 
-The lambda must take exactly one argument. Its parameter has the field's
+The lambda must declare exactly one positional parameter (positional-only is
+also supported), without additional keyword-only or variadic parameters.
+Its parameter has the field's
 logical Python type (`str`, `int`, `float`, or `bytes`) for static checking. The
 compiler rewrites the expression from the Python AST; it does not call the
 lambda while declaring or compiling the schema.
+
+Nested lambdas and comprehensions retain their own variable scopes. Their
+parameters and loop variables may reuse `value` or conversion names such as
+`int`; only the outer field parameter receives the field's type conversion.
+
+Lambda constraints snapshot referenced module and closure constants when the
+field is declared. Supported values are `None`, booleans, integers, floats,
+strings, bytes, and tuples of these values. References to external functions,
+modules, or mutable objects are rejected instead of exporting unresolved names.
 
 An expression may reference at most ONE field, such as `length - 4` or
 `(flags & 1) != 0`.
@@ -80,6 +95,15 @@ An expression may reference at most ONE field, such as `length - 4` or
 
 Lengths, counts, conditions, and relations may refer to a field or a
 single-field expression.
+When writing a size or count through a multiplication expression, the reverse
+calculation requires exact division. An unrepresentable payload length or
+element count raises an error instead of silently rounding the source field.
+Left shifts of a field are reversed by exact division by the corresponding
+power of two. XOR with a constant is reversed by XOR with the same constant.
+For expressions without a unique inverse, such as integer division, remainder,
+or bit masks, writing preserves the parsed/default source value when it still
+matches the actual target length. A mismatch raises an error; supply a source
+value consistent with the new target instead of relying on an ambiguous inverse.
 An expression may reference at most ONE field.
 
 ```python
@@ -96,15 +120,15 @@ field, schema, or module currently being defined.
 
 ### Computed field declarations
 
-Use `@computed` when a field's value is calculated from other fields or
-schemas:
+Use `@compute` to declare a function that calculates a field's value from
+other fields or schemas:
 
 Use this feature only for checksums, CRCs, and similar calculated values.
 Describe lengths and counts with the DSL's built-in references and relations,
-not with `@computed`.
+not with `@compute`.
 
 ```python
-@computed
+@compute
 def calc_crc(header: bytearray) -> int:
     return sum(header) % 65536
 
@@ -118,17 +142,38 @@ class Packet(Schema):
     crc = Int16(calc_crc(header))
 ```
 
-A computed function must have one to four required positional parameters with
+A function decorated with `@compute` must have one to four required positional parameters with
 no defaults. Scalar fields use their corresponding Python types; a `Schema` or
 `Block` argument must be annotated as `bytearray`. Its return value must match
 the target field's type.
+Binary results are converted to a .NET byte array before being returned to
+Peach's ScriptFixup.
+Integer results are converted to CLR integer types without losing precision;
+results outside the range from `-2**63` to `2**64 - 1` raise an overflow error
+for binary integer fields. DecimalString results use decimal text and may exceed
+64 bits; a constant field width still limits the number of characters. For a
+fixed-width DecimalString, the generated fixup pads the text and includes any
+requested null terminator within that width.
+Floating-point results use round-trip decimal text because ScriptFixup does
+not accept CLR floating-point objects directly; Peach's Double field performs
+the final conversion using its configured size and byte order.
+
+Module and closure constants used by the function are captured at compilation
+time, including constants read inside comprehensions. Supported captures are
+`None`, booleans, integers, floats, strings, bytes, and tuples of these values.
+Class bodies preserve their namespace lookup and fall back to captured constants
+before assignment, after deletion, or when a branch skips an assignment.
+External functions, modules, and mutable objects cannot be captured; put helper logic or
+required imports inside the computed function. `global` and `nonlocal`
+declarations are rejected because generated fixups do not share the DSL
+module's runtime state.
 
 Prefer references to fields declared earlier in wire order. Anonymous
 `Block(...)` and `Union(...)` members are not path-addressable; use their
 decorated class forms when another field must reference an internal path.
 
-`Array` and `Optional` are wrappers. Call `.internal()` before accessing a
-wrapped schema's field:
+`Optional` exposes its wrapped schema's fields directly. `Array` needs
+`.internal()` to select its element before accessing a field:
 
 ```python
 class LengthHeader(Schema):
@@ -142,11 +187,11 @@ class Container(Schema):
 
 class Packet(Schema):
     container = Container()
-    optional_payload = Blob[container.optional_header.internal().value]()
+    optional_payload = Blob[container.optional_header.value]()
     array_payload = Blob[container.headers.internal().value]()
 ```
 
-For a wrapped scalar, `.internal()` returns the field reference itself.
+An optional scalar can be referenced directly.
 Decorated unions are accessed by alternative name and need no `.internal()`.
 
 ## Scalar fields
@@ -172,8 +217,22 @@ IntN(
 Represent Boolean wire values with the numeric type that matches their encoded 
 width (for example, `Bit[1]` or `Int8`) and use numeric values such as `0` and `1`.
 
+The common `value_type` option accepts `"string"`, `"hex"`, `"literal"`,
+`"ipv4"`, or `"ipv6"` (case-insensitive). Unknown formats are rejected when
+declaring a built-in field. The value must also be valid for the chosen format
+and field type.
+References to fixed fields with a non-`string` value format remain runtime
+references: the encoded literal can differ from its decoded scalar value
+(for example, `Int8(fixed(12), value_type="hex")` stores decimal 18).
+Likewise, `fixed(...)` with explicit `token=False` keeps references dynamic:
+Peach can parse a value different from the declared default.
+Fixed `String` fields with a length or a NUL terminator also keep references
+dynamic, because Peach's runtime text can include padding and terminators.
+
 `Double` accepts the common parameters plus `endian` and `size=32 | 64`, but
-not `signed`. `Bit[width]` accepts:
+not `signed`. Finite defaults and fixed values must fit the selected width;
+explicit positive/negative infinity and NaN remain supported.
+`Bit[width]` accepts:
 
 ```python
 Bit[width](value=None, *, constraint=None, field_id=None,
@@ -214,9 +273,24 @@ class MqttFixedHeader(Schema):
 `Flags(storage, *, endian)` requires an integer storage type and `"big"` or
 `"little"` endian. Declaration order determines bit positions starting at
 zero; the compiler does not use endian to calculate them. Bit ranges must not
-overlap or exceed the storage width.
+overlap or exceed the storage width, and their total must exactly fill it,
+including after field overrides. When a Flags declaration is compiled directly
+as the root model, the DataModel contains one packed Flags child named `value`.
 
 ### String, DecimalString, and Blob
+
+Text defaults and fixed values are checked against the declared encoding during
+compilation; for example, an ASCII String cannot contain non-ASCII text.
+Explicit hexadecimal String values are checked for valid hex bytes and valid
+text in the declared encoding, including complete UTF-16/UTF-32 characters.
+String defaults and fixed values containing XML-forbidden characters (such as
+NUL) are emitted as hexadecimal bytes using the declared string encoding.
+This preserves their wire value without placing invalid characters in the XML.
+Text containing literal backslashes is also emitted as hex, preventing Peach
+from interpreting sequences such as `\n` a second time.
+Explicit NUL padding uses Peach's default padding without emitting an invalid
+XML attribute. Other padding characters must fit one UTF-16 code unit and be
+valid XML characters.
 
 ```python
 String(value=None, *, constraint=None, field_id=None, length_type=None,
@@ -234,8 +308,60 @@ Blob[length](value=None, *, constraint=None, field_id=None,
              length_type=None, mutable=None, token=None, value_type=None)
 ```
 
+Blob byte defaults preserve the supplied bytes in every supported value format.
+The default is hex. Explicit string values use ASCII text; high bytes, XML
+control characters, and backslash sequences fall back to hex. Literal values
+encode a quoted text expression when ASCII permits it. IPv4/IPv6 formats accept
+packed addresses of exactly 4/16 bytes and emit address text.
+Blob lengths use bytes or bits. A byte default or fixed value must fit the
+declared capacity; shorter values retain Peach's zero padding. Character length
+units are not valid for Blob fields.
+
 `String.type` is one of `"ascii"`, `"utf7"`, `"utf8"`, `"utf16"`,
 `"utf16be"`, `"utf32"`, or `"utf32be"`.
+For a constant string length, defaults and fixed values must fit the encoded
+capacity, including the terminator when enabled. Padding must fill the remaining
+capacity exactly. Bit lengths must be divisible by eight. Character lengths
+follow .NET UTF-16 code-unit counting, so a supplementary Unicode character
+occupies two units.
+An omitted default on a bounded String is treated as an empty string for these
+checks, including padding and terminator capacity.
+For UTF-7, the whole padded value must also encode to the declared byte length.
+Adjacent shifted characters can merge during encoding; configurations where
+Peach's padding would silently produce a shorter value are rejected.
+UTF-7 length checks and automatic hex values use Peach/.NET's explicit shift
+terminators; Python's UTF-7 encoder can omit those terminators before punctuation.
+UTF-7 hex defaults use an implicit shift end at EOF when needed to avoid
+Peach's trailing-terminator decoder error. Their decoded text and serialized
+wire value remain the same.
+
+For `Blob` and `String`, `length_type="bits"` also applies to dynamic length
+references and expressions. Their generated size relations read and write bit
+counts; the default unit is bytes.
+String length units must be `bytes`, `bits`, or `chars`, including unbounded
+and computed fields; invalid unit names are rejected before XML is generated.
+String and Blob length units are normalized to lowercase in generated XML.
+Dynamic `length_type="chars"` is supported for ASCII and UTF-16 (either byte
+order). Relations convert character units to encoded bytes and invert that
+conversion exactly. Other encodings require a byte length or a constant
+character length: Peach's size relation cannot infer their byte count from
+the character count alone.
+
+Inline `Block(...)` members can reference fields from their enclosing schema
+or Block. References follow the original field declaration, even when an inner
+Block has a field with the same name, and honor overrides on the enclosing
+instance. A `Block[length](...)` used as a Union alternative retains its length
+boundary.
+Conditional Optional references that cross these Block scopes use explicit
+relative paths in the generated XML. This prevents same-named inner fields
+from shadowing the intended source and allows the containing model to be
+reused under a different name.
+Size and count relations qualify their target with the DataModel name when
+another nested path would otherwise shadow that target during Peach lookup.
+Computed arguments inside inline Blocks retain the scope where their source
+was declared, including inherited fields and references wrapped in Optional,
+arrays, or Union alternatives. Their ScriptFixup reference is qualified with
+the DataModel name when a nested path would shadow the intended source.
 
 An unsized `String()` consumes the bytes made available by its surrounding
 grammar. As the final member of a schema or bounded block, it consumes the
@@ -262,8 +388,23 @@ class TextLengthPacket(Schema):
 ```
 
 `DecimalString` has logical type `int` and accepts valid base-10 integer text.
+When used as a size/count relation source, its value must fit a signed 64-bit
+integer: Peach parses the source before evaluating the relation expression.
+Known out-of-range defaults are rejected during compilation; relation writeback
+also checks this range before emitting a new value. This relation
+restriction does not apply to standalone decimal text or computed text results.
 Give an unsized value a boundary, such as a following fixed delimiter, or use
 `DecimalString[length]` for fixed-width text.
+Integer defaults and fixed values with a constant width are zero-padded on the
+left, preserving the sign and numeric value. The compiler accounts for the
+encoding, length units, and a requested null terminator, and rejects values that
+do not fit.
+Size and count relations writing to a constant-width DecimalString likewise
+format decimal text within that width, reserve space for a requested NUL
+terminator, and reject overflow.
+Numeric constraints, Optional conditions, and computed inputs strip trailing
+NUL padding or terminators before parsing decimal text. Empty text and embedded
+NUL characters remain invalid integers.
 
 ### Custom scalar types
 
@@ -301,6 +442,9 @@ including a schema instance, `Union`, `Array`, `Optional`, or direct
 `Block(...)`. Any field kind may replace any other field kind. Plain and fixed
 scalar values require an existing scalar field because they do not describe a
 wire type. Overrides apply only to immediate members.
+Replacing a `fixed(...)` declaration with a plain value changes it to an initial
+value; dependent lengths and counts remain dynamic. Use `fixed(...)` in the
+override when the replacement must stay fixed.
 
 For repeated complex construction, use a function or class method:
 
@@ -349,10 +493,15 @@ label = Optional[str]()
 - `Array[element, count]()` has an exact count from an integer, reference, or
   expression.
 - `Array[element, Occurs(minimum, maximum)]()` has an inclusive range.
+
 - `Array[element]()` parses until the next element fails or its containing
   block ends. Put it last or inside a bounded block.
 - `Optional[element]()` is unconditional optional content;
   `Optional[element](when=expression)` is conditionally present.
+
+Explicit occurrence counts and range endpoints cannot exceed `2147483647`,
+matching Peach's signed 32-bit array attributes. Constant expressions are
+checked after evaluation as well.
 
 ### Union
 

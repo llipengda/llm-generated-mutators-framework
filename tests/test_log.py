@@ -62,6 +62,26 @@ class PipelineLogTests(unittest.TestCase):
         self.assertEqual(root_logger.handlers, previous_handlers)
         self.assertEqual(root_logger.level, previous_level)
 
+    def test_runs_are_appended_and_transport_noise_is_compacted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with log_session("demo", log_root=root) as first:
+                logging.getLogger("httpx").info("HTTP Request: POST https://example.test/v1")
+                logging.getLogger("faiss.loader").info("Loading faiss.")
+                logging.getLogger("faiss.loader").info("Successfully loaded faiss.")
+            with log_session("demo", log_root=root) as second:
+                logging.getLogger(__name__).info("second run")
+
+            records = [json.loads(line) for line in first.path.read_text().splitlines()]
+            sessions = {record["session_id"] for record in records}
+            self.assertEqual(sessions, {first.session_id, second.session_id})
+            self.assertEqual(sum(record["event"] == "session_start" for record in records), 2)
+            self.assertEqual(sum(record["event"] == "session_end" for record in records), 2)
+            self.assertFalse(any("HTTP Request:" in str(record.get("message")) for record in records))
+            self.assertFalse(any(record.get("message") == "Loading faiss." for record in records))
+            faiss_events = [record for record in records if record["event"] == "faiss_loaded"]
+            self.assertEqual([record["message"] for record in faiss_events], ["FAISS loaded."])
+
     def test_failed_validation_output_survives_successful_retry(self) -> None:
         pipeline = BasePipeline.__new__(BasePipeline)
         verify = Mock(side_effect=[(False, "seed.raw: parse failed"), (True, "all passed")])

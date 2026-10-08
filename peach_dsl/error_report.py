@@ -304,9 +304,18 @@ def evaluate_with_report(target: SchemaInput, report_text: str) -> EvaluatedRepo
 def attach_report(result: EvaluationResult, report_text: str) -> EvaluatedReport:
     """Attach a Peach report to an existing :func:`sdk.evaluate_schema` result."""
 
-    paths = tuple(_result_paths(result))
+    # Reused array element models can contribute the same relative path more
+    # than once. They are one binding candidate, not competing candidates.
+    paths = tuple(dict.fromkeys(_result_paths(result)))
+    scalar_paths = frozenset(
+        path for path, member in _result_members_by_path(result).items()
+        if isinstance(member, FieldResult)
+        and (member.kind.startswith("int") or member.kind in (
+            "bit", "double", "string", "str", "decimal_string", "blob", "bytes",
+        ))
+    )
     parsed = parse_peach_report(report_text)
-    bound_roots = tuple(_bind_node(root, (), paths) for root in parsed.roots)
+    bound_roots = tuple(_bind_node(root, (), paths, scalar_paths) for root in parsed.roots)
     bound_report = PeachReport(
         roots=bound_roots,
         byte_mismatch=parsed.byte_mismatch,
@@ -561,20 +570,10 @@ def _dsl_node_type(
 
 def _result_members_by_path(result: EvaluationResult) -> dict[str, ResultMember]:
     members: dict[str, ResultMember] = {}
-
-    def collect(member: EvaluationResult | ResultMember) -> None:
-        if member.path is not None:
-            members[member.path] = member
-        if isinstance(member, SchemaResult):
-            for child in member.fields.values():
-                collect(child)
-        elif isinstance(member, UnionResult):
-            for alternative in member.alternatives:
-                collect(alternative)
-        elif isinstance(member, (ArrayResult, OptionalResult)):
-            collect(member.element)
-
-    collect(result)
+    for path, member in _result_path_members(result):
+        # A wrapper and its contained schema can share a logical DSL path.
+        # Retain the wrapper's type for the runtime node at that path.
+        members.setdefault(path, member)
     return members
 
 
@@ -749,23 +748,43 @@ def _freeze_node(node: _MutableNode) -> ReportNode:
 
 
 def _result_paths(result: EvaluationResult | ResultMember) -> Iterator[str]:
-    if result.path is not None:
-        yield result.path
+    for path, _member in _result_path_members(result):
+        yield path
+
+
+def _result_path_members(
+    result: EvaluationResult | ResultMember,
+    fallback: tuple[str, ...] = (),
+) -> Iterator[tuple[str, ResultMember]]:
+    # PacketUnion results carry explicit relative paths. Ordinary schemas do
+    # not, so derive their paths from declarations without changing the result.
+    parts = (
+        fallback if result.path is None
+        else tuple(result.path.split(".")) if result.path else ()
+    )
+    yield ".".join(parts), result
     if isinstance(result, SchemaResult):
-        for member in result.fields.values():
-            yield from _result_paths(member)
+        for name, member in result.fields.items():
+            yield from _result_path_members(member, parts + (name,))
     elif isinstance(result, UnionResult):
         for alternative in result.alternatives:
-            yield from _result_paths(alternative)
+            yield from _result_path_members(alternative, parts + (alternative.name,))
     elif isinstance(result, (ArrayResult, OptionalResult)):
-        yield from _result_paths(result.element)
+        if isinstance(result, ArrayResult) and isinstance(result.element, ArrayResult) and not result.optional:
+            parts += ("item",)
+        yield from _result_path_members(result.element, parts)
 
 
 def _bind_node(
-    node: ReportNode, ancestors: tuple[str, ...], paths: tuple[str, ...]
+    node: ReportNode, ancestors: tuple[str, ...], paths: tuple[str, ...],
+    scalar_paths: frozenset[str],
 ) -> ReportNode:
     names = ancestors + (node.name,)
-    path = _best_dsl_path(names, paths)
+    candidates = paths
+    if node.kind in ("DataModel", "Block", "Choice", "Array", "Optional", "Flags"):
+        # Compiler-created containers may share a name with a scalar field.
+        candidates = tuple(path for path in paths if path not in scalar_paths)
+    path = _best_dsl_path(names, candidates)
     return ReportNode(
         kind=node.kind,
         name=node.name,
@@ -786,7 +805,7 @@ def _bind_node(
         failed=node.failed,
         succeeded=node.succeeded,
         dsl_path=path,
-        children=tuple(_bind_node(child, names, paths) for child in node.children),
+        children=tuple(_bind_node(child, names, paths, scalar_paths) for child in node.children),
     )
 
 
@@ -808,7 +827,16 @@ def _best_dsl_path(names: tuple[str, ...], paths: tuple[str, ...]) -> str | None
             name_index -= 1
         return score
 
-    scored = sorted(((suffix_score(path), path) for path in candidates), reverse=True)
+    # Runtime arrays and Optional wrappers may add names between DSL segments,
+    # but a missing DSL ancestor must not be guessed from a matching leaf.
+    scored = sorted(
+        (
+            (score, path)
+            for path in candidates
+            if (score := suffix_score(path)) == len(path.split("."))
+        ),
+        reverse=True,
+    )
     if not scored or scored[0][0] == 0:
         return None
     if len(scored) > 1 and scored[0][0] == scored[1][0]:
