@@ -110,22 +110,22 @@ verification skip.
 ## SDK and commands
 
 Step 4/5 first compile a capability probe for `MatchesPath` and the three
-structural bases. Use rebuilt, matching `Peach.Core.dll`, `Peach.Pro.dll` and
-`Peach.LLM.dll` from llm-peach. The maintained bases build for .NET 8/.NET 10;
-use the net8.0 assemblies with this framework's `--modern-sdk` backend (C# 12).
-Legacy generation remains C# 7.2 but requires a compatible SDK containing these
-APIs. Updating framework source alone does not update installed SDK binaries.
+structural bases. `./setup.sh` publishes the local llm-peach sources for .NET 8
+and installs matching assemblies and complete validator runtimes in `peach/sdk/`.
+Generated protocol code uses C# 12. `PEACH_SDK_DIR` can point at another complete
+installation. Updating framework source alone does not update SDK binaries.
 
 From the repository root:
 
 ```bash
-PEACH_SDK=modern uv run python -m core.mutator_codegen sources mqtt
-PEACH_SDK=modern uv run python -m core.mutator_codegen compile mqtt \
+uv run python -m core.mutator_codegen sources mqtt
+uv run python -m core.mutator_codegen compile mqtt \
   --output llm/peach/mqtt/Mutators/out/MQTTMutators.dll
-PEACH_SDK=modern ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
-./peach_gen.sh mqtt --modern-sdk
+./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
+./peach_gen.sh mqtt
 ```
 
-The validator and generated fuzzing images use the same host SDK assemblies as
-compilation, so an older base image cannot silently supply missing structural
-classes. Docker must be available for runtime validation and image builds.
+Validators run with `dotnet` in isolated temporary runtime directories, using
+the installed SDK and exact protocol plugins. Logs and replay samples remain
+under the protocol output directory. `peach_gen.sh` produces native fuzzing
+bundles with their own runtime, plugins and launch script.

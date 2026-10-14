@@ -1,95 +1,95 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--modern-sdk" ]; }; then
-    echo "Usage: $0 [--modern-sdk]"
-    exit 1
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_DIR="${PEACH_SOURCE_DIR:-$ROOT/../llm-peach}"
+SDK_DIR="${PEACH_SDK_DIR:-$ROOT/peach/sdk}"
+
+if [ "$#" -eq 2 ] && [ "$1" = "--source" ]; then
+  SOURCE_DIR="$2"
+elif [ "$#" -ne 0 ]; then
+  echo "Usage: $0 [--source <llm-peach-directory>]" >&2
+  exit 2
 fi
 
-SDK_VARIANT="legacy"
-IMAGE="pdli/llm-peach:sdk"
-SDK_DIR="peach/sdk"
-if [ "${1:-}" = "--modern-sdk" ]; then
-    SDK_VARIANT="modern"
-    IMAGE="pdli/llm-peach:modern-sdk"
-    SDK_DIR="peach/modern-sdk"
+command -v dotnet >/dev/null 2>&1 || {
+  echo "Error: install a .NET 8 SDK or later before running setup." >&2
+  exit 1
+}
+if ! dotnet --list-sdks | awk -F. '$1 >= 8 { found=1 } END { exit !found }'; then
+  echo "Error: a .NET 8 SDK or later is required." >&2
+  exit 1
 fi
-PLATFORM_ARG=""
-if [ "$SDK_VARIANT" = "legacy" ]; then
-    PLATFORM_ARG="--platform=linux/amd64"
+command -v xmllint >/dev/null 2>&1 || {
+  echo "Error: install xmllint (libxml2) before running setup." >&2
+  exit 1
+}
+if [ ! -d "$SOURCE_DIR" ]; then
+  echo "Error: llm-peach source directory '$SOURCE_DIR' does not exist." >&2
+  exit 1
 fi
+SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
+SDK_PARENT="$(dirname "$SDK_DIR")"
+mkdir -p "$SDK_PARENT"
+SDK_PARENT="$(cd "$SDK_PARENT" && pwd)"
+SDK_DIR="$SDK_PARENT/$(basename "$SDK_DIR")"
+STAGING="$(mktemp -d "$SDK_PARENT/.sdk-install.XXXXXX")"
+trap 'if [ -n "${STAGING:-}" ]; then echo "Incomplete setup files preserved in: $STAGING" >&2; fi' EXIT
 
-OS=$(uname -s)
-ARCH=$(uname -m)
-
-if ! command -v docker &> /dev/null
-then
-    echo "Docker could not be found, please install it first."
-    exit 1
-fi
-if ! command -v xmllint &> /dev/null; then
-    echo "xmllint could not be found, please install libxml2 or libxml2-utils first."
-    exit 1
-fi
-if [ "$SDK_VARIANT" = "legacy" ]; then
-    if ! command -v mono &> /dev/null; then
-        echo "Mono could not be found, please install it first."
-        exit 1
-    fi
-elif ! command -v dotnet &> /dev/null; then
-    echo ".NET SDK could not be found, please install it first."
-    exit 1
-fi
-if [[ "$SDK_VARIANT" == "legacy" && "$OS" == "Linux" && "$ARCH" == "aarch64" ]]; then
-    echo "Linux arm64 is not supported."
-    exit 1
-fi
-
-
-if ! docker pull "$IMAGE" $PLATFORM_ARG; then
-    if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-        echo "Warning: Docker pull failed; using the existing local $IMAGE image." >&2
-    else
-        echo "Error: Docker pull failed and $IMAGE is not available locally." >&2
-        exit 1
-    fi
-fi
-if [ "$SDK_VARIANT" != "legacy" ]; then
-    if ! dotnet --list-sdks | awk -F. '$1 >= 8 { found=1 } END { exit !found }'; then
-        echo "Error: .NET 8 SDK or later is required for --modern-sdk."
-        exit 1
-    fi
-fi
-ESSENTIAL_DLLS=(
-    BouncyCastle.Crypto.dll
-    Dapper.dll
-    Microsoft.Diagnostics.Runtime.dll
-    Microsoft.Scripting.dll
-    Newtonsoft.Json.dll
-    NLog.dll
-    Patterns.Logging.dll
-    Peach.Core.dll
-    Peach.LLM.dll
-    Peach.Pro.dll
-    Peach.LLM.Validations.Common.dll
-    SocketHttpListener.dll
-    vtortola.WebSockets.dll
-    nunit.framework.dll
+# Publish only runtime projects. The aggregate build also includes test apps
+# and optional instrumentation tools, which are unnecessary for this pipeline.
+PROJECTS=(
+  pro/Peach/Peach.csproj
+  pro/PitTool/PitTool.csproj
+  llm/Validations/DataModel/Peach.LLM.Validations.DataModel.csproj
+  llm/Validations/Mutator/Peach.LLM.Validations.Mutator.csproj
+  llm/Validations/Fixer/Peach.LLM.Validations.Fixer.csproj
 )
-mkdir -p "$SDK_DIR"
-chmod -R 777 peach
-if [ "$SDK_VARIANT" = "legacy" ]; then
-    docker run --rm -v "$(pwd)/peach:/p" "$IMAGE" $PLATFORM_ARG \
-        sh -c "cp /peach/output/linux_x86_64_release/bin/${ESSENTIAL_DLLS[*]} /p/sdk/ \
-               && /peach/output/linux_x86_64_release/bin/peach --showenv > /p/peach.txt \
-               && cp /peach/llm/Core/README.md /p/README.md \
-               && /peach/output/linux_x86_64_release/bin/pittool makexsd \
-               && cp /peach/output/linux_x86_64_release/bin/peach.xsd /p/peach.xsd"
-else
-    docker run --rm --entrypoint sh -v "$(pwd)/peach:/p" "$IMAGE" $PLATFORM_ARG \
-        -c "cd /opt/peach && cp *.dll /p/modern-sdk/ \
-            && /opt/peach/Peach --showenv > /p/peach.txt \
-            && cd /p && /opt/peach/PitTool makexsd"
-fi
+for project in "${PROJECTS[@]}"; do
+  if [ ! -f "$SOURCE_DIR/$project" ]; then
+    echo "Error: missing .NET project '$SOURCE_DIR/$project'." >&2
+    exit 1
+  fi
+  dotnet publish "$SOURCE_DIR/$project" --configuration Release --framework net8.0 \
+    --output "$STAGING" --nologo -p:PeachInstallTargetFramework=net8.0
+done
 
-printf '%s\n' "$SDK_VARIANT" > "$SDK_DIR/variant"
+mkdir -p "$STAGING/Plugins"
+cp "$STAGING/Peach.LLM.dll" "$STAGING/Peach.LLM.Validations.Common.dll" "$STAGING/Plugins/"
+for launcher in peach pittool; do
+  assembly=Peach
+  [ "$launcher" != pittool ] || assembly=PitTool
+  cat > "$STAGING/$launcher" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LAUNCHER_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+exec dotnet "\$LAUNCHER_DIR/$assembly.dll" "\$@"
+EOF
+  chmod +x "$STAGING/$launcher"
+done
+
+# Probe the published distribution before replacing any existing installation.
+(
+  cd "$STAGING"
+  ./peach --showenv > peach.txt
+  ./pittool makexsd
+)
+for assembly in Peach PitTool Peach.LLM.Validations.DataModel Peach.LLM.Validations.Mutator Peach.LLM.Validations.Fixer; do
+  for suffix in dll deps.json runtimeconfig.json; do
+    if [ ! -f "$STAGING/$assembly.$suffix" ]; then
+      echo "Error: published installation is missing '$assembly.$suffix'." >&2
+      exit 1
+    fi
+  done
+done
+if [ -e "$SDK_DIR" ]; then
+  BACKUP="$SDK_DIR.backup.$(date +%Y%m%d%H%M%S).$$"
+  mv "$SDK_DIR" "$BACKUP"
+  echo "Previous SDK preserved in: $BACKUP"
+fi
+mv "$STAGING" "$SDK_DIR"
+STAGING=""
+mkdir -p "$ROOT/peach"
+cp "$SDK_DIR/peach.txt" "$SDK_DIR/peach.xsd" "$ROOT/peach/"
+cp "$ROOT/docs/llm-peach-sdk.md" "$ROOT/peach/README.md"
+echo "Installed local .NET 8 Peach runtime and SDK in: $SDK_DIR"

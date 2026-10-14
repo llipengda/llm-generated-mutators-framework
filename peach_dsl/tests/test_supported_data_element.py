@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from xml.sax.saxutils import escape
 
 if __package__ in ("", "tests"):
     __package__ = "peach_dsl.tests"
@@ -25,29 +26,17 @@ class SupportedDataElementTests(unittest.TestCase):
         self._compiled: dict[str, Path] = {}
 
     def matches(self, expression: str, full_name: str | None) -> bool:
-        if shutil.which("mcs") is None or shutil.which("mono") is None:
-            self.skipTest("C# predicate execution requires mcs and mono")
+        if shutil.which("dotnet") is None:
+            self.skipTest("C# predicate execution requires dotnet")
         root = Path(__file__).resolve().parents[2]
-        sdk = root / "peach" / "sdk"
-        extension = root.parent / "llm-peach" / "llm" / "Core" / "Extensions.cs"
-        if not (sdk / "Peach.Core.dll").exists() or not extension.exists():
-            self.skipTest("Native predicate checks require Peach SDK and llm-peach Extensions.cs")
+        sdk = Path(os.environ.get("PEACH_SDK_DIR", root / "peach" / "sdk")).expanduser().resolve()
+        if not all((sdk / name).exists() for name in ("Peach.Core.dll", "Peach.LLM.dll", "Peach.runtimeconfig.json")):
+            self.skipTest("Native predicate checks require the installed .NET 8 Peach SDK")
         if expression not in self._compiled:
-            folder = Path(self._temporary.name)
-            source = folder / f"predicate_{len(self._compiled)}.cs"
-            executable = source.with_suffix(".exe")
-            # Compile the actual matcher in isolation against the legacy SDK.
-            # NUnit tests also exercise the full Peach.LLM project assembly.
-            extension_source = extension.read_text()
-            start = extension_source.index("        private static readonly char[] InvalidPathCharacters")
-            method = extension_source.index("public static bool MatchesPath(", start)
-            end = extension_source.index("{", method)
-            depth = 1
-            while depth:
-                end += 1
-                depth += (extension_source[end] == "{") - (extension_source[end] == "}")
-            matcher = folder / "Extensions.cs"
-            matcher.write_text("using System; using Peach.Core.Dom; namespace Peach.LLM.Core { public static class Extensions {\n" + extension_source[start:end + 1] + "\n} }")
+            folder = Path(self._temporary.name) / f"predicate_{len(self._compiled)}"
+            folder.mkdir()
+            source = folder / "Program.cs"
+            executable = folder / "out" / "Predicate.dll"
             source.write_text("""using System;
 using Peach.Core.Dom;
 using Peach.LLM.Core;
@@ -73,10 +62,22 @@ class Program {
     }
 }
 """)
-            compiled = subprocess.run(["mcs", "-r:" + str(sdk / "Peach.Core.dll"), str(matcher), str(source), "-out:" + str(executable)], capture_output=True, text=True)
+            references = "\n".join(
+                f'<Reference Include="{escape(path.stem)}"><HintPath>{escape(str(path))}</HintPath></Reference>'
+                for path in sorted(sdk.glob("*.dll")) if path.name in {
+                    "Peach.Core.dll", "Peach.Pro.dll", "Peach.LLM.dll", "NLog.dll",
+                    "Newtonsoft.Json.dll", "BouncyCastle.Crypto.dll",
+                }
+            )
+            project = folder / "Predicate.csproj"
+            project.write_text(f'''<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+<LangVersion>12.0</LangVersion><AssemblyName>Predicate</AssemblyName></PropertyGroup>
+<ItemGroup>{references}</ItemGroup></Project>''')
+            compiled = subprocess.run(["dotnet", "build", str(project), "--output", str(executable.parent), "--nologo"], capture_output=True, text=True)
             self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
             self._compiled[expression] = executable
-        result = subprocess.run(["mono", str(self._compiled[expression]), *([] if full_name is None else [full_name])], capture_output=True, text=True, env={**os.environ, "MONO_PATH": str(sdk)})
+        result = subprocess.run(["dotnet", str(self._compiled[expression]), *([] if full_name is None else [full_name])], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout.strip() == "True"
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -82,12 +81,9 @@ ROOT = PacketArray
         }
         (self.dsl / "schema_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         self.sdk_patch = patch("core.mutator_codegen.peach_sdk_dir", return_value=self.sdk)
-        self.env_patch = patch.dict(os.environ, {"PEACH_SDK": "modern"})
         self.sdk_patch.start()
-        self.env_patch.start()
         self.addCleanup(self.temporary.cleanup)
         self.addCleanup(self.sdk_patch.stop)
-        self.addCleanup(self.env_patch.stop)
 
     def plan(self) -> MutatorPlan:
         return build_mutator_plan("demo", dsl_dir=self.dsl, output_dir=self.output)
@@ -179,7 +175,7 @@ ROOT = PacketArray
             self.assertFalse(packet_outputs_exist(plan, packet))
             source.write_bytes(original)
 
-    def test_dsl_sdk_language_and_custom_reference_changes_allow_reuse(self) -> None:
+    def test_dsl_sdk_and_custom_reference_changes_allow_reuse(self) -> None:
         plan = self.plan()
         packet = plan.packets[0]
         self.fake_build(plan, packet)
@@ -193,11 +189,7 @@ ROOT = PacketArray
         changed = self.plan()
         self.assertTrue(packet_outputs_exist(changed, changed.packets[0]))
         (self.sdk / "Peach.LLM.dll").write_bytes(b"SDK-v1")
-        with patch.dict(os.environ, {"PEACH_SDK": "legacy"}):
-            changed = self.plan()
-            self.assertTrue(packet_outputs_exist(changed, changed.packets[0]))
-            self.assertEqual(len(manifest_sources(self.output)), 2)
-            self.assertEqual(load_mutator_plan(self.output).sdk, "legacy")
+        self.assertEqual(len(manifest_sources(self.output)), 2)
         custom_dir = self.output.parent / "DataElements" / "out"
         custom_dir.mkdir(parents=True)
         (custom_dir / "DEMODataElements.dll").write_bytes(b"custom-runtime")
@@ -298,11 +290,10 @@ ROOT = PacketArray
         with self.assertRaisesRegex(ValueError, "absent"):
             set_active_packets(plan, ["missing"])
 
-    def test_source_listing_does_not_read_dsl_or_check_selected_sdk(self) -> None:
+    def test_source_listing_does_not_read_dsl(self) -> None:
         plan = self.plan()
         prepare_packet(plan, plan.packets[0])
-        with patch.dict(os.environ, {"PEACH_SDK": "legacy"}):
-            self.assertEqual(len(manifest_sources(self.output)), 2)
+        self.assertEqual(len(manifest_sources(self.output)), 2)
         (self.dsl / "schema_manifest.json").unlink()
         (self.dsl / "root.py").unlink()
         self.assertEqual(len(manifest_sources(self.output)), 2)
@@ -380,11 +371,10 @@ ROOT = PacketArray
         user_source = self.output / "Unrelated.cs"
         user_source.write_text("invalid C#", encoding="utf-8")
 
-        def build(sources: list[Path], output: Path, *, additional_references: list[Path], excluded_reference_names: list[str], sdk: str) -> subprocess.CompletedProcess[str]:
+        def build(sources: list[Path], output: Path, *, additional_references: list[Path], excluded_reference_names: list[str]) -> subprocess.CompletedProcess[str]:
             self.assertEqual(sources, [packet.generated_file, packet.semantic_file])
             self.assertEqual(additional_references, [])
             self.assertEqual(excluded_reference_names, [])
-            self.assertEqual(sdk, "modern")
             output.parent.mkdir(exist_ok=True)
             output.write_bytes(b"actual-output")
             return subprocess.CompletedProcess(["compiler"], 0, "built", "")

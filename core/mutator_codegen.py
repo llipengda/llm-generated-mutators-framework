@@ -25,7 +25,7 @@ from peach_dsl import ExprResult, MutationNode, NodeType, get_mutation_nodes, su
 from peach_dsl.compiler import load_dsl_root
 
 from core.datamodel_dsl import normalize_identifier, normalize_symbol, packet_choice_name
-from core.peach_sdk import MUTATOR_SDK_REFERENCE_NAMES, PeachSdk, compile_csharp, peach_sdk_dir, peach_sdk_from_environment
+from core.peach_sdk import MUTATOR_SDK_REFERENCE_NAMES, compile_csharp, peach_sdk_dir
 
 
 MANIFEST_NAME = "mutator_manifest.json"
@@ -75,7 +75,6 @@ class MutatorPlan:
     dsl_dir: Path
     output_dir: Path
     packets: tuple[PacketMutatorPlan, ...]
-    sdk: PeachSdk
 
 
 class _ClassRecord(TypedDict):
@@ -104,7 +103,6 @@ class _PacketRecord(TypedDict):
 class _Manifest(TypedDict):
     version: int
     protocol: str
-    sdk: PeachSdk
     dsl_dir: str
     active_packets: list[str]
     packets: dict[str, _PacketRecord]
@@ -144,9 +142,9 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _excluded_sdk_references(sdk: PeachSdk) -> list[str]:
+def _excluded_sdk_references() -> list[str]:
     """Keep copied fixer/test/plugin artifacts out of mutator compilation."""
-    return sorted(path.name for path in peach_sdk_dir(sdk).glob("*.dll") if path.name not in MUTATOR_SDK_REFERENCE_NAMES)
+    return sorted(path.name for path in peach_sdk_dir().glob("*.dll") if path.name not in MUTATOR_SDK_REFERENCE_NAMES)
 
 
 def _packet_choices(dsl_dir: Path, protocol: str) -> list[tuple[str, str, str | None]]:
@@ -257,8 +255,7 @@ def build_mutator_plan(
                     node.condition, node.source_path,
                 ))
         plans.append(PacketMutatorPlan(packet, destination / (stem + ".g.cs"), destination / (stem + ".semantic.cs"), destination / "out" / (stem + ".dll"), tuple(specs)))
-    sdk = peach_sdk_from_environment()
-    return MutatorPlan(protocol, directory, destination, tuple(plans), sdk)
+    return MutatorPlan(protocol, directory, destination, tuple(plans))
 
 
 def _csharp_string(value: str) -> str:
@@ -358,9 +355,6 @@ def _read_manifest(directory: Path) -> _Manifest | None:
     protocol = _string(manifest.get("protocol"), "protocol")
     if normalize_identifier(protocol) != protocol:
         raise ValueError("invalid manifest protocol")
-    sdk = manifest.get("sdk")
-    if sdk not in ("legacy", "modern"):
-        raise ValueError("invalid mutator manifest SDK")
     dsl_dir = _string(manifest.get("dsl_dir"), "dsl_dir")
     packets: dict[str, _PacketRecord] = {}
     for packet, raw_entry in _object(manifest.get("packets"), "packets").items():
@@ -404,16 +398,15 @@ def _read_manifest(directory: Path) -> _Manifest | None:
     active = [_string(packet, "active packet") for packet in _array(manifest.get("active_packets", list(packets)), "active_packets")]
     if len(active) != len(set(active)):
         raise ValueError("mutator manifest contains duplicate active packets")
-    return {"version": MANIFEST_VERSION, "protocol": protocol, "sdk": sdk, "dsl_dir": dsl_dir, "active_packets": active, "packets": packets}
+    return {"version": MANIFEST_VERSION, "protocol": protocol, "dsl_dir": dsl_dir, "active_packets": active, "packets": packets}
 
 
 def _manifest_for(plan: MutatorPlan) -> _Manifest:
     manifest = _read_manifest(plan.output_dir)
     if manifest is None:
-        return {"version": MANIFEST_VERSION, "protocol": plan.protocol, "sdk": plan.sdk, "dsl_dir": str(plan.dsl_dir), "active_packets": [], "packets": {}}
+        return {"version": MANIFEST_VERSION, "protocol": plan.protocol, "dsl_dir": str(plan.dsl_dir), "active_packets": [], "packets": {}}
     if manifest["protocol"] != plan.protocol or Path(manifest["dsl_dir"]).resolve() != plan.dsl_dir:
         raise ValueError("mutator manifest belongs to another protocol or DSL directory")
-    manifest["sdk"] = plan.sdk
     return manifest
 
 
@@ -505,7 +498,7 @@ def compile_packet(plan: MutatorPlan, packet: PacketMutatorPlan) -> subprocess.C
     packet.output_dll.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".build-", dir=packet.output_dll.parent) as build_dir:
         temporary_dll = Path(build_dir) / packet.output_dll.name
-        result = compile_csharp([packet.generated_file, packet.semantic_file], temporary_dll, additional_references=references, excluded_reference_names=_excluded_sdk_references(plan.sdk), sdk=plan.sdk)
+        result = compile_csharp([packet.generated_file, packet.semantic_file], temporary_dll, additional_references=references, excluded_reference_names=_excluded_sdk_references())
         if result.returncode == 0:
             if not temporary_dll.is_file():
                 return subprocess.CompletedProcess(result.args, 1, result.stdout, result.stderr + "\nCompiler did not produce a mutator DLL.")
@@ -587,7 +580,7 @@ def load_mutator_plan(output_dir: Path) -> MutatorPlan:
                 _managed_path(directory, entry["semantic_file"], ".semantic.cs"),
                 _managed_path(directory, entry["output_dll"], ".dll"), tuple(specs),
             ))
-        return MutatorPlan(manifest["protocol"], Path(manifest["dsl_dir"]).resolve(), directory, tuple(packets), peach_sdk_from_environment())
+        return MutatorPlan(manifest["protocol"], Path(manifest["dsl_dir"]).resolve(), directory, tuple(packets))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -605,8 +598,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         output = args.output or directory / "out" / (normalize_identifier(args.protocol) + "_mutators.dll")
         references = sorted((directory.parent / "DataElements" / "out").glob("*DataElements.dll"))
-        sdk = peach_sdk_from_environment()
-        result = compile_csharp(sources, output, additional_references=references, excluded_reference_names=_excluded_sdk_references(sdk), sdk=sdk)
+        result = compile_csharp(sources, output, additional_references=references, excluded_reference_names=_excluded_sdk_references())
         print(result.stdout, end="")
         print(result.stderr, end="")
         return result.returncode

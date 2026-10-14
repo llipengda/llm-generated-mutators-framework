@@ -4,13 +4,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from core.peach_sdk import compile_csharp, peach_sdk_dir, peach_sdk_from_environment
+from core.peach_sdk import compile_csharp, peach_sdk_dir
 
-_peach_sdk = peach_sdk_from_environment()
-if _peach_sdk == "modern":
-    # Modern Peach targets .NET 8. Python.NET otherwise defaults to Mono on
-    # Unix, which cannot reflect over those assemblies.
-    os.environ["PYTHONNET_RUNTIME"] = "coreclr"
+# Load the .NET runtime before importing the CLR reflection surface.
+os.environ["PYTHONNET_RUNTIME"] = "coreclr"
 
 # pythonnet exposes the CLR reflection surface dynamically and does not ship
 # Pyright stubs. Keep that untyped boundary here rather than leaking Unknown
@@ -38,16 +35,12 @@ class MultiAssemblyInspector:
             path_string = str(path)
             if os.path.isdir(path_string):
                 for file in os.listdir(path_string):
-                    if file.endswith(".dll") and (
-                        _peach_sdk == "legacy"
-                        or file
-                        in {
-                            "Peach.Core.dll",
-                            "Peach.LLM.dll",
-                            "Peach.Pro.dll",
-                            "Peach.LLM.Validations.Common.dll",
-                        }
-                    ):
+                    if file in {
+                        "Peach.Core.dll",
+                        "Peach.LLM.dll",
+                        "Peach.Pro.dll",
+                        "Peach.LLM.Validations.Common.dll",
+                    }:
                         self._load_assembly(os.path.join(path_string, file))
             elif os.path.isfile(path_string) and path_string.endswith(".dll"):
                 self._load_assembly(path_string)
@@ -59,10 +52,7 @@ class MultiAssemblyInspector:
             if dll_dir not in sys.path:
                 sys.path.append(dll_dir)
 
-            if _peach_sdk == "modern":
-                assembly = clr.AddReference(Path(full_path).stem)  # type: ignore
-            else:
-                assembly = clr.AddReference(full_path)  # type: ignore
+            assembly = clr.AddReference(Path(full_path).stem)  # type: ignore
             self.loaded_assemblies.append(assembly)
 
             exported_types = assembly.GetExportedTypes()

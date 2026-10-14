@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || { [ "$#" -eq 2 ] && [ "$2" != "--modern-sdk" ]; }; then
-  echo "Usage: $0 <PROTO> [--modern-sdk]" >&2
+if [ "$#" -ne 1 ] || [[ "$1" == *[!a-zA-Z0-9_-]* ]]; then
+  echo "Usage: $0 <protocol>" >&2
   exit 2
 fi
-
-PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-PROTO_UPPER=$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')
+PROTO="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+PROTO_UPPER="$(printf '%s' "$PROTO" | tr '[:lower:]' '[:upper:]')"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT"
 GENERATED="$ROOT/llm/peach/$PROTO"
-SDK_VARIANT="${PEACH_SDK:-legacy}"
-if [ "${2:-}" = "--modern-sdk" ]; then
-  SDK_VARIANT="modern"
-fi
-
-if [ ! -d "$GENERATED" ]; then
-  echo "Error: generated protocol directory '$GENERATED' does not exist." >&2
+SDK_DIR="${PEACH_SDK_DIR:-$ROOT/peach/sdk}"
+if [ ! -f "$GENERATED/datamodel.xml" ]; then
+  echo "Error: generated DataModel '$GENERATED/datamodel.xml' does not exist." >&2
   exit 1
 fi
+if [ ! -f "$SDK_DIR/Peach.runtimeconfig.json" ]; then
+  echo "Error: local Peach runtime is missing; run ./setup.sh first." >&2
+  exit 1
+fi
+SDK_DIR="$(cd "$SDK_DIR" && pwd)"
+export PEACH_SDK_DIR="$SDK_DIR"
+
+cd "$ROOT"
+uv run --project "$ROOT" python -m core.mutator_codegen compile "$PROTO" \
+  --output "$GENERATED/Mutators/out/${PROTO_UPPER}Mutators.dll"
 
 write_pit() {
   local strategy=$1
@@ -30,7 +34,7 @@ write_pit() {
   <Include ns="dm" src="file:datamodel.xml" />
   <StateModel name="TheState" initialState="Initial">
     <State name="Initial"><Action type="output">
-      <DataModel ref="dm:${PROTO}_packet_array"/><Data fileName="/seed/*.raw" />
+      <DataModel ref="dm:${PROTO}_packet_array"/><Data fileName="##SEED_DIR##/*.raw" />
     </Action></State>
   </StateModel>
   <Test name="Default">
@@ -40,57 +44,80 @@ write_pit() {
       <Param name="Timeout" value="200"/>
     </Publisher>
     $strategy
-    <Logger class="File"><Param name="Path" value="/logs"/></Logger>
+    <Logger class="File"><Param name="Path" value="##LOG_DIR##"/></Logger>
   </Test>
 </Peach>
 EOF
 }
 
-write_pit '<Strategy class="TwoPhaseRandom"><Param name="TwoPhaseMutation" value="True"/><Param name="MultipleMutationsPerElement" value="3"/></Strategy>' "$GENERATED/pit.llm.xml"
-write_pit '<Strategy class="Random"/>' "$GENERATED/pit.peach.xml"
-
-if [ "$SDK_VARIANT" = "modern" ] || [ "$SDK_VARIANT" = "modern-sdk" ]; then
-  BASE_IMAGE="pdli/llm-peach:modern-sdk"
-  WORKDIR="/opt/peach"
-  RUNNER="dotnet Peach.dll"
-  PLATFORM="--platform=linux/amd64"
-  SDK_DIR="$ROOT/peach/modern-sdk"
-  export PEACH_SDK=modern
-elif [ "$SDK_VARIANT" = "legacy" ] || [ "$SDK_VARIANT" = "sdk" ]; then
-  BASE_IMAGE="pdli/llm-peach:sdk"
-  WORKDIR="/peach/output/linux_x86_64_release/bin"
-  RUNNER="./peach"
-  PLATFORM=""
-  SDK_DIR="$ROOT/peach/sdk"
-  export PEACH_SDK=legacy
-else
-  echo "Error: PEACH_SDK must be 'legacy' or 'modern'." >&2
-  exit 2
-fi
-
-# Build only current manifest sources and use the same SDK at runtime.
-uv run --project "$ROOT" python -m core.mutator_codegen compile "$PROTO" \
-  --output "$GENERATED/Mutators/out/${PROTO_UPPER}Mutators.dll"
-mkdir -p "$GENERATED/runtime_sdk"
-for assembly in Peach.Core.dll Peach.Pro.dll Peach.LLM.dll; do
-  cp "$SDK_DIR/$assembly" "$GENERATED/runtime_sdk/$assembly"
-done
-
+mkdir -p "$GENERATED/native"
 for flavor in llm peach; do
-  dockerfile="$GENERATED/Dockerfile.$flavor"
-  plugin_copy=""
-  if [ "$flavor" = "llm" ]; then
-    plugin_copy="COPY Mutators/out/${PROTO_UPPER}Mutators.dll ${WORKDIR}/Plugins/"
+  STAGING="$(mktemp -d "$GENERATED/native/.$flavor.XXXXXX")"
+  cp -R "$SDK_DIR/." "$STAGING/"
+  cp "$GENERATED/datamodel.xml" "$STAGING/"
+  if [ -f "$GENERATED/python_fixup.py" ]; then
+    cp "$GENERATED/python_fixup.py" "$STAGING/"
   fi
-  cat > "$dockerfile" <<EOF
-FROM $PLATFORM $BASE_IMAGE
-WORKDIR $WORKDIR
-ENV HOST= PORT= PEACH_ARGS=
-COPY datamodel.xml pit.$flavor.xml ./
-COPY runtime_sdk/Peach.Core.dll runtime_sdk/Peach.Pro.dll runtime_sdk/Peach.LLM.dll ./
-$plugin_copy
-ENTRYPOINT []
-CMD ["bash", "-c", "sed -i 's/##HOST##/'\"\${HOST}\"'/g; s/##PORT##/'\"\${PORT}\"'/g' pit.$flavor.xml && $RUNNER pit.$flavor.xml \${PEACH_ARGS}"]
+  for directory in "$STAGING" "$STAGING/Plugins"; do
+    for assembly in "$directory/"*.dll; do
+      case "${assembly##*/}" in
+        *Mutators.dll|*Fixers.dll|*FixerTests.dll|*DataElements.dll)
+          [ ! -f "$assembly" ] || rm "$assembly"
+          ;;
+      esac
+    done
+  done
+  # Start with the SDK's two shared extensions; generated protocol plugins
+  # belong only to this bundle and never enter the shared SDK installation.
+  PLUGINS="$STAGING/ProtocolPlugins"
+  mkdir -p "$PLUGINS"
+  cp "$SDK_DIR/Peach.LLM.dll" "$SDK_DIR/Peach.LLM.Validations.Common.dll" "$PLUGINS/"
+  for directory in DataElements Fixers; do
+    assembly="$GENERATED/$directory/out/${PROTO_UPPER}${directory}.dll"
+    [ ! -f "$assembly" ] || cp "$assembly" "$PLUGINS/"
+  done
+  if [ "$flavor" = llm ]; then
+    cp "$GENERATED/Mutators/out/${PROTO_UPPER}Mutators.dll" "$PLUGINS/"
+    strategy='<Strategy class="TwoPhaseRandom"><Param name="TwoPhaseMutation" value="True"/><Param name="MultipleMutationsPerElement" value="3"/></Strategy>'
+  else
+    strategy='<Strategy class="Random"/>'
+  fi
+  write_pit "$strategy" "$STAGING/pit.xml"
+  cp "$STAGING/pit.xml" "$GENERATED/pit.$flavor.xml"
+  mkdir -p "$STAGING/seeds"
+  if [ -d "$ROOT/seeds/$PROTO" ]; then
+    cp -R "$ROOT/seeds/$PROTO/." "$STAGING/seeds/"
+  fi
+  cat > "$STAGING/run.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+BUNDLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST="${HOST:-127.0.0.1}"
+: "${PORT:?Set PORT to the target TCP port}"
+SEED_DIR="${SEED_DIR:-$BUNDLE/seeds}"
+LOG_DIR="${LOG_DIR:-$BUNDLE/Logs}"
+if [ ! -d "$SEED_DIR" ]; then
+  echo "Error: seed directory '$SEED_DIR' does not exist." >&2
+  exit 1
+fi
+SEED_DIR="$(cd "$SEED_DIR" && pwd)"
+mkdir -p "$LOG_DIR"
+LOG_DIR="$(cd "$LOG_DIR" && pwd)"
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+cd "$BUNDLE"
+exec dotnet "$BUNDLE/Peach.dll" --noweb --plugins="$BUNDLE/ProtocolPlugins" \
+  -D "HOST=$(xml_escape "$HOST")" -D "PORT=$(xml_escape "$PORT")" \
+  -D "SEED_DIR=$(xml_escape "$SEED_DIR")" -D "LOG_DIR=$(xml_escape "$LOG_DIR")" \
+  "$@" "$BUNDLE/pit.xml"
 EOF
-  docker build -t "pdli/llm-peach:${PROTO}-${flavor}" -f "$dockerfile" "$GENERATED"
+  chmod +x "$STAGING/run.sh"
+  DESTINATION="$GENERATED/native/$flavor"
+  if [ -e "$DESTINATION" ]; then
+    mv "$DESTINATION" "$DESTINATION.backup.$(date +%Y%m%d%H%M%S).$$"
+  fi
+  mv "$STAGING" "$DESTINATION"
+  echo "Created native $flavor bundle: $DESTINATION"
 done
+echo "Run with: HOST=127.0.0.1 PORT=<target-port> $GENERATED/native/llm/run.sh [Peach options]"

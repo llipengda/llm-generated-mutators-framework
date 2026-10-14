@@ -16,14 +16,13 @@ Do not invoke the system Python or pip directly.
 # Install the locked Python version and dependencies
 uv sync
 
-# Setup Peach SDK (requires Docker + mono)
+# Publish the local llm-peach checkout for .NET 8
 ./setup.sh
-# Or select the .NET 8 backend from llm-peach's modern-sdk branch
-./setup.sh --modern-sdk
+# Or use another source checkout
+./setup.sh --source /path/to/llm-peach
 
 # Run full pipeline (interactive, auto-continues after 60s)
 uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
-uv run python main.py --modern-sdk --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 
 # Multiple RFCs can be specified by repeating --rfc-path
 uv run python main.py --protocol someip --seed-dir seeds/someip \
@@ -35,8 +34,9 @@ uv run python -m core.datamodel_dsl mqtt --check
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
 ./tests/peach_fixer/run_peach_fixer_test.sh mqtt seeds/mqtt
 
-# Generate Peach Docker images for fuzzing
-./peach_gen.sh mqtt [--modern-sdk]
+# Generate native Peach fuzzing bundles
+./peach_gen.sh mqtt
+HOST=127.0.0.1 PORT=1883 ./llm/peach/mqtt/native/llm/run.sh
 ```
 
 No linter or type-checker is configured. A `.env` file with `OPENAI_API_KEY` is required.
@@ -56,12 +56,13 @@ core/                    # Runtime core: agent, config, state, RAG, tools, UI, l
 peach_dsl/               # Typed declarative DataModel DSL, Pyright validation, compiler, and error mapping.
 core/datamodel_dsl.py    # DSL manifest validation, deterministic root generation, and local compilation CLI.
 core/mutator_codegen.py  # DSL mutator plan, generated partial classes, manifest and scoped compilation.
+core/peach_runtime.py    # Local dotnet validator execution, protocol plugin isolation and logs.
 docs/peach-dsl.md        # Authoritative DSL language reference for agents and developers.
 pipeline/base.py         # BasePipeline: step orchestration loop, call_agent(), token tracking, state save.
 pipeline/peach.py        # Lightweight PeachPipeline composition root and step ordering.
 pipeline/peach_steps/    # Peach implementations split by discovery, DataModel, mutator, fixer, and compilation steps.
-peach_gen.sh             # Compiles Peach mutators/fixers, generates Pit XML configs and Docker images.
-setup.sh                 # Prerequisite setup: for peach, pulls Docker SDK image and extracts DLLs into peach/sdk/.
+peach_gen.sh             # Compiles manifest mutators and generates native runtime/Pit bundles.
+setup.sh                 # Publishes the sibling llm-peach checkout for .NET 8 into peach/sdk/.
 ```
 
 ### Peach pipeline steps (C# target)
@@ -92,10 +93,10 @@ and `mutator_manifest.json` define exact interfaces and active sources; see
 
 - **Global config**: `config.py` uses module-level mutable state. `build_config_from_args()` must be called before any getter.
 - **Pipeline state**: Persisted to `logs/<proto>/pipeline_state.json` (gitignored) alongside tool lifecycle logs. Contains `packet_types`, `constraints`, and `token_usage_*`. Atomic writes via temp file + `os.replace()`. Older `.pipeline_state/<proto>.json` files are migrated automatically. On startup, if a saved state exists for the protocol, the user is asked whether to resume or start fresh.
-- **Agent tools**: Agents get scoped file/DSL tools, DLL reflection, C# compilation (`mcs`), data validation, and RFC search as required by each step.
+- **Agent tools**: Agents get scoped file/DSL tools, CoreCLR DLL reflection, C# 12 compilation (`dotnet`), data validation, and RFC search as required by each step.
 - **DSL source of truth**: DataModel agents must read `docs/peach-dsl.md`, write only generated DSL modules, and validate them with `Validate_Peach_DSL_Module` / `Validate_Peach_DSL`. Peach runtime scripts continue to consume the compiled `datamodel.xml`.
 - **DataModel report conversion**: `tests/datamodel/run_datamodel_test.sh` converts Peach validator report nodes to compact DSL-path text in `datamodel_error_report.txt` immediately after validation. When every `@PacketUnion` candidate is rejected solely by its `packet_type` token, the converter keeps only the candidate that parsed furthest (first on ties); ordinary Unions are not filtered this way. The converter otherwise does not analyze, rank, deduplicate, or filter failures; the diagnosis agent performs root-cause analysis and writes `datamodel_diagnosis.json`. Repair agents read only the final diagnosis and referenced DSL modules.
-- **Peach SDK**: DLLs extracted into `peach/sdk/` by `setup.sh`. The `dotnet_tools.py` module loads them at import time via `clr.AddReference` — if `peach/sdk/` is missing, the import fails.
+- **Peach SDK**: `setup.sh` publishes the full .NET 8 runtime into `peach/sdk/`, including validators, dependencies and runtime configurations. `PEACH_SDK_DIR` can override this location. `dotnet_tools.py` uses CoreCLR and loads the SDK at import time; setup must run first. The `codex/legacy-support` branch preserves the prior backend.
 - **Token tracking**: Each `call_agent()` creates a local `TokenUsageTracker` (per-invocation, thread-safe). Tracks `prompt_tokens`, `completion_tokens`, `cached_tokens`, and `calls` (LLM API invocations). Summarized at pipeline end.
 - **Model configuration**: Set via environment variables. `LLM_PEACH_MODEL` / `LLM_PEACH_TEMPERATURE` override `LLM_MODEL` / `LLM_TEMPERATURE`. Defaults: `gpt-5.4` / 0.7.
 - **`fix_verify_loop`**: Generic verify → fix → re-verify loop in `BasePipeline`. Up to 3 auto-retries, then interactive fallback (stop / provide hint and retry). Used by Peach Steps 3 and 5.
@@ -120,13 +121,11 @@ The `../llm-peach/` directory is the Peach Fuzzer engine + LLM SDK. The framewor
 | Method | Purpose |
 |--------|---------|
 | `elem.Bytes()` | Convert element value to `byte[]` (handles Number big-endian, String ASCII, BitStream) |
-| `elem.IsIn("name")` | Walk parent chain to check if element is inside a named container |
 | `elem.MatchesPath("Root.items[].value")` | Match the complete rooted DSL path, including array item indices |
-| `elem.SetValue(v)` | Set `MutatedValue`, auto-converts strings to ASCII for non-string types |
-| `num.GetUint8() / GetUint16()` | Read numeric element as uint8/uint16 (with fallback to raw bytes) |
-| `varInt.GetVarInt()` | Decode MQTT variable-byte integer |
-| `str.ToMqttString()` | Encode string as MQTT UTF-8 (2-byte length + data) |
-| `bytes.Dump()` / `bytes.DumpDiff()` | Hexdump / hexdiff output |
+| `elem.Get<T>()` | Typed access with element-kind validation and numeric/string/byte-stream conversion |
+
+Set mutations through `elem.MutatedValue = new Variant(value)` using a numeric
+variant for Number values or a byte-backed variant for raw encoded bytes.
 
 **Custom DataElements** (declared with DSL `ExtendedType`, compiled into `datamodel.xml`):
 
@@ -145,7 +144,11 @@ The `../llm-peach/` directory is the Peach Fuzzer engine + LLM SDK. The framewor
 
 ### Validators — how verification works
 
-Each validator is a C# console app in `llm/Validations/`. They run inside Docker containers invoked by the framework's shell scripts in `tests/`. All use `[PASS]`/`[FAIL]`/`[ERROR]` markers that the pipeline parses.
+Each validator is a C# console app in `llm/Validations/`. Shell scripts in
+`tests/` invoke `core.peach_runtime`, which runs them locally with `dotnet` in
+isolated temporary runtime directories. Only the current protocol's plugins
+are staged. `PEACH_LOG_DIR` directs cleanup and NLog to persistent per-protocol
+logs. All use `[PASS]`/`[FAIL]`/`[ERROR]` markers that the pipeline parses.
 
 **DataModel Validator** (`Validations/DataModel/Program.cs`):
 1. For each seed file: parse (crack) binary data through the datamodel
@@ -155,7 +158,7 @@ Each validator is a C# console app in `llm/Validations/`. They run inside Docker
 
 ```
 Usage: run_datamodel_test.sh <proto> <seed_dir>
-→ mono Peach.LLM.Validations.DataModel.exe datamodel.xml <proto>_packet_array <seed_dir>
+→ dotnet Peach.LLM.Validations.DataModel.dll datamodel.xml <proto>_packet_array <seed_dir>
 ```
 
 **Mutator Validator** (`Validations/Mutator/Program.cs`):
@@ -169,7 +172,7 @@ Usage: run_datamodel_test.sh <proto> <seed_dir>
 ```
 Usage: run_peach_mutator_test.sh <proto> <seed_dir>
 → core.mutator_codegen compiles only active manifest partial source pairs → DLL
-→ mono Peach.LLM.Validations.Mutator.exe datamodel.xml <seed_dir> <proto>_packet_array
+→ dotnet Peach.LLM.Validations.Mutator.dll datamodel.xml <seed_dir> <proto>_packet_array
 ```
 
 **Fixer Validator** (`Validations/Fixer/Program.cs`):
@@ -180,11 +183,11 @@ Usage: run_peach_mutator_test.sh <proto> <seed_dir>
 
 ```
 Usage: run_peach_fixer_test.sh <proto>
-→ mcs compiles Fixers/*.cs + Fixers/Validations/*.cs → DLL
-→ mono Peach.LLM.Validations.Fixer.exe
+→ dotnet compiles Fixers/*.cs + Fixers/Validations/*.cs → DLL
+→ dotnet Peach.LLM.Validations.Fixer.dll
 
 Usage: run_data_test.sh <proto> <hex>
-→ mono Peach.LLM.Validations.Fixer.exe -d datamodel.xml <proto>_packet_array <hex>
+→ dotnet Peach.LLM.Validations.Fixer.dll -d datamodel.xml <proto>_packet_array <hex>
 ```
 
 **Result format** (parsed by pipeline):

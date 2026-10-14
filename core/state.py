@@ -15,7 +15,6 @@ class PipelineState(TypedDict):
     completed_checkpoints: NotRequired[list[str]]
     datamodel_format: NotRequired[str]
     peach_step_layout: NotRequired[str]
-    peach_sdk: NotRequired[str]
 
 
 def new_usage_bucket() -> dict[str, int]:

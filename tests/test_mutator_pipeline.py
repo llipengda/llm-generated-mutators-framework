@@ -66,7 +66,7 @@ class MutatorPipelineTests(unittest.TestCase):
         self.packet = self.make_packet("request", ("DemoMutateValue", "DemoMutateOther"))
         self.plan = cast(MutatorPlan, SimpleNamespace(
             protocol="demo", output_dir=self.output, dsl_dir=self.dsl,
-            packets=(self.packet,), sdk="modern",
+            packets=(self.packet,),
         ))
         self.pipeline = _Harness(self.plan)
 
@@ -250,9 +250,9 @@ class MutatorPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "stopped before"):
                 self.pipeline.step_5_mutator_validation_and_fix()
 
-    def test_compiler_or_docker_failure_cannot_pass_without_error_logs(self) -> None:
+    def test_compiler_or_runtime_failure_cannot_pass_without_error_logs(self) -> None:
         with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 1, "Docker failed", "")):
+            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 1, ".NET runtime failed", "")):
             with self.assertRaisesRegex(RuntimeError, "validator command failed"):
                 self.pipeline.step_5_mutator_validation_and_fix()
         self.assertFalse(self.pipeline.prompts)
@@ -370,7 +370,7 @@ class MutatorPipelineTests(unittest.TestCase):
         run.assert_not_called()
         results_dir = self.root / "mutator_test_logs"
         results_dir.mkdir()
-        (results_dir / "results.txt").write_text("Docker failed", encoding="utf-8")
+        (results_dir / "results.txt").write_text(".NET runtime failed", encoding="utf-8")
         with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "did not complete"):
                 self.pipeline.step_5_mutator_validation_and_fix()

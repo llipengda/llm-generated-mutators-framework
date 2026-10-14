@@ -1,4 +1,4 @@
-"""Peach SDK selection and generated C# compilation helpers."""
+"""Local .NET 8 Peach SDK and generated C# compilation helpers."""
 
 from __future__ import annotations
 
@@ -8,16 +8,11 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Literal, Sequence, cast
+from collections.abc import Sequence
 from xml.sax.saxutils import escape
 
 
-PeachSdk = Literal["legacy", "modern"]
-
-_CSHARP_LANGUAGE_VERSIONS: dict[PeachSdk, str] = {
-    "legacy": "7.2",  # Supported by Mono mcs; target API remains .NET Framework 4.5.
-    "modern": "12.0",  # Matches the generated project's net8.0 target.
-}
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # Step 8 copies generated fixer DLLs into the SDK. Mutator builds and their
 # capability probe depend only on these stable SDK assemblies.
@@ -28,46 +23,22 @@ MUTATOR_SDK_REFERENCE_NAMES = frozenset({
 })
 
 
-def peach_sdk_from_environment() -> PeachSdk:
-    value = os.environ.get("PEACH_SDK", "legacy").strip().lower()
-    aliases = {
-        "legacy": "legacy",
-        "sdk": "legacy",
-        "modern": "modern",
-        "modern-sdk": "modern",
-    }
-    try:
-        return cast(PeachSdk, aliases[value])
-    except KeyError as error:
-        raise ValueError(
-            "PEACH_SDK must be 'legacy' or 'modern' "
-            f"(received {value!r})."
-        ) from error
+def peach_sdk_dir() -> Path:
+    """Return the installed runtime independently of the caller's directory."""
+    configured = os.environ.get("PEACH_SDK_DIR")
+    return Path(configured).expanduser().resolve() if configured else _PROJECT_ROOT / "peach" / "sdk"
 
 
-def peach_sdk_dir(sdk: PeachSdk | None = None) -> Path:
-    selected = sdk or peach_sdk_from_environment()
-    return Path("peach") / ("modern-sdk" if selected == "modern" else "sdk")
-
-
-def peach_image(sdk: PeachSdk | None = None) -> str:
-    selected = sdk or peach_sdk_from_environment()
-    return f"pdli/llm-peach:{'modern-sdk' if selected == 'modern' else 'sdk'}"
-
-
-def csharp_language_version(sdk: PeachSdk | None = None) -> str:
+def csharp_language_version() -> str:
     """Return the language version used to compile generated protocol code."""
-    return _CSHARP_LANGUAGE_VERSIONS[sdk or peach_sdk_from_environment()]
+    return "12.0"
 
 
-def csharp_language_guidance(sdk: PeachSdk | None = None) -> str:
+def csharp_language_guidance() -> str:
     """Keep agent language and API guidance aligned with the selected compiler."""
-    selected = sdk or peach_sdk_from_environment()
-    compiler = "Mono mcs" if selected == "legacy" else "the .NET SDK compiler"
-    runtime = ".NET Framework 4.5" if selected == "legacy" else ".NET 8"
     return (
-        f"Use C# {csharp_language_version(selected)} features supported by {compiler}. "
-        f"Use only APIs available in {runtime} and the referenced Peach SDK assemblies."
+        f"Use C# {csharp_language_version()} features supported by the .NET SDK compiler. "
+        "Use only APIs available in .NET 8 and the referenced Peach SDK assemblies."
     )
 
 
@@ -82,15 +53,13 @@ def _sdk_references(sdk_dir: Path) -> list[Path]:
         "Peach.LLM.Validations.Common.dll",
         "nunit.framework.dll",
     }
-    references = [path for path in sdk_dir.glob("*.dll") if path.name in preferred_names]
-    # Protocol-specific assemblies are copied here while fixer tests are generated.
-    references.extend(
-        path
-        for path in sdk_dir.glob("*.dll")
-        if path.name not in preferred_names
-        and not path.name.startswith(("System.", "Microsoft."))
+    # Runtime assets such as IronPython's WPF adapter are not compilation
+    # references. Extra libraries can be passed explicitly by the caller.
+    # Step 8 also stages generated fixer APIs for its test-generation compiler.
+    return sorted(
+        path for path in sdk_dir.glob("*.dll")
+        if path.name in preferred_names or path.name.endswith("Fixers.dll")
     )
-    return sorted(set(references))
 
 
 def compile_csharp(
@@ -100,13 +69,11 @@ def compile_csharp(
     additional_references: Sequence[str | Path] = (),
     excluded_reference_names: Sequence[str] = (),
     warnings_as_errors: bool = True,
-    sdk: PeachSdk | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Compile generated Peach sources for the selected SDK."""
-    selected = sdk or peach_sdk_from_environment()
+    """Compile generated Peach sources with the local .NET SDK."""
     source_paths = [Path(source).resolve() for source in sources]
     output_path = Path(output).resolve()
-    sdk_dir = peach_sdk_dir(selected).resolve()
+    sdk_dir = peach_sdk_dir()
     references = _sdk_references(sdk_dir)
     references.extend(Path(reference).resolve() for reference in additional_references)
     excluded_names = set(excluded_reference_names) | {output_path.name}
@@ -127,28 +94,9 @@ def compile_csharp(
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if selected == "legacy":
-        command = [
-            "mcs",
-            "-sdk:4.5",
-            f"-langversion:{csharp_language_version(selected)}",
-            "-target:library",
-            f"-out:{output_path}",
-        ]
-        if warnings_as_errors:
-            command.append("-warnaserror")
-        command.extend(f"-r:{reference}" for reference in references)
-        command.extend(str(path) for path in source_paths)
-        try:
-            return subprocess.run(command, text=True, capture_output=True)
-        except FileNotFoundError:
-            return subprocess.CompletedProcess(
-                command, 127, "", "mcs was not found; install Mono or use --modern-sdk."
-            )
-
     if shutil.which("dotnet") is None:
         return subprocess.CompletedProcess(
-            ["dotnet"], 127, "", "dotnet was not found; the modern SDK requires .NET 8."
+            ["dotnet"], 127, "", "dotnet was not found; install a .NET SDK supporting .NET 8."
         )
 
     compile_items = "\n".join(
@@ -165,7 +113,7 @@ def compile_csharp(
     project_text = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-    <LangVersion>{csharp_language_version(selected)}</LangVersion>
+    <LangVersion>{csharp_language_version()}</LangVersion>
     <AssemblyName>{escape(output_path.stem)}</AssemblyName>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <TreatWarningsAsErrors>{warn}</TreatWarningsAsErrors>
@@ -206,9 +154,8 @@ def compile_csharp(
         return result
 
 
-def ensure_mutator_sdk(sdk: PeachSdk | None = None) -> None:
-    """Reject stale SDKs before spending agent calls on structural mutators."""
-    selected = sdk or peach_sdk_from_environment()
+def ensure_mutator_sdk() -> None:
+    """Check required structural APIs before spending agent calls."""
     with tempfile.TemporaryDirectory(prefix="peach-mutator-sdk-check-") as directory:
         source = Path(directory) / "MutatorSdkProbe.cs"
         source.write_text(
@@ -230,20 +177,20 @@ public static class MutatorSdkProbe
             encoding="utf-8",
         )
         result = compile_csharp(
-            [source], Path(directory) / "MutatorSdkProbe.dll", sdk=selected,
+            [source], Path(directory) / "MutatorSdkProbe.dll",
             excluded_reference_names=[
-                path.name for path in peach_sdk_dir(selected).glob("*.dll")
+                path.name for path in peach_sdk_dir().glob("*.dll")
                 if path.name not in MUTATOR_SDK_REFERENCE_NAMES
             ],
         )
     if result.returncode != 0:
         details = (result.stdout + result.stderr).strip()
         raise RuntimeError(
-            f"The selected {selected} Peach SDK cannot compile structural mutators. "
+            "The installed Peach SDK cannot compile structural mutators. "
             "Update Peach.LLM.dll to include LLMAddMutator, LLMRemoveMutator, "
             "LLMRepeatMutator and MatchesPath, and use matching runtime assemblies. "
-            "The maintained llm-peach SDK builds target .NET 8/.NET 10; "
-            "select --modern-sdk when using those builds.\n" + details
+            "Run ./setup.sh with the updated llm-peach sources to install .NET 8 assemblies.\n"
+            + details
         )
 
 
@@ -255,7 +202,7 @@ def _source_files(paths: list[str], directories: list[str]) -> list[Path]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compile C# for the selected Peach SDK.")
+    parser = argparse.ArgumentParser(description="Compile C# for the local .NET 8 Peach SDK.")
     parser.add_argument("--output", required=True)
     parser.add_argument("--source", action="append", default=[])
     parser.add_argument("--source-dir", action="append", default=[])

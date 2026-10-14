@@ -370,7 +370,7 @@ clone elements with unique names; verify SDK APIs before using them.
                 if result.returncode != 0:
                     raise RuntimeError(
                         f"Mutator validator command failed (exit {result.returncode}). "
-                        f"Check compiler, Docker and SDK diagnostics.\n{output}"
+                        f"Check compiler, local runtime and SDK diagnostics.\n{output}"
                     )
             if "Mutator Test Results:" not in output:
                 raise RuntimeError("Mutator validator did not complete its results report.\n" + output)

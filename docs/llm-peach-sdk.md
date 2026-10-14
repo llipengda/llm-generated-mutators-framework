@@ -79,10 +79,9 @@ Repeat ignores hidden suffix items and rejects overrides that serialize
 virtual byte copies beyond the physical child count. Remove retains the
 wrapper and prototype, and cleans up removed child bindings.
 
-These bases require a rebuilt `Peach.LLM.dll`; existing SDK installations do
-not acquire them merely by updating this framework's source files. Generated
-protocol code uses C# 12 with the modern .NET 8 backend, or C# 7.2 with Mono mcs
-and the legacy .NET Framework 4.5 backend. Generation and repair prompts use
+These bases require a rebuilt `Peach.LLM.dll`; run `./setup.sh` to publish the
+updated llm-peach sources into the local `peach/sdk/` installation. Generated
+protocol code uses C# 12 and targets .NET 8. Generation and repair prompts use
 the same language/API guidance as the compiler. Protocol-semantic Mutate classes
 continue to inherit `LLMMutator` and can split generated matching/entry code
 from LLM-written logic with partial declarations compiled into the same DLL.
@@ -92,21 +91,20 @@ the modern compiler.
 
 ## Other generated-code APIs
 
-Generated fixups inherit `Peach.LLM.Core.LLMFixup` and implement `fixupImpl()`.
+Generated fixups inherit `Peach.LLM.Core.Fixups.LLMFixup` and implement `fixupImpl()`.
 Fixer tests use `DataElementMaker.Make<T>(...)` and methods marked with
 `[FixerTest("name")]` from `Peach.LLM.Validations.Common`.
 
 Useful extension methods in `Peach.LLM.Core` include:
 
 - `elem.Bytes()` returns a `byte[]` representation.
-- `elem.IsIn("name")` checks ancestors.
 - `elem.MatchesPath("Root.items[].value")` matches a complete rooted DSL path, including indexed array items and nested arrays, without regex. Import `Peach.LLM.Core` and use the updated SDK.
-- `elem.SetValue(value)` sets `MutatedValue` with Peach-compatible conversion.
-- `num.GetUint8()` and `num.GetUint16()` read numeric elements.
-- `varInt.GetVarInt()` decodes an MQTT variable-byte integer.
-- `str.ToMqttString()` creates MQTT's length-prefixed UTF-8 representation.
-- `bytes.Dump()` and `bytes.DumpDiff()` format byte diagnostics.
+- `elem.Get<T>()` reads a typed value with element-kind validation and numeric,
+  string or byte-stream conversion, for example `num.Get<ushort>()`.
 
-Use `Search_Class` to inspect the exact API exposed by the selected SDK. Both
-the legacy Mono SDK and the `modern-sdk` .NET 8 backend expose these generated
-code contracts.
+Assign mutations through `elem.MutatedValue = new Variant(value)`. Use byte-backed
+variants for raw encoded bytes and numeric variants for Number values. Protocol
+encoding helpers can be implemented in the semantic source when needed.
+
+Use `Search_Class` to inspect the exact API exposed by the installed .NET SDK.
+Python.NET uses CoreCLR for reflection over these assemblies.

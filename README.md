@@ -6,9 +6,8 @@ LLM-assisted generator that reads an RFC (PDF/text) via RAG, prompts an LLM to p
 
 - Python 3.10+ (the checked-in `.python-version` selects Python 3.13 by default)
 - [uv](https://docs.astral.sh/uv/) — Python version, virtual environment, and dependency management
-- [Docker](https://docs.docker.com/get-docker/) — for Peach SDK setup and fuzzing images
-- [Mono](https://www.mono-project.com/) — required by the default legacy SDK
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) — required only with `--modern-sdk`
+- .NET SDK supporting .NET 8, plus the .NET 8 runtime
+- The `llm-peach` source checkout (defaults to the sibling `../llm-peach/`)
 - `xmllint` (libxml2) — validates DSL-compiled Peach XML against `peach/peach.xsd`
 - Node.js `>=22.13.0` and npm — only required for the bundled Pit visualizer
 
@@ -83,22 +82,23 @@ and `uv lock --upgrade-package <package>` to upgrade one deliberately.
 ./setup.sh
 ```
 
-The default setup requires Docker and Mono. It:
+Setup publishes Peach, PitTool and the three validators from local llm-peach
+sources for .NET 8. The complete runtime, reference assemblies, dependencies,
+plugins and runtime configuration files are installed in `peach/sdk/`. It also
+generates `peach/peach.xsd`, `peach/peach.txt` and the SDK API reference.
+An existing installation is backed up before replacement.
 
-- Pulls `pdli/llm-peach:sdk` (linux/amd64)
-- Extracts essential DLLs into `peach/sdk/` (Peach.Core, NLog, NUnit, etc.)
-- Generates `peach/README.md` — the LLM-Peach SDK API reference used by the LLM during code generation
-- Generates `peach/peach.txt` — the Peach capability reference used during custom DataElement discovery
-
-To use the .NET 8 SDK from the `llm-peach` `modern-sdk` branch instead, run:
+Use another source checkout or an existing installation directory with:
 
 ```bash
-./setup.sh --modern-sdk
+./setup.sh --source /path/to/llm-peach
+# Optional: use the same installation override for setup and pipeline commands.
+export PEACH_SDK_DIR=/path/to/peach-runtime
+./setup.sh
 ```
 
-This pulls `pdli/llm-peach:modern-sdk`, installs its reference assemblies under
-`peach/modern-sdk/`, and generates the matching Peach schema/capability files.
-The two SDK installations are kept separate, so the legacy setup remains usable.
+The `codex/legacy-support` branch preserves the previous backend and scripts.
+The main branch uses local .NET compilation and execution throughout.
 
 ## Quickstart
 
@@ -106,13 +106,9 @@ The two SDK installations are kept separate, so the legacy setup remains usable.
 uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 ```
 
-Add `--modern-sdk` to compile generated C# with .NET 8 and run validators in
-`pdli/llm-peach:modern-sdk`:
-
-```bash
-uv run python main.py --modern-sdk --protocol mqtt --seed-dir seeds/mqtt \
-  --rfc-path rfc/mqtt-v5.0.pdf
-```
+Generated protocol code uses C# 12 and targets .NET 8. Validation runs in a
+temporary local runtime directory containing the selected protocol's plugins;
+logs and replay samples remain in the protocol output directory.
 
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
 - If you do nothing, it auto-continues after ~60 seconds.
@@ -137,8 +133,7 @@ uv run python -m core.datamodel_dsl <protocol>
 
 The command runs strict Pyright syntax/type checking, then reports invalid DSL,
 missing symbols/models, and duplicate DataModel names. Use `--dsl-dir` or
-`--output` to override paths. DSL execution is currently local; it is explicitly
-scheduled to move into a hardened, network-disabled Docker compiler container.
+`--output` to override paths. DSL compilation and validation execute locally.
 
 ## Pipeline steps
 
@@ -161,7 +156,7 @@ llm/peach/<proto>/
 ├── data_type_analysis.json             # Unsupported protocol field encodings
 ├── DataElements/                       # Approved protocol-specific Peach DOM plugins
 │   ├── manifest.json                   # Wire type → Pit element/class mapping
-│   └── out/<PROTO>DataElements.dll     # Plugin loaded by validators and images
+│   └── out/<PROTO>DataElements.dll     # Plugin loaded by validators and native bundles
 ├── datamodel.xml                       # Derived Peach runtime artifact; never edit
 ├── datamodel_error_report.txt          # Compact Peach failures converted to DSL paths
 ├── datamodel_diagnosis.json            # LLM root-cause and repair plan
@@ -198,19 +193,23 @@ Mutator sanity:
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
 ```
 
-Standalone validation scripts select the modern backend through the same
-environment setting used by the CLI:
+Fixer validation and direct packet parsing:
 
 ```bash
-PEACH_SDK=modern ./tests/datamodel/run_datamodel_test.sh mqtt seeds/mqtt
-PEACH_SDK=modern ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
+./tests/peach_fixer/run_peach_fixer_test.sh mqtt
+./tests/peach_fixer/run_data_test.sh mqtt <hex-data>
 ```
 
-Generate the final fuzzing images with the matching backend:
+Generate native fuzzing bundles and run one against the target:
 
 ```bash
-./peach_gen.sh mqtt --modern-sdk
+./peach_gen.sh mqtt
+HOST=127.0.0.1 PORT=1883 ./llm/peach/mqtt/native/llm/run.sh
 ```
+
+The `native/llm/` and `native/peach/` bundles contain a local runtime, protocol
+plugins, DataModel, Pit and seeds. `SEED_DIR` and `LOG_DIR` can override the
+bundle defaults; arguments to `run.sh` are forwarded to Peach.
 
 ## Pit visualizer
 
@@ -284,12 +283,10 @@ node --test tests/test_log_viewer.mjs
 ## Troubleshooting
 
 - **`peach/sdk/` missing**: run `./setup.sh`.
-- **`peach/modern-sdk/` missing**: run `./setup.sh --modern-sdk`.
-- **Docker not found**: install Docker Desktop or Docker Engine.
-- **Mono not found**: `brew install mono` on macOS, or `apt install mono-complete` on Linux.
-- **dotnet not found**: install the .NET 8 SDK before using `--modern-sdk`.
+- **dotnet not found**: install a .NET SDK supporting .NET 8 and the .NET 8 runtime.
+- **Validator runtime configuration missing**: rerun `./setup.sh` to install the complete runtime, including `.deps.json` and `.runtimeconfig.json` files.
 - **RAG setup fails**: the pipeline still runs without RAG, but RFC grounding will be weaker. Ensure the RFC file exists and `faiss-cpu` is installed.
 - **OpenAI / API auth errors**: verify `OPENAI_API_KEY` in `.env`. If using a custom endpoint, check `OPENAI_BASE_URL`.
 - **Embedding API errors**: your chat LLM provider may not support embeddings. Set `LLM_EMBEDDING_BASE_URL` and `LLM_EMBEDDING_API_KEY` to point to a provider that does.
-- **MCS compilation errors**: verify Mono is installed and `mcs` is on `PATH`.
+- **C# compilation errors**: inspect the .NET compiler output and the installed SDK APIs.
 - **Pipeline state corruption**: delete `logs/<protocol>/pipeline_state.json` and restart.

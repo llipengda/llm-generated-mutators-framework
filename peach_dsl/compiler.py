@@ -303,8 +303,8 @@ class _DSLSourceFinder(importlib.abc.MetaPathFinder):
 
 
 def _load_entry(entry: Path) -> ModuleType:
-    # TODO(sandbox): Run DSL import and compilation in a hardened Docker
-    # container. It is intentionally local for now; Pyright is not a sandbox.
+    # DSL import and compilation run locally; Pyright validates types rather
+    # than isolating execution.
     entry = entry.resolve()
     module_name = f"peach_generated_{os.getpid()}_{entry.stat().st_mtime_ns}"
     spec = importlib.util.spec_from_file_location(

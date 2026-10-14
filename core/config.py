@@ -11,7 +11,6 @@ class Config(TypedDict):
     seed_dir: str
     rfc_paths: list[str]
     fixer: bool
-    modern_sdk: bool
 
 
 config: Config | None = None
@@ -22,7 +21,6 @@ def build_config_from_args(
     seed_dir: str,
     rfc_paths: list[str],
     fixer: bool = False,
-    modern_sdk: bool = False,
 ) -> None:
     global config
     config = Config(
@@ -30,9 +28,7 @@ def build_config_from_args(
         seed_dir=seed_dir,
         rfc_paths=rfc_paths,
         fixer=fixer,
-        modern_sdk=modern_sdk,
     )
-    os.environ["PEACH_SDK"] = "modern" if modern_sdk else "legacy"
 
 
 def load_env() -> None:
@@ -61,12 +57,6 @@ def get_fixer_enabled() -> bool:
     if config is None:
         raise ValueError("Config not built yet.")
     return config["fixer"]
-
-
-def get_modern_sdk_enabled() -> bool:
-    if config is None:
-        raise ValueError("Config not built yet.")
-    return config["modern_sdk"]
 
 
 def warn_if_rfc_missing(rfc_paths: list[str]) -> None:

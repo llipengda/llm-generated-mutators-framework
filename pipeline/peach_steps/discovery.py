@@ -8,7 +8,6 @@ from core.peach_sdk import (
     compile_csharp,
     csharp_language_guidance,
     peach_sdk_dir,
-    peach_sdk_from_environment,
 )
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import (
@@ -246,7 +245,6 @@ class ProtocolDiscoverySteps(PeachStepMixin):
     def _finalize_data_type_support(self, report: dict[str, Any]) -> None:
         """Validate a planning audit and prepare any required ExtendedType runtime."""
         report_path, source_dir, dll_path = self._data_type_paths()
-        selected_sdk = peach_sdk_from_environment()
         UI.result_markdown("DSL Basic Data Type Support", self._data_type_summary(report))
         with report_path.open("w", encoding="utf-8") as report_file:
             json.dump(report, report_file, ensure_ascii=False, indent=2, sort_keys=True)
@@ -260,7 +258,6 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             unsupported
             and report.get("generation_status")
             in {"approved_and_compiled", "reused_existing"}
-            and report.get("peach_sdk", "legacy") == selected_sdk
             and dll_path.is_file()
         ):
             self.state["data_type_analysis"] = report
@@ -269,7 +266,6 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             return
         if not unsupported:
             report["generation_status"] = "not_required"
-            report["peach_sdk"] = selected_sdk
             self.state["data_type_analysis"] = report
             self.save_state()
             UI.success("No unsupported protocol field encodings require custom scalars.")
@@ -281,17 +277,13 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         if not ask_generate_custom_data_elements(self.protocol_name, names):
             reusable = self._reusable_custom_elements(source_dir, dll_path, unsupported)
             reuse_error = ""
-            if reusable is not None and (
-                not dll_path.is_file()
-                or report.get("peach_sdk", "legacy") != selected_sdk
-            ):
+            if reusable is not None and not dll_path.is_file():
                 try:
                     self._compile_custom_data_elements(source_dir, dll_path)
                 except RuntimeError as error:
                     reuse_error = str(error)
             if reusable is not None and dll_path.is_file():
                 report["generation_status"] = "reused_existing"
-                report["peach_sdk"] = selected_sdk
                 report["custom_elements"] = reusable
                 report["plugin_dll"] = str(dll_path)
             else:
@@ -450,7 +442,6 @@ class ProtocolDiscoverySteps(PeachStepMixin):
                 )
         self._compile_custom_data_elements(source_dir, dll_path)
         report["generation_status"] = "approved_and_compiled"
-        report["peach_sdk"] = selected_sdk
         report["custom_elements"] = custom_elements
         report["plugin_dll"] = str(dll_path)
         with report_path.open("w", encoding="utf-8") as report_file:
