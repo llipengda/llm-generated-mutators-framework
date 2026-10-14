@@ -30,6 +30,7 @@ from .sdk import (
     SchemaInput,
     SchemaResult,
     UnionResult,
+    _evaluate_schema,
     evaluate_schema,
 )
 
@@ -148,7 +149,10 @@ class EvaluatedReport:
         return self.by_path.get(path, ())
 
     def for_result(self, result: ResultMember) -> tuple[ReportNode, ...]:
-        return () if result.path is None else self.for_path(result.path)
+        for path, member in _result_path_members(self.result):
+            if member is result:
+                return self.for_path(path)
+        return ()
 
     @property
     def failures(self) -> tuple[ReportNode, ...]:
@@ -345,7 +349,7 @@ def format_dsl_error_reports(
 ) -> str:
     """Convert Peach cracking trees into compact DSL-oriented trees."""
 
-    result = evaluate_schema(target)
+    result = _evaluate_schema(target)
     members = _result_members_by_path(result)
     packet_unions = _packet_union_names(result)
     lines = [f"DSL-REPORT v1 logs={len(report_texts)}"]
@@ -756,12 +760,10 @@ def _result_path_members(
     result: EvaluationResult | ResultMember,
     fallback: tuple[str, ...] = (),
 ) -> Iterator[tuple[str, ResultMember]]:
-    # PacketUnion results carry explicit relative paths. Ordinary schemas do
-    # not, so derive their paths from declarations without changing the result.
-    parts = (
-        fallback if result.path is None
-        else tuple(result.path.split(".")) if result.path else ()
-    )
+    # XML-qualified public results retain their original diagnostic paths.
+    # Raw evaluation results still use declaration paths and array-local scopes.
+    diagnostic_path = result._dsl_path if result._xml_paths else result.path
+    parts = fallback if diagnostic_path is None else tuple(diagnostic_path.split(".")) if diagnostic_path else ()
     yield ".".join(parts), result
     if isinstance(result, SchemaResult):
         for name, member in result.fields.items():

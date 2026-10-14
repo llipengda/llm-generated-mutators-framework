@@ -17,6 +17,7 @@ from core.tool_result import (
     DirectoryListData,
     DslModuleValidationData,
     DslValidationData,
+    DotNetBuildData,
     FileReadData,
     FileSearchData,
     FileWriteData,
@@ -532,6 +533,7 @@ def get_tools(
     read_files: tuple[Path | str, ...] | None = None,
     write_files: tuple[Path | str, ...] | None = None,
     write_roots: tuple[Path | str, ...] | None = None,
+    mutator_build: Callable[[], ToolResult[DotNetBuildData]] | None = None,
 ) -> list[BaseTool]:
     """Build Peach tools with protocol-specific path policies."""
     output_root = _peach_output_dir(protocol)
@@ -754,7 +756,7 @@ def get_tools(
                 f"Peach DSL validation failed for {entry_path}: {error}",
             )
 
-    return [
+    selected_tools = [
         scoped_read_file,
         search_files,
         write_file,
@@ -763,5 +765,18 @@ def get_tools(
         validate_peach_dsl,
         validate_peach_xml,
         search_class,
-        build_dotnet_dll,
     ]
+    if mutator_build is None:
+        selected_tools.append(build_dotnet_dll)
+    else:
+        @tool("Build_Mutator_DLL")
+        def build_mutator_dll() -> ToolResult[DotNetBuildData]:
+            """Compile only the current packet's generated and semantic sources.
+
+            Source paths, SDK references and the output DLL are fixed by the
+            host's mutation plan. No paths or compiler options are accepted.
+            """
+            return mutator_build()
+
+        selected_tools.append(build_mutator_dll)
+    return selected_tools

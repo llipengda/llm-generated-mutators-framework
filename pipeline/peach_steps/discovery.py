@@ -4,7 +4,12 @@ from typing import Any, TypeGuard, cast
 
 from core.agent import build_agent_graph
 from core.datamodel_dsl import normalize_symbol
-from core.peach_sdk import compile_csharp, peach_sdk_dir, peach_sdk_from_environment
+from core.peach_sdk import (
+    compile_csharp,
+    csharp_language_guidance,
+    peach_sdk_dir,
+    peach_sdk_from_environment,
+)
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import (
     UI,
@@ -337,7 +342,8 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         its invented wire encoding into a real protocol type. Do not read or rely
         on source files from the sibling llm-peach project.
 
-        Use C# 5.0 and the namespace Peach.LLM.Generated.Dom.{self.protocol_upper}.
+        {csharp_language_guidance()}
+        Use the namespace Peach.LLM.Generated.Dom.{self.protocol_upper}.
         Implement complete, strict, symmetric cracking and serialization for every
         valid encoding in the report, including malformed/truncated input handling,
         bounds, Sanitize, framework clone compatibility, PitParser, WritePit,

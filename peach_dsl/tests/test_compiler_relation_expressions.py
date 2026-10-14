@@ -37,6 +37,28 @@ CASES = (
 
 
 class RelationExpressionTests(unittest.TestCase):
+    def test_dynamic_relation_bounds_prevent_negative_lengths_and_overflow(self) -> None:
+        for kind, units, maximum in (
+            ("size", "bytes", 2**60 - 1),
+            ("size", "bits", 2**63 - 1),
+            ("count", "bytes", 2**31 - 1),
+        ):
+            for arithmetic in (False, True):
+                source = Int64()
+                amount = source - 2 if arithmetic else source
+                target = Blob[amount](length_type=units) if kind == "size" else Array[Int8, amount]()
+                packet = type("BoundedRelation", (Schema,), {"source": source, "target": target})
+                relation = ET.fromstring(to_peach_data_model(packet, include_header=False)).find("Number/Relation")
+                assert relation is not None
+                expression = relation.attrib["expressionGet"]
+                offset = 2 if arithmetic else 0
+                with self.subTest(kind=kind, units=units, arithmetic=arithmetic):
+                    for value in (0, 1, maximum):
+                        self.assertEqual(eval(expression, {kind: value + offset}), value)
+                    for value in (-1, maximum + 1, 2**100):
+                        with self.assertRaisesRegex(ValueError, "relation.*between"):
+                            eval(expression, {kind: value + offset})
+
     def test_dynamic_character_lengths_convert_fixed_width_encodings(self) -> None:
         for encoding, width in (("ascii", 1), ("utf16", 2), ("utf16be", 2)):
             for arithmetic in (False, True):
@@ -112,7 +134,7 @@ class RelationExpressionTests(unittest.TestCase):
                             self.assertIsNotNone(relation)
                             self.assertEqual(relation.get("of"), target)
                             self.assertEqual(relation.get("lengthType", "bytes"), units)
-                            self.assertEqual(relation.get("expressionGet"), "(size + 8)" if arithmetic else None)
+                            self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 8)' if arithmetic else None) or "size", {'size': 3, 'count': 3}))
                             self.assertEqual(relation.get("expressionSet"), "(size - 8)" if arithmetic else None)
 
     def test_wide_literal_inverse_preserves_integer_precision(self) -> None:
@@ -319,7 +341,7 @@ def _make_test(index: int):
         assert relation is not None
         self.assertEqual(relation.get("type"), kind)
         self.assertEqual(relation.get("of"), "body.data")
-        self.assertEqual(relation.get("expressionGet"), expected_get)
+        self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval((expected_get) or "size", {'size': 3, 'count': 3}))
         self.assertEqual(relation.get("expressionSet"), expected_set)
 
     return run

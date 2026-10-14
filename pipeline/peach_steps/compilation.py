@@ -1,6 +1,8 @@
 import os
+from pathlib import Path
 
 from core.peach_sdk import compile_csharp
+from core.mutator_codegen import manifest_sources
 from core.ui import UI
 from pipeline.peach_steps.common import PeachStepMixin
 
@@ -16,7 +18,7 @@ class CompilationStep(PeachStepMixin):
         fixers_dir = f"./llm/peach/{self.protocol_lower}/Fixers/"
 
         if os.path.isdir(mutators_dir):
-            cs_files.extend(glob.glob(os.path.join(mutators_dir, "*.cs")))
+            cs_files.extend(str(path) for path in manifest_sources(Path(mutators_dir)))
         if os.path.isdir(fixers_dir):
             cs_files.extend(
                 f for f in glob.glob(os.path.join(fixers_dir, "*.cs"))
@@ -44,4 +46,4 @@ class CompilationStep(PeachStepMixin):
         if result.returncode == 0:
             UI.success(f"Successfully compiled: {output_dll}")
         else:
-            UI.error(f"Compilation failed:\n{result.stdout}{result.stderr}")
+            raise RuntimeError(f"Compilation failed:\n{result.stdout}{result.stderr}")

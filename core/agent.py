@@ -12,6 +12,7 @@ from langchain_core.retrievers import BaseRetriever
 from core.config import get_protocol_name
 from core.agent_types import AgentGraph
 from core.tools import get_tools, make_rfc_search
+from core.tool_result import DotNetBuildData, ToolResult
 
 # ---------------------------------------------------------------------------
 # Monkey-patch: preserve reasoning_content round-trip through LangChain
@@ -95,6 +96,7 @@ def build_agent_graph(
     read_files: Collection[Path | str] | None = None,
     write_files: Collection[Path | str] | None = None,
     write_roots: Collection[Path | str] | None = None,
+    mutator_build: Callable[[], ToolResult[DotNetBuildData]] | None = None,
 ) -> AgentGraph:
     if config is None:
         config = AgentConfig()
@@ -118,6 +120,7 @@ def build_agent_graph(
         read_files=selected_read_files,
         write_files=selected_write_files,
         write_roots=selected_write_roots,
+        mutator_build=mutator_build,
     )
     if tool_names is None:
         selected_tools = available_tools

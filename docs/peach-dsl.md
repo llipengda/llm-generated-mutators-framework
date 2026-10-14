@@ -167,6 +167,10 @@ External functions, modules, and mutable objects cannot be captured; put helper 
 required imports inside the computed function. `global` and `nonlocal`
 declarations are rejected because generated fixups do not share the DSL
 module's runtime state.
+Computed functions and constraints execute in Peach's IronPython runtime.
+Assignment expressions (`:=`), pattern matching (`match`), and async/await
+syntax are unsupported and rejected before export. Ordinary f-strings and
+list/dictionary unpacking remain supported.
 
 Prefer references to fields declared earlier in wire order. Anonymous
 `Block(...)` and `Union(...)` members are not path-addressable; use their
@@ -224,8 +228,9 @@ and field type.
 References to fixed fields with a non-`string` value format remain runtime
 references: the encoded literal can differ from its decoded scalar value
 (for example, `Int8(fixed(12), value_type="hex")` stores decimal 18).
-Likewise, `fixed(...)` with explicit `token=False` keeps references dynamic:
-Peach can parse a value different from the declared default.
+`fixed(...)` cannot be combined with `token=False`; declarations and overrides
+using this combination are rejected. To supply a non-token default, pass a plain
+value, such as `Int8(2, token=False)`.
 Fixed `String` fields with a length or a NUL terminator also keep references
 dynamic, because Peach's runtime text can include padding and terminators.
 
@@ -326,6 +331,14 @@ follow .NET UTF-16 code-unit counting, so a supplementary Unicode character
 occupies two units.
 An omitted default on a bounded String is treated as an empty string for these
 checks, including padding and terminator capacity.
+Padding encoding is checked when Peach's padding path is used. A value that
+already fills its capacity does not need an encodable padding character.
+Character-length padding validates characters actually inserted; byte-length
+padding also computes the padding character's encoded width when adding only
+a terminator, matching Peach's runtime behavior.
+Fixed capacities are checked for computed and literal values as well: bit
+lengths must be divisible by eight, UTF-16 byte lengths by two, and UTF-32 byte
+lengths by four. A zero-length string cannot request a null terminator.
 For UTF-7, the whole padded value must also encode to the declared byte length.
 Adjacent shifted characters can merge during encoding; configurations where
 Peach's padding would silently produce a shorter value are rejected.
@@ -338,6 +351,11 @@ wire value remain the same.
 For `Blob` and `String`, `length_type="bits"` also applies to dynamic length
 references and expressions. Their generated size relations read and write bit
 counts; the default unit is bytes.
+Static lengths and generated relation expressions reject values outside
+Peach's representable range. Byte lengths cannot exceed `2**60 - 1`, bit
+lengths cannot exceed `2**63 - 1`, and array counts cannot exceed `2**31 - 1`.
+Dynamic relation results must also be nonnegative; the checks run before
+Peach converts byte sizes into bits, preventing integer overflow.
 String length units must be `bytes`, `bits`, or `chars`, including unbounded
 and computed fields; invalid unit names are rejected before XML is generated.
 String and Blob length units are normalized to lowercase in generated XML.
@@ -352,16 +370,24 @@ or Block. References follow the original field declaration, even when an inner
 Block has a field with the same name, and honor overrides on the enclosing
 instance. A `Block[length](...)` used as a Union alternative retains its length
 boundary.
-Conditional Optional references that cross these Block scopes use explicit
-relative paths in the generated XML. This prevents same-named inner fields
-from shadowing the intended source and allows the containing model to be
-reused under a different name.
+Conditional Optional sources use dotted element paths in the generated XML,
+qualified with the DataModel name when inner fields shadow the intended source.
+The compiler checks Peach lookup order and rejects sources that cannot be
+resolved unambiguously. Generated references do not use `../` or `./`.
 Size and count relations qualify their target with the DataModel name when
 another nested path would otherwise shadow that target during Peach lookup.
+If an inner Block also shadows the DataModel name, the compiler checks
+Peach's lookup order and uses a shorter path when it resolves the intended
+element. If no unambiguous path exists, compilation fails with a request to
+rename the DataModel or conflicting nested element.
 Computed arguments inside inline Blocks retain the scope where their source
 was declared, including inherited fields and references wrapped in Optional,
 arrays, or Union alternatives. Their ScriptFixup reference is qualified with
 the DataModel name when a nested path would shadow the intended source.
+Computed references also retain their declaration scope. Reusing a computed
+field or Block in an unrelated model does not rebind an external source by
+name. Inheritance and reuse of a Block whose computed sources are local to
+that Block remain supported, including instance overrides.
 
 An unsized `String()` consumes the bytes made available by its surrounding
 grammar. As the final member of a schema or bounded block, it consumes the
@@ -662,3 +688,144 @@ A matching packet is:
 ^^^^^  ^^^^^  ^^^^^  ^^  ^^  ^^^^^  ^^^^^
 Tx ID  Proto  Length Unit Func Address Quantity
 ```
+
+### Evaluated Peach element paths
+
+`evaluate_schema(target, name=None, include_header=True)` assigns `path` to every
+result node using the element hierarchy instantiated from the generated XML. Paths are dotted and start with the
+DataModel name, for example `Packet.body.payload.value`. Pass the same `name`
+and `include_header` arguments as the XML export being inspected.
+
+For model libraries, `ref` is expanded at each instance. A field inherited from
+`Header` through `Packet.header` has path `Packet.header.flags`. Reusing `Header`
+at `Packet.other` produces the distinct path `Packet.other.flags`. Explicit
+overrides use the same instance hierarchy. Compiler-created Optional and
+nested-array nodes are included, and resolved model names include any collision suffix.
+`OptionalResult.source_path` identifies the source field under the same root
+field; it is distinct from the lookup string written to the XML `src` attribute.
+
+Evaluation now exports and validates the model to ensure these paths correspond
+to XML that can actually be generated. It does not execute computed functions.
+Error reports continue to use their existing DSL paths for diagnosis.
+
+Paths use `[]` to represent an array item at any index. The Array container path
+is `Packet.items`, an item path is `Packet.items[]`, and a field inside an item
+has path `Packet.items[].value`. Nested arrays use paths such as
+`Packet.matrix[].item[]`. This notation abstracts Peach's concrete names:
+`Packet.items[].value` represents `Packet.items.items_0.value`,
+`Packet.items.items_1.value`, etc. A path containing `[]` is a pattern, so it
+must be matched against runtime items before calling Peach's `find` with a
+concrete path. Before expansion, the corresponding `OriginalElement` has
+native path `Packet.items.items`; the stored DSL path remains `Packet.items[]`.
+Choice paths include all
+template alternatives; after a branch is selected, `find` can only access that
+selected branch through the Choice.
+
+Instance path patterns are unique; an array item pattern can match multiple
+runtime items. Export and evaluation reject duplicate paths and
+names with dots or slash separators, which would make dotted paths ambiguous.
+Result wrappers that represent the same Peach element may share its path.
+
+### Node classifications
+
+`get_node_types(target, name=None, include_header=True)` returns
+`list[tuple[NodeType, str]]` in traversal order under the requested root,
+visiting each instantiated template node once, including referenced descendants,
+native Array wrappers and prototypes, compiler-created wrappers and empty
+Optional branches. Paths use the same model names and export options as XML;
+unattached library definitions are not separate traversal roots.
+
+`NodeType` is an `IntFlag`: combine properties with `|`, and test membership with
+`&`. `FIXED` and `MUTABLE` are mutually exclusive. Fields declared with
+`fixed(...)`, token fields (`token=True`), and nodes with
+`mutable=False` are `FIXED`; all others are `MUTABLE`. `fixed(...)` with
+`token=False` is forbidden.
+Array nodes are `REPEATABLE`, including arrays with a constant occurrence count.
+Optional wrappers are `OPTIONAL`; arrays are also optional when their count can
+be zero (unspecified/dynamic counts, zero constants, or `Occurs` with minimum 0).
+`REPEATABLE` and `OPTIONAL` apply only to the corresponding Array or Optional
+wrapper. They do not propagate to item prototypes, contained fields, reference
+descendants, or empty branches. A nested Array or Optional wrapper still has
+its own properties. For example, `Packet.items` can be
+`MUTABLE|REPEATABLE|OPTIONAL`, while `Packet.items[]` and
+`Packet.items[].value` are `MUTABLE` unless those nodes have their own fixed
+properties or wrappers.
+
+```python
+for node_type, path in get_node_types(Packet):
+    if node_type & NodeType.OPTIONAL:
+        print(node_type.name, path)
+# Example: FIXED|REPEATABLE|OPTIONAL Packet.payload.value
+```
+
+### Declared mutation targets
+
+`get_mutation_nodes(target, name=None, include_header=True)` returns immutable
+`MutationNode` records for deterministic mutator planning. Each record contains
+the rooted `path`, local `node_type` flags, actual Peach `runtime_type` tag,
+DSL `kind`, diagnostic `dsl_path`, and a stable human-readable `description`.
+For an unconditional Optional, `empty_branch_name` is the compiler-selected
+empty Choice branch, including collision handling. For a conditional Optional,
+`source_path` is the rooted controlling field path and `condition` retains the
+evaluated expression tree.
+
+The traversal follows declared logical nodes. It excludes the root, generated
+Optional empty branches, nested-array scaffold Blocks, and the compiler's
+single-packet duplicate alternative. Optional Union wrappers appear once,
+followed by their declared alternatives. Declared array item prototypes retain
+`[]` paths. Referenced model instances and field overrides use their effective
+runtime tags and the same rooted paths as the XML compiler. Flags are never
+propagated from a wrapper to its children.
+
+```python
+for node in get_mutation_nodes(Packet, name="Root"):
+    if node.node_type & NodeType.OPTIONAL:
+        print(node.path, node.runtime_type, node.empty_branch_name, node.source_path)
+```
+
+This API describes all declared nodes, including fixed fields and protocol
+containers. The caller selects mutable targets and excludes pipeline-specific
+envelopes such as the outer packet array.
+
+### Generating supportedDataElement expressions
+
+`get_supported_data_element_expressions(target, name=None, include_header=True)`
+returns `(NodeType, path, expression)` for each node, in the same order as
+`get_node_types()`. The expression is C# code for the parameter `obj` in
+`supportedDataElement(DataElement obj)`. Classifications remain local to each
+node; callers can select rows using the `NodeType` flags.
+
+```python
+for node_type, path, expression in get_supported_data_element_expressions(Packet):
+    if node_type & NodeType.MUTABLE:
+        print(path, expression)
+```
+
+`supported_data_element_expression(path)` generates one expression directly:
+
+```python
+supported_data_element_expression("Root.header.value")
+# obj.MatchesPath(@"Root.header.value")
+
+supported_data_element_expression("Root.items[].value")
+# obj.MatchesPath(@"Root.items[].value")
+```
+
+Copy the generated expression into the method's return statement:
+
+```csharp
+using Peach.LLM.Core;
+
+public static bool supportedDataElement(DataElement obj)
+{
+    return obj.MatchesPath(@"Root.items[].value");
+}
+```
+
+`MatchesPath` is provided by `Peach.LLM.Core` in the updated LLM-Peach SDK.
+The full root and ancestry must match. Array patterns require native Array
+parents and expanded item names with nonempty ASCII numeric indices. Nested
+arrays are supported; unexpanded `OriginalElement` prototypes do not match `[]`.
+Array containers have their own paths (`Root.items`). Null elements and invalid
+paths return false. The matcher uses no regex. Use an updated `Peach.LLM.dll`
+when compiling generated mutators.

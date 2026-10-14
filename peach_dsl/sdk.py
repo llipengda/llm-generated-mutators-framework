@@ -7,6 +7,7 @@ from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dataclass_field, replace
 import dis
+from enum import IntFlag
 from functools import wraps
 import hashlib
 import inspect
@@ -39,6 +40,22 @@ StringEncoding = Literal[
 _STRING_ENCODINGS = frozenset(
     {"ascii", "utf7", "utf8", "utf16", "utf16be", "utf32", "utf32be"}
 )
+
+
+class NodeType(IntFlag):
+    """Node properties; FIXED and MUTABLE are mutually exclusive."""
+
+    FIXED = 1
+    MUTABLE = 2
+    REPEATABLE = 4
+    OPTIONAL = 8
+
+    def __repr__(self) -> str:
+        return f"NodeType({self!s})"
+
+    def __str__(self) -> str:
+        flags = [name for name, value in NodeType.__members__.items() if self & value]
+        return f"{'|'.join(flags)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,10 +317,22 @@ class ConstraintValue(_ConstraintNode, Generic[T]):
         return Expr(">=", self, other)
 
 
+def _validate_fixed_token(constant: object, options: Mapping[str, object], context: str) -> None:
+    if not isinstance(constant, Fixed):
+        return
+    tokens = [options.get("token")]
+    attributes = options.get("extended_attributes")
+    if isinstance(attributes, Mapping):
+        tokens.append(cast(Mapping[str, object], attributes).get("token"))
+    if any(token is False or isinstance(token, str) and token.strip().lower() == "false" for token in tokens):
+        raise ValueError(f"{context}: fixed(...) cannot be combined with token=False")
+
+
 class Field(ComputedArgument[T_co], Generic[T_co]):
     """Description of one value in a schema."""
 
     def __init__(self, kind: str, **options: object) -> None:
+        _validate_fixed_token(options.get("constant"), options, kind)
         self.kind = kind
         self.options = MappingProxyType(dict(options))
         self.owner: type[Schema] | None = None
@@ -627,19 +656,36 @@ ConstraintBuilder = Callable[[T], bool]
 ConstraintInput = str | ConstraintBuilder[T]
 
 
+def _validate_peach_python_syntax(node: ast.AST, context: str) -> None:
+    unsupported: Mapping[type[ast.AST], str] = {
+        ast.NamedExpr: "assignment expressions (:=)",
+        ast.Match: "pattern matching (match)",
+        ast.AsyncFunctionDef: "async functions",
+        ast.AsyncFor: "async for",
+        ast.AsyncWith: "async with",
+        ast.Await: "await",
+    }
+    for item in ast.walk(node):
+        feature = unsupported.get(type(item))
+        if feature is not None:
+            raise ValueError(f"{context}: Peach's IronPython does not support {feature}")
+
+
 def _compile_constraint(
     constraint: ConstraintInput[T], *, value_cast: str | None = None
 ) -> str:
     if isinstance(constraint, str):
-        if value_cast is None:
-            return constraint
         try:
             expression = ast.parse(constraint, mode="eval").body
         except SyntaxError as error:
             raise TypeError("constraint must be a valid Python expression") from error
+        _validate_peach_python_syntax(expression, "constraint")
+        if value_cast is None:
+            return constraint
         parameter = "value"
     else:
         parameter, expression = _constraint_source_expression(constraint)
+        _validate_peach_python_syntax(expression, "constraint")
     rewriter = _ConstraintValueRewriter(parameter, value_cast, expression)
     rewritten = rewriter.visit(expression)
     if rewriter.field_name != "value":
@@ -2487,6 +2533,8 @@ class FieldResult:
         default_factory=lambda: MappingProxyType({})
     )
     path: str | None = None
+    _dsl_path: str | None = dataclass_field(default=None, repr=False, compare=False)
+    _xml_paths: bool = dataclass_field(default=False, repr=False, compare=False)
     definition: AnyField | None = dataclass_field(default=None, compare=False, repr=False)
 
     def __str__(self) -> str:
@@ -2515,6 +2563,8 @@ class SchemaResult(_EvaluationResultMixin):
     length: int | FieldReference | ExprResult | None = None
     packet_union: str | None = None
     path: str | None = None
+    _dsl_path: str | None = dataclass_field(default=None, repr=False, compare=False)
+    _xml_paths: bool = dataclass_field(default=False, repr=False, compare=False)
     _computed_scope_tokens: tuple[object, ...] = dataclass_field(default=(), repr=False, compare=False)
 
     def __str__(self) -> str:
@@ -2525,6 +2575,8 @@ class SchemaResult(_EvaluationResultMixin):
 class UnionResult(_EvaluationResultMixin):
     alternatives: tuple[FieldResult | SchemaResult, ...]
     path: str | None = None
+    _dsl_path: str | None = dataclass_field(default=None, repr=False, compare=False)
+    _xml_paths: bool = dataclass_field(default=False, repr=False, compare=False)
 
     def __str__(self) -> str:
         return format_schema_result(self)
@@ -2536,6 +2588,8 @@ class ArrayResult:
     element: FieldResult | SchemaResult | UnionResult | ArrayResult
     count: int | FieldReference | ExprResult | Occurs | None
     path: str | None = None
+    _dsl_path: str | None = dataclass_field(default=None, repr=False, compare=False)
+    _xml_paths: bool = dataclass_field(default=False, repr=False, compare=False)
     optional: bool = False
 
     def __str__(self) -> str:
@@ -2549,6 +2603,8 @@ class OptionalResult:
     element: FieldResult | SchemaResult | UnionResult | ArrayResult
     condition: ExprResult
     path: str | None = None
+    _dsl_path: str | None = dataclass_field(default=None, repr=False, compare=False)
+    _xml_paths: bool = dataclass_field(default=False, repr=False, compare=False)
     source_path: str | None = None
 
     def __str__(self) -> str:
@@ -2559,7 +2615,7 @@ EvaluationResult = SchemaResult | UnionResult
 SchemaInput = type[Schema] | Schema | SchemaUnion | NamedUnion
 
 
-def evaluate_schema(target: SchemaInput) -> EvaluationResult:
+def _evaluate_schema(target: SchemaInput) -> EvaluationResult:
     """Compile a schema DSL expression into an immutable result tree."""
 
     if isinstance(target, Schema):
@@ -2573,6 +2629,237 @@ def evaluate_schema(target: SchemaInput) -> EvaluationResult:
     else:
         result = _evaluate_concrete_schema(target, {}, ROOT_DEFAULTS)
     return _add_packet_paths(result)
+
+
+
+def _index_peach_xml(root: ET.Element) -> tuple[dict[str, ET.Element], dict[int, str]]:
+    """Index actual DataElement definitions, rejecting ambiguous dotted paths."""
+    models: dict[str, ET.Element] = {}
+    paths: dict[int, str] = {}
+    owners: dict[str, ET.Element] = {}
+    metadata_tags = {"Relation", "Fixup", "Transformer", "Hint", "Param", "Placement"}
+
+    def index(node: ET.Element, parent: tuple[str, ...]) -> None:
+        name = node.get("name")
+        if name is None or not name or any(separator in name for separator in (".", "/", "\\")):
+            raise ValueError(f"XML element name {name!r} must be nonempty and cannot contain '.', '/' or '\\'")
+        parts = parent + (name,)
+        path = ".".join(parts)
+        if path in owners:
+            raise ValueError(f"XML path {path!r} is not unique; rename the conflicting element")
+        owners[path] = node
+        paths[id(node)] = path
+        for child in node:
+            if child.tag.rsplit("}", 1)[-1] not in metadata_tags and child.get("name") is not None:
+                index(child, parts)
+
+    for node in root.iter():
+        if node.tag.rsplit("}", 1)[-1] == "DataModel":
+            index(node, ())
+            name = node.get("name")
+            assert name is not None
+            models[name] = node
+    return models, paths
+
+
+def _root_peach_model_name(target: SchemaInput, name: str | None, include_header: bool) -> str:
+    model_name = name or _schema_input_name(target)
+    if include_header and not isinstance(target, (SchemaUnion, NamedUnion)) and _schema_input_has_packet_union(target):
+        root_schema = type(target) if isinstance(target, Schema) else cast(type[Schema], target)
+        defaults: dict[type[Schema], SchemaDefaults] = {}
+        dependencies: dict[type[Schema], set[type[Schema]]] = {}
+        _collect_peach_models(cast(type[Schema] | Schema, target), ROOT_DEFAULTS, defaults, dependencies=dependencies)
+        names, _ = _resolve_peach_model_names(
+            _order_peach_models(defaults, dependencies), defaults, root_schema,
+            root_name=name, root_overrides=target.overrides if isinstance(target, Schema) else {},
+        )
+        model_name = names[root_schema]
+    return model_name
+
+
+def _expand_peach_model(
+    model: ET.Element, models: Mapping[str, ET.Element], definition_paths: Mapping[int, str],
+) -> tuple[ET.Element, dict[int, tuple[str, ...]]]:
+    """Instantiate refs under the requested root, retaining definition metadata."""
+    origins: dict[int, tuple[str, ...]] = {}
+
+    def expand(node: ET.Element, active: tuple[str, ...]) -> ET.Element:
+        reference = node.get("ref")
+        if reference is not None:
+            if reference in active:
+                raise ValueError(f"cyclic Peach model reference: {' -> '.join(active + (reference,))}")
+            if reference not in models:
+                raise ValueError(f"unknown Peach model reference {reference!r}")
+            baseline = expand(models[reference], active + (reference,))
+            attributes = {**baseline.attrib, **node.attrib}
+            attributes.pop("ref", None)
+            result = ET.Element(node.tag, attributes)
+            overrides = {
+                child.get("name"): child for child in node if id(child) in definition_paths
+            }
+            for inherited in baseline:
+                replacement = overrides.pop(inherited.get("name"), None)
+                result.append(expand(replacement, active) if replacement is not None else inherited)
+            for replacement in overrides.values():
+                result.append(expand(replacement, active))
+            origins[id(result)] = origins[id(baseline)] + (definition_paths[id(node)],)
+        else:
+            result = ET.Element(node.tag, dict(node.attrib))
+            for child in node:
+                if id(child) in definition_paths:
+                    result.append(expand(child, active))
+            origins[id(result)] = (definition_paths[id(node)],)
+        if any(attribute in result.attrib for attribute in ("occurs", "minOccurs", "maxOccurs")):
+            attributes = dict(result.attrib)
+            for attribute in ("occurs", "minOccurs", "maxOccurs"):
+                result.attrib.pop(attribute, None)
+            wrapper = ET.Element("Array", attributes)
+            wrapper.append(result)
+            origins[id(wrapper)] = origins[id(result)]
+            return wrapper
+        return result
+
+    name = model.get("name")
+    assert name is not None
+    return expand(model, (name,)), origins
+
+
+def _index_peach_instance_paths(root: ET.Element) -> dict[int, str]:
+    """Index rooted instances, representing an Array's item as name[]."""
+    paths: dict[int, str] = {}
+    owners: set[str] = set()
+
+    def index(node: ET.Element, parts: tuple[str, ...]) -> None:
+        path = ".".join(parts)
+        if path in owners:
+            raise ValueError(f"Peach instance path {path!r} is not unique; rename the conflicting element")
+        owners.add(path)
+        paths[id(node)] = path
+        for child in node:
+            name = child.get("name")
+            assert name is not None
+            child_parts = parts[:-1] + (parts[-1] + "[]",) if node.tag == "Array" else parts + (name,)
+            index(child, child_parts)
+
+    name = root.get("name")
+    assert name is not None
+    index(root, (name,))
+    return paths
+
+
+def evaluate_schema(
+    target: SchemaInput, *, name: str | None = None, include_header: bool = True,
+) -> EvaluationResult:
+    """Evaluate rooted instance paths; array items use name[] patterns."""
+    result = _evaluate_schema(target)
+    diagnostic_result = result
+    library = include_header and not isinstance(target, (SchemaUnion, NamedUnion)) and _schema_input_has_packet_union(target)
+    if not library:
+        result = _with_packet_path(result, ("value",) if isinstance(result, UnionResult) else ())
+    xml = ET.fromstring(to_peach_data_model(target, name=name, include_header=include_header))
+    models, xml_paths = _index_peach_xml(xml)
+    model_name = _root_peach_model_name(target, name, include_header)
+    model, _ = _expand_peach_model(models[model_name], models, xml_paths)
+    xml_paths = _index_peach_instance_paths(model)
+
+    def child(node: ET.Element, child_name: str) -> ET.Element:
+        seen: set[int] = set()
+        while id(node) not in seen:
+            seen.add(id(node))
+            for candidate in node:
+                if candidate.get("name") == child_name:
+                    return candidate
+            reference = node.get("ref")
+            if reference is None or reference not in models:
+                break
+            node = models[reference]
+        raise ValueError(f"cannot locate XML element {child_name!r} below {xml_paths[id(node)]!r}")
+
+    aliases: dict[str, list[tuple[tuple[str, ...], str]]] = {}
+
+    def annotate(member: ResultMember, node: ET.Element, instance: tuple[str, ...]) -> ResultMember:
+        path = xml_paths[id(node)]
+        if isinstance(member, SchemaResult):
+            return replace(member, path=path, _dsl_path=member.path, _xml_paths=True, fields=MappingProxyType({
+                field_name: annotate(field, child(node, field_name), instance + (field_name,))
+                for field_name, field in member.fields.items()
+            }))
+        if isinstance(member, UnionResult):
+            # Unnamed Union alternatives use resolved model names in XML,
+            # which can differ from declaration names after a collision.
+            alternative_nodes = tuple(candidate for candidate in node if candidate.get("name") is not None)
+            return replace(member, path=path, _dsl_path=member.path, _xml_paths=True, alternatives=tuple(
+                cast(FieldResult | SchemaResult, annotate(alternative, alternative_node, instance + (str(alternative_index),)))
+                for alternative_index, (alternative, alternative_node) in enumerate(zip(member.alternatives, alternative_nodes[:len(member.alternatives)], strict=True))
+            ))
+        if isinstance(member, OptionalResult):
+            element_name = _optional_element_name(member.name, member.element)
+            element = cast(ArrayElementResult, annotate(member.element, child(node, element_name), instance + (element_name,)))
+            return replace(member, path=path, _dsl_path=member.path, _xml_paths=True, element=element)
+        if isinstance(member, ArrayResult):
+            element_instance = instance
+            prototype = child(node, cast(str, node.get("name"))) if node.tag == "Array" else node
+            if member.optional:
+                element_name = "value" if isinstance(member.element, ArrayResult) else _optional_element_name(member.name, member.element)
+                if isinstance(member.element, UnionResult):
+                    element_node = node
+                else:
+                    element_node = child(node, element_name)
+                    element_instance += (element_name,)
+            elif isinstance(member.element, ArrayResult):
+                element_node = child(prototype, "item")
+                element_instance += ("item",)
+            else:
+                element_node = prototype
+            return replace(member, path=path, _dsl_path=member.path, _xml_paths=True,
+                           element=cast(ArrayElementResult, annotate(member.element, element_node, element_instance)))
+        if member.path is not None:
+            aliases.setdefault(member.path, []).append((instance, path))
+        return replace(member, path=path, _dsl_path=member.path, _xml_paths=True)
+
+    root_node = child(model, "value") if isinstance(result, UnionResult) or (
+        isinstance(result, SchemaResult) and result.flags_layout is not None
+    ) else model
+    annotated = annotate(result, root_node, ())
+
+    def sources(member: ResultMember, instance: tuple[str, ...]) -> ResultMember:
+        if isinstance(member, SchemaResult):
+            return replace(member, fields=MappingProxyType({key: sources(value, instance + (key,)) for key, value in member.fields.items()}))
+        if isinstance(member, UnionResult):
+            return replace(member, alternatives=tuple(cast(FieldResult | SchemaResult, sources(value, instance + (str(alternative_index),))) for alternative_index, value in enumerate(member.alternatives)))
+        if isinstance(member, (ArrayResult, OptionalResult)):
+            element_instance = instance
+            if isinstance(member, OptionalResult) or member.optional and not isinstance(member.element, UnionResult):
+                element_instance += (("value" if isinstance(member.element, ArrayResult) else _optional_element_name(member.name, member.element)),)
+            elif isinstance(member.element, ArrayResult):
+                element_instance += ("item",)
+            element = cast(ArrayElementResult, sources(member.element, element_instance))
+            if isinstance(member, OptionalResult) and member.source_path is not None:
+                candidates = aliases.get(member.source_path, [])
+                common = max((len(_common_path_prefix((instance, field_instance))) for field_instance, _ in candidates), default=-1)
+                paths = {path for field_instance, path in candidates if len(_common_path_prefix((instance, field_instance))) == common}
+                if len(paths) != 1:
+                    raise ValueError(f"cannot locate unique XML source for Optional {member.path!r}: {member.source_path!r}")
+                return replace(member, element=element, source_path=next(iter(paths)))
+            return replace(member, element=element)
+        return member
+
+    def diagnostic_paths(member: ResultMember, original: ResultMember) -> ResultMember:
+        member = replace(member, _dsl_path=original.path)
+        if isinstance(member, SchemaResult) and isinstance(original, SchemaResult):
+            return replace(member, fields=MappingProxyType({
+                key: diagnostic_paths(value, original.fields[key]) for key, value in member.fields.items()
+            }))
+        if isinstance(member, UnionResult) and isinstance(original, UnionResult):
+            return replace(member, alternatives=tuple(
+                cast(FieldResult | SchemaResult, diagnostic_paths(value, old))
+                for value, old in zip(member.alternatives, original.alternatives, strict=True)
+            ))
+        if isinstance(member, (ArrayResult, OptionalResult)) and isinstance(original, (ArrayResult, OptionalResult)):
+            return replace(member, element=cast(ArrayElementResult, diagnostic_paths(member.element, original.element)))
+        return member
+
+    return cast(EvaluationResult, diagnostic_paths(sources(annotated, ()), diagnostic_result))
 
 
 ResultMember = FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult
@@ -2605,6 +2892,7 @@ def _with_packet_path(
 ) -> EvaluationResult:
     if isinstance(result, UnionResult):
         alternatives: list[FieldResult | SchemaResult] = []
+        alternative_names = tuple(alternative.name for alternative in result.alternatives)
         for alternative in result.alternatives:
             alternative_parts = (
                 parts + (alternative.name,) if parts is not None else None
@@ -2614,16 +2902,12 @@ def _with_packet_path(
                     replace(alternative, path=_packet_path_text(alternative_parts))
                 )
             else:
-                alternative_fields = (
-                    _packet_field_paths(alternative)
-                    if parts == () or packet_fields is None
-                    else packet_fields
-                )
-                alternative_root = (
-                    alternative_parts
-                    if parts == () or packet_fields is None
-                    else root_parts
-                )
+                # Different schemas with the same declaration name become
+                # distinct XML models. Keep their condition sources separate
+                # before model-name collision resolution assigns XML names.
+                local_scope = parts == () or packet_fields is None or alternative_names.count(alternative.name) > 1
+                alternative_fields = _packet_field_paths(alternative) if local_scope else packet_fields
+                alternative_root = alternative_parts if local_scope else root_parts
                 alternatives.append(
                     cast(
                         SchemaResult,
@@ -2852,6 +3136,230 @@ _COMPUTED_PATHS: ContextVar[Mapping[tuple[str, ...], tuple[tuple[str, ...], ...]
     "computed_paths", default=MappingProxyType({})
 )
 
+_OPTIONAL_SOURCES: ContextVar[Mapping[int, str]] = ContextVar(
+    "optional_sources", default=MappingProxyType({})
+)
+
+_NODE_SHAPES: ContextVar[dict[str, NodeType] | None] = ContextVar(
+    "node_shapes", default=None,
+)
+
+
+
+def _record_fixed_node(name: str, field: FieldResult, path: tuple[str, ...]) -> None:
+    shapes = _NODE_SHAPES.get()
+    if shapes is None or field.fixed is None:
+        return
+    model = _PEACH_CURRENT_MODEL.get()
+    assert model is not None
+    key = ".".join((model,) + path + (name,))
+    shapes[key] = shapes.get(key, NodeType(0)) | NodeType.FIXED
+
+def _record_node_shape(name: str, array: ArrayResult, path: tuple[str, ...]) -> None:
+    shapes = _NODE_SHAPES.get()
+    if shapes is None:
+        return
+    model = _PEACH_CURRENT_MODEL.get()
+    assert model is not None
+    shape = NodeType.OPTIONAL if array.optional else NodeType.REPEATABLE
+    if not array.optional and (
+        array.count is None
+        or isinstance(array.count, Occurs) and array.count.min_occurs == 0
+        or isinstance(array.count, int) and array.count == 0
+        or isinstance(array.count, (FieldReference, ExprResult))
+    ):
+        shape |= NodeType.OPTIONAL
+    key = ".".join((model,) + path + (name,))
+    shapes[key] = shapes.get(key, NodeType(0)) | shape
+
+
+def _rooted_peach_nodes(
+    target: SchemaInput, *, name: str | None = None, include_header: bool = True,
+) -> tuple[ET.Element, dict[int, str], dict[str, NodeType]]:
+    """Share the compiler's rooted runtime representation and classifications."""
+    shapes: dict[str, NodeType] = {}
+    token = _NODE_SHAPES.set(shapes)
+    try:
+        xml = ET.fromstring(to_peach_data_model(target, name=name, include_header=include_header))
+    finally:
+        _NODE_SHAPES.reset(token)
+    models, paths = _index_peach_xml(xml)
+    missing = shapes.keys() - set(paths.values())
+    if missing:
+        raise ValueError(f"node classifications refer to absent XML paths: {sorted(missing)}")
+    model_name = _root_peach_model_name(target, name, include_header)
+    root, origins = _expand_peach_model(models[model_name], models, paths)
+    paths = _index_peach_instance_paths(root)
+    result: dict[str, NodeType] = {}
+
+    def collect(node: ET.Element, array_item: bool = False) -> None:
+        path = paths[id(node)]
+        local = NodeType(0)
+        for origin in origins[id(node)]:
+            local |= shapes.get(origin, NodeType(0))
+        # Array and OriginalElement share their XML origin. Occurrence
+        # properties belong to the Array wrapper, not the item prototype.
+        shape = NodeType(0) if array_item else local & (NodeType.REPEATABLE | NodeType.OPTIONAL)
+        if node.tag.rsplit("}", 1)[-1] == "Optional":
+            shape |= NodeType.OPTIONAL
+        fixed_node = bool(local & NodeType.FIXED) or node.get("token", "false").lower() == "true" or node.get("mutable", "true").lower() == "false"
+        kind = NodeType.FIXED if fixed_node else NodeType.MUTABLE
+        result[path] = kind | shape
+        for child in node:
+            if id(child) in paths:
+                collect(child, node.tag == "Array")
+
+    collect(root)
+    return root, paths, result
+
+
+def get_node_types(
+    target: SchemaInput, *, name: str | None = None, include_header: bool = True,
+) -> list[tuple[NodeType, str]]:
+    """Return each Peach template node's properties and rooted path pattern.
+
+    References are expanded under the requested root. Repeated/optional
+    properties describe only the corresponding wrapper, not its descendants.
+    Array containers use name; their items use name[] for all runtime indices.
+    """
+    _, _, nodes = _rooted_peach_nodes(target, name=name, include_header=include_header)
+    return [(kind, path) for path, kind in nodes.items()]
+
+
+@dataclass(frozen=True, slots=True)
+class MutationNode:
+    """One declared DSL node bound to its rooted Peach runtime representation.
+
+    ``runtime_type`` is the actual Peach element tag. ``kind`` names the DSL
+    field kind or container (Schema, Flags, Union, Array, or Optional).
+    Presence and repetition flags belong only to the wrapper being described.
+    """
+
+    path: str
+    node_type: NodeType
+    runtime_type: str
+    kind: str
+    dsl_path: str | None
+    empty_branch_name: str | None
+    source_path: str | None
+    description: str
+    condition: ExprResult | None = None
+
+
+def _mutation_node_description(member: ResultMember) -> str:
+    if isinstance(member, FieldResult):
+        text = str(member)
+        if member.computed is not None:
+            text += f"; computed={member.computed.func.__qualname__}"
+        for key, value in sorted(member.peach_attributes.items()):
+            text += f"; {key}={value!r}"
+        return text
+    if isinstance(member, SchemaResult):
+        return _format_schema_name(member) + "; fields=" + ", ".join(member.fields)
+    if isinstance(member, UnionResult):
+        return "Union[" + ", ".join(alternative.name for alternative in member.alternatives) + "]" + _format_path(member.path)
+    if isinstance(member, ArrayResult) and member.optional:
+        return f"{member.name}: Optional[present or absent]" + _format_path(member.path)
+    return str(member) + _format_path(member.path)
+
+
+def get_mutation_nodes(
+    target: SchemaInput, *, name: str | None = None, include_header: bool = True,
+) -> list[MutationNode]:
+    """Describe declared nodes for deterministic mutator generation.
+
+    Rooted paths, reference overrides, runtime tags, and node classifications
+    come from the same compiler representation as ``get_node_types``. Only
+    nodes represented in the evaluated logical DSL tree are returned: the
+    root, generated Optional empty branches, nested-array scaffold Blocks,
+    and the compiler's single-packet duplicate alternative are excluded.
+    Optional Union wrappers are returned once, followed by their alternatives.
+    ``empty_branch_name`` is the name selected by the Optional compiler and
+    ``source_path`` is the rooted path of a conditional Optional's source.
+    """
+    runtime_root, paths, classifications = _rooted_peach_nodes(
+        target, name=name, include_header=include_header,
+    )
+    runtime_nodes = {paths[id(node)]: node for node in runtime_root.iter()}
+    logical_root = evaluate_schema(target, name=name, include_header=include_header)
+    rows: list[MutationNode] = []
+    seen: set[str] = set()
+
+    def collect(member: ResultMember, *, root: bool = False) -> None:
+        path = member.path
+        assert path is not None
+        if not root and path not in seen:
+            seen.add(path)
+            runtime = runtime_nodes[path]
+            empty_name: str | None = None
+            if isinstance(member, ArrayResult) and member.optional:
+                empty_name = _optional_empty_name(member.element)
+                if not any(child.get("name") == empty_name for child in runtime):
+                    raise ValueError(f"Optional {path!r} has no compiled empty branch {empty_name!r}")
+            kind = (
+                member.kind if isinstance(member, FieldResult)
+                else "Flags" if isinstance(member, SchemaResult) and member.flags_layout is not None
+                else "Schema" if isinstance(member, SchemaResult)
+                else "Union" if isinstance(member, UnionResult)
+                else "Optional" if isinstance(member, OptionalResult) or member.optional
+                else "Array"
+            )
+            rows.append(MutationNode(
+                path=path,
+                node_type=classifications[path],
+                runtime_type=runtime.tag.rsplit("}", 1)[-1],
+                kind=kind,
+                # Export the compiler's diagnostic mapping through this public API.
+                dsl_path=member._dsl_path,  # pyright: ignore[reportPrivateUsage]
+                empty_branch_name=empty_name,
+                source_path=member.source_path if isinstance(member, OptionalResult) else None,
+                description=_mutation_node_description(member),
+                condition=member.condition if isinstance(member, OptionalResult) else None,
+            ))
+        if isinstance(member, SchemaResult):
+            for child in member.fields.values():
+                collect(child)
+        elif isinstance(member, UnionResult):
+            for child in member.alternatives:
+                if path.rsplit(".", 1)[-1] == "packet_union" and child.name == "compiler_single_packet_duplicate":
+                    continue
+                collect(child)
+        elif isinstance(member, (ArrayResult, OptionalResult)):
+            collect(member.element)
+
+    collect(logical_root, root=True)
+    return rows
+
+
+def supported_data_element_expression(path: str) -> str:
+    """Generate a C# predicate for obj, matching one rooted path pattern.
+
+    Array items match expanded indices (name_0, name_1, ...), not the
+    unexpanded OriginalElement. Array containers remain separate nodes.
+    Requires using Peach.LLM.Core and its null-safe MatchesPath extension.
+    """
+    parts = path.split(".")
+    if any(not part or any(char in part for char in "/\\") for part in parts):
+        raise ValueError("path must be a nonempty rooted dotted path")
+    names = [part[:-2] if part.endswith("[]") else part for part in parts]
+    if parts[0].endswith("[]") or any(not name or "[" in name or "]" in name for name in names):
+        raise ValueError("[] is allowed only as an array item suffix below the root")
+
+    def literal(value: str) -> str:
+        return '@"' + value.replace('"', '""') + '"'
+
+    return f"obj.MatchesPath({literal(path)})"
+
+
+def get_supported_data_element_expressions(
+    target: SchemaInput, *, name: str | None = None, include_header: bool = True,
+) -> list[tuple[NodeType, str, str]]:
+    """Return (type, rooted path pattern, C# supportedDataElement expression)."""
+    return [
+        (kind, path, supported_data_element_expression(path))
+        for kind, path in get_node_types(target, name=name, include_header=include_header)
+    ]
+
 _NumericSettings = tuple[tuple[bool | None, Endian | None], ...]
 _PEACH_MODEL_NUMERIC_SETTINGS: ContextVar[Mapping[str, _NumericSettings]] = ContextVar(
     "peach_model_numeric_settings", default=MappingProxyType({})
@@ -2935,6 +3443,7 @@ def to_peach_artifacts(
     python_fixup = _render_python_fixups(definitions) if definitions else None
     if definitions and include_header:
         xml = _add_python_fixup_import(xml)
+    _index_peach_xml(ET.fromstring(xml))
     return PeachArtifacts(xml, python_fixup)
 
 
@@ -2956,13 +3465,12 @@ def _to_peach_data_model(
     ):
         return _to_peach_model_library(target, name=name)
 
-    result = evaluate_schema(target)
+    result = _evaluate_schema(target)
     if isinstance(result, SchemaResult) and result.flags_layout is not None:
         # A DataModel cannot itself carry a Flags layout. Keep the packed
         # value as one child, just as a top-level Union has a value child.
         result = SchemaResult(result.name, MappingProxyType({"value": result}))
-    if isinstance(result, SchemaResult):
-        result = _with_packet_path(result, ())
+    result = _with_packet_path(result, ("value",) if isinstance(result, UnionResult) else ())
     model_name = name or _schema_input_name(target)
     if include_header:
         ET.register_namespace("", PEACH_NAMESPACE)
@@ -2978,16 +3486,18 @@ def _to_peach_data_model(
     relations: PeachRelations = {}
     relation_root = ("value",) if isinstance(result, UnionResult) else ()
     _collect_peach_relations(result, relation_root, relations)
-    computed_paths = _apply_peach_result_paths(result, relation_root, relations, model_name)
+    computed_paths, optional_sources = _apply_peach_result_paths(result, relation_root, relations, model_name)
 
     model_token = _PEACH_CURRENT_MODEL.set(model_name)
     paths_token = _COMPUTED_PATHS.set(computed_paths)
+    sources_token = _OPTIONAL_SOURCES.set(optional_sources)
     try:
         if isinstance(result, SchemaResult):
             _append_peach_schema_fields(data_model, result, (), relations)
         else:
             _append_peach_union(data_model, "value", result, (), relations)
     finally:
+        _OPTIONAL_SOURCES.reset(sources_token)
         _COMPUTED_PATHS.reset(paths_token)
         _PEACH_CURRENT_MODEL.reset(model_token)
 
@@ -3115,9 +3625,10 @@ def _to_peach_model_library(target: type[Schema] | Schema, *, name: str | None) 
             )
             relations: PeachRelations = {}
             _collect_peach_relations(result, (), relations)
-            computed_paths = _apply_peach_result_paths(result, (), relations, model_names[schema])
+            computed_paths, optional_sources = _apply_peach_result_paths(result, (), relations, model_names[schema])
             model_token = _PEACH_CURRENT_MODEL.set(model_names[schema])
             paths_token = _COMPUTED_PATHS.set(computed_paths)
+            sources_token = _OPTIONAL_SOURCES.set(optional_sources)
             try:
                 _append_extracted_schema_fields(
                     data_model,
@@ -3128,6 +3639,7 @@ def _to_peach_model_library(target: type[Schema] | Schema, *, name: str | None) 
                     overrides,
                 )
             finally:
+                _OPTIONAL_SOURCES.reset(sources_token)
                 _COMPUTED_PATHS.reset(paths_token)
                 _PEACH_CURRENT_MODEL.reset(model_token)
     finally:
@@ -3497,7 +4009,7 @@ def _append_extracted_schema_reference(
         **occurrence,
     }
     if isinstance(result.length, int):
-        attributes["length"] = str(result.length)
+        attributes["length"] = _peach_static_length(result.length, "bytes", result.name)
     element = ET.SubElement(
         parent,
         "Block",
@@ -3670,6 +4182,7 @@ def _append_extracted_array(
     relations: PeachRelations,
     occurrence: Mapping[str, str],
 ) -> None:
+    _record_node_shape(name, result, path)
     attributes = dict(occurrence)
     if result.count is None:
         attributes["minOccurs"] = "0"
@@ -3679,6 +4192,9 @@ def _append_extracted_array(
         attributes["maxOccurs"] = str(result.count.max_occurs)
     elif isinstance(result.count, int):
         attributes["occurs"] = str(result.count)
+    else:
+        attributes["minOccurs"] = "0"
+        attributes["maxOccurs"] = "-1"
     if isinstance(result.element, ArrayResult) and isinstance(raw.element, ArrayField):
         block = ET.SubElement(parent, "Block", {"name": name, **attributes})
         _append_extracted_array(
@@ -3725,6 +4241,7 @@ def _append_extracted_optional(
     occurrence: Mapping[str, str],
 ) -> None:
     if isinstance(result, ArrayResult):
+        _record_node_shape(name, result, path)
         choice = ET.SubElement(parent, "Choice", {"name": name, **occurrence})
         if isinstance(raw.element, (SchemaUnion, NamedUnion)):
             _append_extracted_union_alternatives(
@@ -3752,7 +4269,8 @@ def _append_extracted_optional(
         return
     optional = cast(OptionalResult, result)
     source, expression = _peach_optional_condition(
-        optional.condition, path, optional.path, optional.source_path
+        optional.condition, path, optional.path,
+        _OPTIONAL_SOURCES.get().get(id(optional), optional.source_path)
     )
     attributes = {"name": name, "expression": expression, **occurrence}
     if source is not None:
@@ -3784,7 +4302,7 @@ def _append_extracted_block(
 ) -> None:
     attributes = {"name": name, **occurrence}
     if isinstance(result.length, int):
-        attributes["length"] = str(result.length)
+        attributes["length"] = _peach_static_length(result.length, "bytes", result.name)
     element = ET.SubElement(parent, "Block", attributes)
     _append_extracted_schema_fields(
         element,
@@ -3862,19 +4380,81 @@ def _apply_peach_result_paths(
     root_path: tuple[str, ...],
     relations: PeachRelations,
     model_name: str,
-) -> Mapping[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+) -> tuple[Mapping[tuple[str, ...], tuple[tuple[str, ...], ...]], Mapping[int, str]]:
     """Resolve relation paths and map compute references to emitted XML elements."""
 
     paths: dict[str, str] = {}
     field_paths: dict[tuple[str, ...], list[AnyField | None]] = {}
     packet_alternatives: list[tuple[str, ...]] = []
     node_paths: set[tuple[str, ...]] = set()
+    optional_fields: list[tuple[OptionalResult, tuple[str, ...]]] = []
+    field_aliases: dict[str, tuple[str, ...]] = {}
     computed_fields: list[tuple[Computed[ScalarValue], tuple[str, ...], tuple[str, ...]]] = []
     physical_paths: dict[tuple[str, ...], tuple[str, ...]] = {}
     physical_field_paths: dict[tuple[str, ...], tuple[str, ...]] = {}
     emitted_targets: dict[str, tuple[str, ...]] = {}
     emitted_nodes: set[tuple[str, ...]] = set()
+    emitted_children: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
     scope_tokens: dict[tuple[str, ...], tuple[object, ...]] = {}
+
+    def add_emitted(path: tuple[str, ...]) -> None:
+        if path in emitted_nodes:
+            return
+        if path:
+            add_emitted(path[:-1])
+            emitted_children.setdefault(path[:-1], []).append(path)
+        emitted_nodes.add(path)
+
+    def enumerate_all(path: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
+        children = emitted_children.get(path, ())
+        yield from children
+        for child in children:
+            yield from enumerate_all(child)
+
+    def find_reference(source: tuple[str, ...], reference: tuple[str, ...]) -> tuple[str, ...] | None:
+        def name(path: tuple[str, ...]) -> str:
+            return path[-1] if path else model_name
+
+        def candidates() -> Iterator[tuple[str, ...]]:
+            if len(reference) == 1 and reference[0] == name(source):
+                yield source
+            yield from enumerate_all(source)
+            skip = source
+            while skip:
+                parent = skip[:-1]
+                children = emitted_children.get(parent, ())
+                yield from children
+                for child in children:
+                    if child != skip:
+                        yield from enumerate_all(child)
+                skip = parent
+            yield ()
+
+        for candidate in candidates():
+            if name(candidate) == reference[0]:
+                target = candidate + reference[1:]
+                if target in emitted_nodes:
+                    return target
+        return None
+
+    def safe_reference(
+        source: tuple[str, ...], target: tuple[str, ...], preferred: tuple[str, ...], context: str,
+    ) -> tuple[str, ...]:
+        # A model-qualified path can itself be shadowed by a same-named Block.
+        # Preserve normal output; only explore alternatives for this collision.
+        if preferred[0] != model_name or not any(
+            path and path[-len(preferred):] == preferred for path in emitted_nodes
+        ):
+            return preferred
+        options = [preferred, (model_name,) + target]
+        options.extend(target[index:] for index in range(len(target)))
+        for option in options:
+            if find_reference(source, option) == target:
+                return option
+        raise ValueError(
+            f"{context} reference is ambiguous in DataModel {model_name!r}; "
+            "rename the DataModel or the conflicting nested element"
+        )
 
     def collect(
         node: EvaluationResult | ResultMember,
@@ -3886,7 +4466,7 @@ def _apply_peach_result_paths(
     ) -> None:
         if emitted_path is None:
             emitted_path = path
-        emitted_nodes.add(emitted_path)
+        add_emitted(emitted_path)
         node_paths.update((path, reference_path))
         if isinstance(node, SchemaResult):
             scope_tokens[reference_path] = node._computed_scope_tokens
@@ -3934,7 +4514,10 @@ def _apply_peach_result_paths(
                     # Optional adds a Choice child without changing the DSL path.
                     element_path += (_optional_element_name(path[-1], node.element),)
                 collect(node.element, path, False, reference_path, compute_scope, element_path)
+            if node.optional:
+                add_emitted(emitted_path + (_optional_empty_name(node.element),))
         elif isinstance(node, OptionalResult):
+            optional_fields.append((node, emitted_path))
             element_name = _optional_element_name(path[-1], node.element)
             collect(
                 node.element,
@@ -3944,6 +4527,8 @@ def _apply_peach_result_paths(
                 emitted_path=emitted_path + (element_name,),
             )
         elif isinstance(node, FieldResult):
+            if node.path is not None:
+                field_aliases[node.path] = emitted_path
             physical_field_paths[reference_path] = emitted_path
             field_paths.setdefault(reference_path, []).append(node.definition)
             field_paths.setdefault(path, []).append(node.definition)
@@ -3973,6 +4558,30 @@ def _apply_peach_result_paths(
             for candidate in emitted_nodes
         )
     }
+    optional_sources: dict[int, str] = {}
+    for optional, optional_path in optional_fields:
+        source, _ = _peach_optional_condition(
+            optional.condition, optional_path[:-1], optional.path, optional.source_path,
+        )
+        if source is None:
+            continue
+        target = field_aliases.get(source, physical_field_paths.get(tuple(source.split("."))))
+        if target is None:
+            raise ValueError(f"Optional {'.'.join(optional_path)!r} cannot resolve source {source!r}")
+        # Custom Optional starts lookup at its parent rather than at itself.
+        # Verify every candidate so sibling and model-name shadows cannot
+        # silently bind the condition to a different field.
+        options = [tuple(source.split(".")), target, (model_name,) + target]
+        options.extend(target[index:] for index in range(len(target)))
+        for option in options:
+            if find_reference(optional_path[:-1], option) == target:
+                optional_sources[id(optional)] = _peach_path(option)
+                break
+        else:
+            raise ValueError(
+                f"Optional {'.'.join(optional_path)!r} source reference is ambiguous "
+                f"in DataModel {model_name!r}; rename the DataModel or the conflicting nested element"
+            )
     computed_paths: dict[tuple[str, ...], tuple[tuple[str, ...], ...]] = {}
     for computed_value, field_path, argument_scope in computed_fields:
         resolved: list[tuple[str, ...]] = []
@@ -4001,14 +4610,20 @@ def _apply_peach_result_paths(
                 argument_path, physical_paths.get(argument_path, argument_path)
             ))
         ancestor = _common_path_prefix(tuple(resolved))
+        physical_arguments = tuple(resolved)
         if ancestor and any(
             candidate != ancestor and candidate[-len(ancestor):] == ancestor
             for candidate in emitted_nodes
         ):
             resolved = [(model_name,) + path for path in resolved]
+        preferred = _common_path_prefix(tuple(resolved)) or (model_name,)
+        reference = safe_reference(field_path, ancestor, preferred, "computed")
+        if reference != preferred:
+            resolved = [reference + path[len(ancestor):] for path in physical_arguments]
         computed_paths[field_path] = tuple(resolved)
     for source_path, entries in tuple(relations.items()):
-        for _relation_type, target, _attributes, definition in entries:
+        resolved_entries: list[PeachRelation] = []
+        for relation_type, target, attributes, definition in entries:
             target_parts = tuple(target.split("."))
             alternative_root = next(
                 (
@@ -4021,8 +4636,10 @@ def _apply_peach_result_paths(
                 alternative_root is not None
                 and source_path[: len(alternative_root)] != alternative_root
             ):
-                candidates = field_paths.get(alternative_root + source_path, ())
+                physical_source_path = alternative_root + source_path
+                candidates = field_paths.get(physical_source_path, ())
             else:
+                physical_source_path = source_path
                 candidates = field_paths.get(source_path, ())
             if not candidates:
                 raise ValueError(
@@ -4036,16 +4653,19 @@ def _apply_peach_result_paths(
                     f"cannot resolve relation source field {'.'.join(source_path)!r}: "
                     "a different field has the same path"
                 )
-        relations[source_path] = [
-            (
+            if target in qualified_targets:
+                physical_source = physical_field_paths.get(physical_source_path, physical_source_path)
+                reference = _peach_path(safe_reference(
+                    physical_source, emitted_targets[target], tuple(qualified_targets[target].split(".")), "relation",
+                ))
+                attributes = MappingProxyType({**attributes, "of": reference})
+            resolved_entries.append((
                 relation_type, paths.get(target, target),
-                MappingProxyType({**attributes, "of": qualified_targets[target]})
-                if target in qualified_targets else attributes,
+                attributes,
                 definition,
-            )
-            for relation_type, target, attributes, definition in entries
-        ]
-    return MappingProxyType(computed_paths)
+            ))
+        relations[source_path] = resolved_entries
+    return MappingProxyType(computed_paths), MappingProxyType(optional_sources)
 
 
 def _collect_peach_array_relations(
@@ -4149,6 +4769,20 @@ def _collect_peach_length_relation(
         return
     if relation_type == "size" and length_type is not None and length_type.lower() == "bits":
         relation_attributes = MappingProxyType({**relation_attributes, "lengthType": "bits"})
+    maximum = (
+        2147483647 if relation_type == "count" else
+        9223372036854775807 if relation_attributes.get("lengthType") == "bits" else
+        1152921504606846975
+    )
+    forward = relation_attributes.get("expressionGet", relation_type)
+    relation_attributes = MappingProxyType({
+        **relation_attributes,
+        "expressionGet": (
+            f"(lambda length: length if 0 <= length <= {maximum} else "
+            f"(_ for _ in ()).throw(ValueError('relation {relation_type} must be between 0 and {maximum}')))"
+            f"({forward})"
+        ),
+    })
     source_path = _resolve_peach_reference(
         container_path if source_container_path is None else source_container_path,
         reference,
@@ -4326,6 +4960,7 @@ def _append_peach_field(
     occurrence: Mapping[str, str],
 ) -> None:
     attributes = {"name": name, **occurrence, **field.peach_attributes}
+    _record_fixed_node(name, field, path)
     tag = _peach_field_tag(field)
 
     if tag == "Number":
@@ -4352,15 +4987,26 @@ def _append_peach_field(
             attributes["endian"] = field.endian
     elif tag == "String":
         attributes.setdefault("type", "utf8")
-        if attributes.get("lengthType", "bytes").lower() not in ("bytes", "bits", "chars"):
+        units = attributes.get("lengthType", "bytes").lower()
+        if units not in ("bytes", "bits", "chars"):
             raise ValueError(f"String {name!r} length_type must be bytes, bits or chars")
+        if isinstance(field.length, int):
+            kind = "DecimalString" if field.kind == "decimal_string" else "String"
+            if units == "bits" and field.length % 8:
+                raise ValueError(f"{kind} {name!r} bit length must be divisible by 8")
+            capacity = field.length // 8 if units == "bits" else field.length
+            width = {"utf16": 2, "utf16be": 2, "utf32": 4, "utf32be": 4}.get(attributes["type"], 1)
+            if units != "chars" and capacity % width:
+                raise ValueError(f"{kind} {name!r} encoded byte length must be divisible by {width}")
+            if capacity == 0 and attributes.get("nullTerminated", "false").lower() == "true":
+                raise ValueError(f"{kind} {name!r} zero length cannot contain a null terminator")
 
     if tag in ("Blob", "String") and "lengthType" in attributes:
         # Peach's length-unit parser is case sensitive.
         attributes["lengthType"] = attributes["lengthType"].lower()
 
     if isinstance(field.length, int) and tag in ("Blob", "String"):
-        attributes["length"] = str(field.length)
+        attributes["length"] = _peach_static_length(field.length, attributes.get("lengthType", "bytes"), name)
 
     if field.fixed is not None:
         if tag == "Blob" and isinstance(field.fixed.value, bytes):
@@ -4753,6 +5399,8 @@ def _computed_function_node(function: Callable[..., ScalarValue]) -> ast.Functio
             f"cannot read source for computed function {function.__qualname__}"
         ) from error
     module = ast.parse(source)
+    if inspect.iscoroutinefunction(function):
+        raise ValueError("computed: Peach's IronPython does not support async functions")
     node = next(
         (
             item
@@ -4774,6 +5422,7 @@ def _computed_function_node(function: Callable[..., ScalarValue]) -> ast.Functio
     runtime_node = copy.deepcopy(node)
     _ComputedAnnotationRemover().visit(runtime_node)
     runtime_node.decorator_list = []
+    _validate_peach_python_syntax(runtime_node, "computed")
     runtime_module = ast.fix_missing_locations(ast.Module(body=[runtime_node], type_ignores=[]))
     runtime_code = compile(runtime_module, "<computed-dependencies>", "exec")
     runtime_names = set(_computed_global_names(runtime_code))
@@ -5041,6 +5690,13 @@ def _peach_field_tag(field: FieldResult) -> str:
     return field.kind
 
 
+def _peach_static_length(length: int, units: str, name: str) -> str:
+    maximum = 9223372036854775807 if units.lower() in ("bits", "chars") else 1152921504606846975
+    if length > maximum:
+        raise ValueError(f"field {name!r} length exceeds Peach's maximum {maximum} {units}")
+    return str(length)
+
+
 def _validate_integer_default(field: FieldResult, width: int, signed: bool) -> None:
     value = field.fixed.value if field.fixed is not None else field.value
     if not isinstance(value, int) or field.peach_attributes.get("valueType", "string").lower() != "string":
@@ -5079,7 +5735,7 @@ def _append_peach_schema(
 
     attributes = {"name": name, **occurrence}
     if isinstance(result.length, int):
-        attributes["length"] = str(result.length)
+        attributes["length"] = _peach_static_length(result.length, "bytes", result.name)
     element = ET.SubElement(parent, "Block", attributes)
     _append_peach_schema_fields(element, result, path + (name,), relations)
 
@@ -5108,6 +5764,7 @@ def _append_peach_flags(
     for flag_name, member in result.fields.items():
         if not isinstance(member, FieldResult):
             raise TypeError(f"Flags member {flag_name} is not a field")
+        _record_fixed_node(flag_name, member, path + (name,))
         assert isinstance(member.length, int)
         _validate_integer_default(member, member.length, False)
         attributes = {
@@ -5175,6 +5832,7 @@ def _append_peach_array(
     relations: PeachRelations,
     occurrence: Mapping[str, str],
 ) -> None:
+    _record_node_shape(name, array, path)
     if array.optional:
         choice = ET.SubElement(parent, "Choice", {"name": name, **occurrence})
         if isinstance(array.element, UnionResult):
@@ -5206,6 +5864,9 @@ def _append_peach_array(
         attributes["maxOccurs"] = str(array.count.max_occurs)
     elif isinstance(array.count, int):
         attributes["occurs"] = str(array.count)
+    else:
+        attributes["minOccurs"] = "0"
+        attributes["maxOccurs"] = "-1"
     if isinstance(array.element, ArrayResult):
         block = ET.SubElement(parent, "Block", {"name": name, **attributes})
         _append_peach_array(
@@ -5249,7 +5910,8 @@ def _append_peach_optional(
     occurrence: Mapping[str, str],
 ) -> None:
     source, expression = _peach_optional_condition(
-        optional.condition, path, optional.path, optional.source_path
+        optional.condition, path, optional.path,
+        _OPTIONAL_SOURCES.get().get(id(optional), optional.source_path)
     )
     attributes = {"name": name, "expression": expression, **occurrence}
     if source is not None:
@@ -5351,16 +6013,6 @@ def _peach_optional_condition(
             )
         else:
             source = _peach_path(_resolve_peach_reference(container_path, references[0]))
-        if references[0]._scope_up and result_path is not None and source_path is not None:
-            # Peach's name search can select a same-named sibling of an inner
-            # Block. Anchor outer-scope references at the Optional itself so
-            # they also survive DataModel reuse under a different name.
-            origin = tuple(result_path.split("."))
-            target = tuple(source_path.split("."))
-            common = 0
-            while common < min(len(origin), len(target)) and origin[common] == target[common]:
-                common += 1
-            source = "../" * (len(origin) - common) + ".".join(target[common:])
     return source, expression
 
 
@@ -5431,16 +6083,24 @@ def _validate_string_default(
     if units == "chars":
         # .NET String.Length counts UTF-16 code units, including surrogate pairs.
         actual = len(value.encode("utf-16-le")) // 2
-        terminator_width = pad_width = 1
     else:
         actual = len(_encode_peach_string(value, codec))
-        terminator_width = len(_encode_peach_string("\0", codec))
-        pad_width = len(_encode_peach_string(attributes.get("padCharacter", "\0"), codec))
     terminated = attributes.get("nullTerminated", "false").lower() == "true"
     if actual > length or (actual == length and terminated and not value.endswith("\0")):
         raise ValueError(f"String {name!r} value does not fit its declared length")
     if actual < length:
+        terminator_width = 1 if units == "chars" else len(_encode_peach_string("\0", codec))
         remaining = length - actual - (terminator_width if terminated else 0)
+        pad_width = 1
+        # Byte padding computes the encoded pad width even when only a
+        # terminator is added. Character padding only encodes actual padding.
+        if units != "chars" or remaining > 0:
+            try:
+                encoded_pad = _encode_peach_string(attributes.get("padCharacter", "\0"), codec)
+            except UnicodeEncodeError as error:
+                raise ValueError(f"String {name!r} padding character cannot be encoded as {codec}") from error
+            if units != "chars":
+                pad_width = len(encoded_pad)
         if remaining < 0 or remaining % pad_width:
             raise ValueError(f"String {name!r} padding cannot satisfy its declared length")
         if units != "chars" and codec == "utf7":
@@ -5988,6 +6648,7 @@ def _evaluate_field(
                 f"bool is not a supported Peach DSL scalar value: {name}; use 0 or 1"
             )
         constant = override
+    _validate_fixed_token(constant, field.options, name)
     raw_value = field.options.get("value")
     if isinstance(raw_value, bool) or isinstance(override, bool):
         raise TypeError(

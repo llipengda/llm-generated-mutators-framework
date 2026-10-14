@@ -28,7 +28,7 @@ then
     exit 1
 fi
 if ! command -v xmllint &> /dev/null; then
-    echo "xmllint could not be found, please install libxml2 first."
+    echo "xmllint could not be found, please install libxml2 or libxml2-utils first."
     exit 1
 fi
 if [ "$SDK_VARIANT" = "legacy" ]; then

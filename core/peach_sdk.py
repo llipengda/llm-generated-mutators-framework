@@ -14,6 +14,19 @@ from xml.sax.saxutils import escape
 
 PeachSdk = Literal["legacy", "modern"]
 
+_CSHARP_LANGUAGE_VERSIONS: dict[PeachSdk, str] = {
+    "legacy": "7.2",  # Supported by Mono mcs; target API remains .NET Framework 4.5.
+    "modern": "12.0",  # Matches the generated project's net8.0 target.
+}
+
+# Step 8 copies generated fixer DLLs into the SDK. Mutator builds and their
+# capability probe depend only on these stable SDK assemblies.
+MUTATOR_SDK_REFERENCE_NAMES = frozenset({
+    "BouncyCastle.Crypto.dll", "NLog.dll", "Newtonsoft.Json.dll",
+    "Peach.Core.dll", "Peach.LLM.dll", "Peach.Pro.dll",
+    "Peach.LLM.Validations.Common.dll", "nunit.framework.dll",
+})
+
 
 def peach_sdk_from_environment() -> PeachSdk:
     value = os.environ.get("PEACH_SDK", "legacy").strip().lower()
@@ -40,6 +53,22 @@ def peach_sdk_dir(sdk: PeachSdk | None = None) -> Path:
 def peach_image(sdk: PeachSdk | None = None) -> str:
     selected = sdk or peach_sdk_from_environment()
     return f"pdli/llm-peach:{'modern-sdk' if selected == 'modern' else 'sdk'}"
+
+
+def csharp_language_version(sdk: PeachSdk | None = None) -> str:
+    """Return the language version used to compile generated protocol code."""
+    return _CSHARP_LANGUAGE_VERSIONS[sdk or peach_sdk_from_environment()]
+
+
+def csharp_language_guidance(sdk: PeachSdk | None = None) -> str:
+    """Keep agent language and API guidance aligned with the selected compiler."""
+    selected = sdk or peach_sdk_from_environment()
+    compiler = "Mono mcs" if selected == "legacy" else "the .NET SDK compiler"
+    runtime = ".NET Framework 4.5" if selected == "legacy" else ".NET 8"
+    return (
+        f"Use C# {csharp_language_version(selected)} features supported by {compiler}. "
+        f"Use only APIs available in {runtime} and the referenced Peach SDK assemblies."
+    )
 
 
 def _sdk_references(sdk_dir: Path) -> list[Path]:
@@ -102,6 +131,7 @@ def compile_csharp(
         command = [
             "mcs",
             "-sdk:4.5",
+            f"-langversion:{csharp_language_version(selected)}",
             "-target:library",
             f"-out:{output_path}",
         ]
@@ -135,6 +165,7 @@ def compile_csharp(
     project_text = f"""<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>{csharp_language_version(selected)}</LangVersion>
     <AssemblyName>{escape(output_path.stem)}</AssemblyName>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <TreatWarningsAsErrors>{warn}</TreatWarningsAsErrors>
@@ -173,6 +204,47 @@ def compile_csharp(
                 result.stderr + f"\nBuild succeeded but {built_dll} was not produced.",
             )
         return result
+
+
+def ensure_mutator_sdk(sdk: PeachSdk | None = None) -> None:
+    """Reject stale SDKs before spending agent calls on structural mutators."""
+    selected = sdk or peach_sdk_from_environment()
+    with tempfile.TemporaryDirectory(prefix="peach-mutator-sdk-check-") as directory:
+        source = Path(directory) / "MutatorSdkProbe.cs"
+        source.write_text(
+            """using Peach.Core.Dom;
+using Peach.LLM.Core;
+using Peach.LLM.Core.Mutators;
+
+public static class MutatorSdkProbe
+{
+    public static bool Supports(DataElement obj)
+    {
+        return obj.MatchesPath("Root.items") &&
+            (LLMAddMutator.CanApply(obj, "empty") ||
+             LLMRemoveMutator.CanApply(obj, "empty") ||
+             LLMRepeatMutator.CanApply(obj));
+    }
+}
+""",
+            encoding="utf-8",
+        )
+        result = compile_csharp(
+            [source], Path(directory) / "MutatorSdkProbe.dll", sdk=selected,
+            excluded_reference_names=[
+                path.name for path in peach_sdk_dir(selected).glob("*.dll")
+                if path.name not in MUTATOR_SDK_REFERENCE_NAMES
+            ],
+        )
+    if result.returncode != 0:
+        details = (result.stdout + result.stderr).strip()
+        raise RuntimeError(
+            f"The selected {selected} Peach SDK cannot compile structural mutators. "
+            "Update Peach.LLM.dll to include LLMAddMutator, LLMRemoveMutator, "
+            "LLMRepeatMutator and MatchesPath, and use matching runtime assemblies. "
+            "The maintained llm-peach SDK builds target .NET 8/.NET 10; "
+            "select --modern-sdk when using those builds.\n" + details
+        )
 
 
 def _source_files(paths: list[str], directories: list[str]) -> list[Path]:

@@ -36,7 +36,7 @@ uv run python -m core.datamodel_dsl mqtt --check
 ./tests/peach_fixer/run_peach_fixer_test.sh mqtt seeds/mqtt
 
 # Generate Peach Docker images for fuzzing
-./peach_gen.sh mqtt [--udp] [--packets] [--sleep]
+./peach_gen.sh mqtt [--modern-sdk]
 ```
 
 No linter or type-checker is configured. A `.env` file with `OPENAI_API_KEY` is required.
@@ -55,6 +55,7 @@ main.py                  # Peach pipeline CLI entry point (click).
 core/                    # Runtime core: agent, config, state, RAG, tools, UI, logging, and result types.
 peach_dsl/               # Typed declarative DataModel DSL, Pyright validation, compiler, and error mapping.
 core/datamodel_dsl.py    # DSL manifest validation, deterministic root generation, and local compilation CLI.
+core/mutator_codegen.py  # DSL mutator plan, generated partial classes, manifest and scoped compilation.
 docs/peach-dsl.md        # Authoritative DSL language reference for agents and developers.
 pipeline/base.py         # BasePipeline: step orchestration loop, call_agent(), token tracking, state save.
 pipeline/peach.py        # Lightweight PeachPipeline composition root and step ordering.
@@ -69,8 +70,9 @@ setup.sh                 # Prerequisite setup: for peach, pulls Docker SDK image
 2. Combined DSL type-support analysis and DataModel planning, then
    `shared_model.py`, followed by parallel family DSL generation → derived Peach Pit XML
 3. Datamodel validation & DSL fix
-4. Mutator generation (C# classes per packet type, parallelized with ThreadPoolExecutor)
-5. Mutator validation & fix
+4. DSL-driven mutator plan and deterministic `.g.cs` partial generation, followed by
+   LLM `.semantic.cs` implementations and scoped packet compilation (parallel)
+5. Mutator validation and packet-grouped semantic ERROR repair (FAIL report only)
 6. Constraint extraction from RFC
 6.1. Constraint filtering (checks if datamodel already guarantees each constraint)
 7. Fixer generation (chunked, parallelized)
@@ -82,6 +84,9 @@ Generated code lands in `llm/peach/<proto>/` with subdirectories `Mutators/`, `F
 Editable DataModel sources live in `datamodel_dsl/shared_model.py` and
 `datamodel_dsl/family_<id>.py`; `root.py` and `datamodel.xml` are deterministic
 derived artifacts and must not be hand-edited.
+Mutator agents may edit only the packet's `.semantic.cs`. Host-owned `.g.cs`
+and `mutator_manifest.json` define exact interfaces and active sources; see
+`docs/mutator-generation.md`. Missing required methods must fail compilation.
 
 ### Key conventions
 
@@ -106,6 +111,7 @@ The `../llm-peach/` directory is the Peach Fuzzer engine + LLM SDK. The framewor
 | Class | File | Generated code inherits from it |
 |-------|------|-------------------------------|
 | `LLMMutator` | `Mutators/LLMMutator.cs` | Mutators: implement `PerformMutation(obj)` + static `supportedDataElement(obj)` |
+| `LLMAddMutator` / `LLMRemoveMutator` / `LLMRepeatMutator` | `Mutators/LLM*Mutator.cs` | Structural operations; sealed `PerformMutation` inherited by generated partial classes |
 | `LLMFixup` | `Fixups/LLMFixup.cs` | Fixups: implement `fixupImpl()`, hooks into Peach DOM |
 | `CMutatorAttribute` | `Mutators/CMutatorAttribute.cs` | `[Mutator("name")]` attribute on mutator classes |
 
@@ -115,6 +121,7 @@ The `../llm-peach/` directory is the Peach Fuzzer engine + LLM SDK. The framewor
 |--------|---------|
 | `elem.Bytes()` | Convert element value to `byte[]` (handles Number big-endian, String ASCII, BitStream) |
 | `elem.IsIn("name")` | Walk parent chain to check if element is inside a named container |
+| `elem.MatchesPath("Root.items[].value")` | Match the complete rooted DSL path, including array item indices |
 | `elem.SetValue(v)` | Set `MutatedValue`, auto-converts strings to ASCII for non-string types |
 | `num.GetUint8() / GetUint16()` | Read numeric element as uint8/uint16 (with fallback to raw bytes) |
 | `varInt.GetVarInt()` | Decode MQTT variable-byte integer |
@@ -161,7 +168,7 @@ Usage: run_datamodel_test.sh <proto> <seed_dir>
 
 ```
 Usage: run_peach_mutator_test.sh <proto> <seed_dir>
-→ mcs compiles Mutators/*.cs → DLL
+→ core.mutator_codegen compiles only active manifest partial source pairs → DLL
 → mono Peach.LLM.Validations.Mutator.exe datamodel.xml <seed_dir> <proto>_packet_array
 ```
 

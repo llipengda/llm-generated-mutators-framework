@@ -1,252 +1,406 @@
-from core.log import run_logged_task
+from __future__ import annotations
+
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
 from core.agent import build_agent_graph
-from pipeline.peach_steps.common import PeachStepMixin
+from core.agent_types import AgentGraph
+from core.log import run_logged_task
+from core.mutator_codegen import (
+    MutatorPlan,
+    PacketMutatorPlan,
+    build_mutator_plan,
+    compile_packet,
+    load_mutator_plan,
+    packet_for_class,
+    packet_outputs_exist,
+    prepare_packet,
+    set_active_packets,
+)
+from core.peach_sdk import csharp_language_guidance, ensure_mutator_sdk
+from core.tool_result import DotNetBuildData, ToolResult, tool_error, tool_success
 from core.ui import UI, ask_regenerate, ask_select_types, ask_skip_verification
+from pipeline.peach_steps.common import PeachStepMixin
+
+
+_MUTATOR_TOOLS = (
+    "Read_File", "Search_Files", "Write_File", "Apply_Patch", "Search_Class",
+    "RFC_Search", "Build_Mutator_DLL",
+)
+_RESULT_LINE = re.compile(
+    r"^\[(PASS|FAIL|ERROR|SKIP)\](?:\[\d+/\d+\])?\s+(\w+)\s*$",
+    re.MULTILINE,
+)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_COMMAND_FAILURE_PREFIX = "[ERROR] Mutator validator command failed"
+
+
+def _build_packet(plan: MutatorPlan, packet: PacketMutatorPlan) -> ToolResult[DotNetBuildData]:
+    """The same scoped compiler is available to the agent and host."""
+    try:
+        result = compile_packet(plan, packet)
+    except (OSError, ValueError, RuntimeError) as error:
+        return tool_error("mutator_build_unavailable", str(error))
+    if result.returncode != 0:
+        return tool_error(
+            "mutator_build_failed",
+            f"Compilation failed for {packet.packet_type} (exit {result.returncode}).\n"
+            + ((result.stdout or "") + (result.stderr or "")).strip(),
+        )
+    if not packet.output_dll.is_file():
+        return tool_error("output_missing", f"Compiler did not produce {packet.output_dll}.")
+    return tool_success(
+        "mutator_build_succeeded",
+        f"Compiled {packet.output_dll}.",
+        DotNetBuildData(
+            source=str(packet.semantic_file), output=str(packet.output_dll), source_count=2,
+        ),
+    )
+
+
+def _owned_compiler_error(packet: PacketMutatorPlan, diagnostics: str) -> bool:
+    """A missing required semantic method is reported at its generated caller."""
+    error_lines = [
+        line for line in diagnostics.splitlines()
+        if re.search(r"\berror\s+(?:[A-Z]+\d+|:)", line)
+    ]
+    if not error_lines:
+        return False
+    hook_names = {hook.name for spec in packet.mutators for hook in spec.hooks}
+    reference_errors = {"CS0006", "CS0009", "CS0012", "CS1704", "CS1705"}
+    for line in error_lines:
+        if any(code in line for code in reference_errors):
+            return False
+        if packet.semantic_file.name in line and re.search(r"\berror CS\d+", line):
+            continue
+        if (
+            packet.generated_file.name in line and "error CS0103" in line
+            and any(name in line for name in hook_names)
+        ):
+            continue
+        return False
+    return True
+
+
+def _semantic_tasks(packet: PacketMutatorPlan) -> str:
+    tasks: list[str] = []
+    for spec in packet.mutators:
+        if not spec.hooks:
+            continue
+        hooks = "\n".join(f"    {hook.signature}" for hook in spec.hooks)
+        tasks.append(
+            f"Class: {spec.class_name}\nNamespace: {spec.namespace}\n"
+            f"Operation: {spec.operation}\nTarget path: {spec.path}\n"
+            f"DSL path: {spec.dsl_path}\nRuntime type: {spec.runtime_type}\n"
+            f"Field description: {spec.description}\n"
+            f"Required methods (implement exactly these signatures):\n{hooks}"
+        )
+    return "\n\n".join(tasks)
 
 
 class MutatorSteps(PeachStepMixin):
+    def _mutator_plan(self, *, active: bool = False) -> MutatorPlan:
+        packet_types = self.state.get("packet_types") or []
+        if active:
+            output_dir = _PROJECT_ROOT / "llm" / "peach" / self.protocol_lower / "Mutators"
+            plan = load_mutator_plan(output_dir)
+            packet_types = [packet.packet_type for packet in plan.packets]
+            unknown = set(packet_types).difference(self.state.get("packet_types") or [])
+            if unknown:
+                raise RuntimeError(
+                    "Active mutator packets are absent from pipeline state: "
+                    + ", ".join(sorted(unknown)) + ". Run Step 4 again."
+                )
+            return plan
+        return build_mutator_plan(
+            self.protocol_lower, packet_types=packet_types,
+        )
+
+    def _mutator_agent(self, plan: MutatorPlan, packet: PacketMutatorPlan) -> AgentGraph:
+        read_files = [
+            packet.generated_file, packet.semantic_file,
+            _PROJECT_ROOT / "docs" / "llm-peach-sdk.md",
+            _PROJECT_ROOT / "docs" / "peach-dsl.md",
+            *sorted(plan.dsl_dir.glob("*.py")),
+            *sorted((plan.output_dir.parent / "DataElements").glob("*.cs")),
+        ]
+        return build_agent_graph(
+            retriever=self.retriever,
+            config=self.agent_config,
+            tool_names=_MUTATOR_TOOLS,
+            read_files=read_files,
+            write_files=(packet.semantic_file,),
+            mutator_build=lambda: _build_packet(plan, packet),
+        )
+
+    def _mutator_prompt(self, packet: PacketMutatorPlan) -> str:
+        return f"""Implement the required protocol-aware mutation methods for the
+{self.protocol_lower} {packet.packet_type} packet in {packet.semantic_file}.
+
+The host has already planned every field, operation, class, exact rooted path,
+constructor and static supportedDataElement method from the validated DSL.
+Read {packet.generated_file} as the immutable interface contract. Write only
+{packet.semantic_file}, using partial classes in the exact supplied namespaces.
+Add, Remove and Repeat already inherit the SDK's structural mutator bases;
+their PerformMutation implementations are sealed. Do not redeclare their
+constructors, attributes, selectors, base classes or PerformMutation methods.
+Do not add or remove mutator classes, invent fields, or change the DSL.
+
+{_semantic_tasks(packet)}
+
+For each MutateCore, cover all applicable field-local semantic categories:
+A. Canonical form
+B. Boundaries
+C. Equivalence-class alternatives
+D. Allowed bitfield/enum/range
+E. Encoding-shape variant
+F. Padding/alignment
+G. prefix/suffix
+H. Random valid mix
+Use randomized shallow and deep perturbations for long-term diversity. Keep
+mutations local to the planned target. Explain in a short code comment when a
+category cannot apply to that field. Helpers belong in this semantic file.
+Do not leave required methods empty, stubbed, or throwing NotImplementedException.
+Use Next() from LLMMutator for randomness. Preserve the structural bases' default
+presence-source policy unless the plan explicitly requires a synchronization hook.
+
+{csharp_language_guidance()}
+Read docs/llm-peach-sdk.md and the relevant shared_model.py/family modules with
+Read_File. Treat the DSL as the DataModel source of truth. Use Search_Class for
+SDK APIs and RFC_Search for protocol semantics. Write_File creates the semantic
+file; Apply_Patch makes localized repairs. Call Build_Mutator_DLL with no arguments
+until both partial source files compile together successfully. You must implement
+ALL required methods before finishing. The host independently checks compilation.
+"""
+
+    def _compile_mutator_with_repairs(
+        self, plan: MutatorPlan, packet: PacketMutatorPlan,
+        *, step_title: str = "Step 4",
+    ) -> None:
+        for attempt in range(4):
+            result = _build_packet(plan, packet)
+            if result["ok"]:
+                return
+            diagnostics = result["message"]
+            if (
+                result["code"] != "mutator_build_failed"
+                or not packet.semantic_file.is_file()
+                or not _owned_compiler_error(packet, diagnostics)
+            ):
+                raise RuntimeError(
+                    f"Mutator generation for {packet.packet_type} failed outside the "
+                    f"semantic implementation. Fix the code generator or SDK.\n{diagnostics}"
+                )
+            if attempt == 3:
+                raise RuntimeError(
+                    f"Mutator compilation for {packet.packet_type} failed after "
+                    f"three semantic repair attempts.\n{diagnostics}"
+                )
+            self.call_agent(
+                self._mutator_prompt(packet)
+                + f"\nHost compiler diagnostics requiring repair:\n{diagnostics}",
+                f"{step_title}: Compile repair {packet.packet_type} ({attempt + 1})",
+                agent_graph=self._mutator_agent(plan, packet),
+            )
+
     def step_4_mutator_generation(self):
         UI.title("Step 4: Mutator Generation")
-        packet_types = self.state.get("packet_types") or []
-        if not packet_types:
-            UI.warn(
-                "Warning: packet_types is empty. Step 4 will not generate any mutators."
-            )
+        if not self.state.get("packet_types"):
+            UI.warn("packet_types is empty. Step 4 will not generate mutators.")
             return
-
-        import os
-
-        out_dir = f"./llm/peach/{self.protocol_lower}/Mutators/out"
-        types_to_generate: list[str] = []
-        for pkt_type in packet_types:
-            dll_name = (
-                f"{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll"
-            )
-            dll_path = os.path.join(out_dir, dll_name)
-            if os.path.exists(dll_path):
-                if not ask_regenerate(
-                    f"mutator DLL for {pkt_type}", self.protocol_lower
-                ):
-                    UI.dim(f"Skipping mutator generation for {pkt_type}.")
-                    continue
-            types_to_generate.append(pkt_type)
-
-        if not types_to_generate:
-            UI.success("All mutator DLLs already exist and were skipped.")
+        ensure_mutator_sdk()
+        plan = self._mutator_plan()
+        selected: list[str] = []
+        existing_packets: set[str] = set()
+        for packet in plan.packets:
+            exists = packet_outputs_exist(plan, packet)
+            if exists:
+                existing_packets.add(packet.packet_type)
+            if exists and not ask_regenerate(
+                f"mutators for {packet.packet_type}", self.protocol_lower,
+            ):
+                UI.dim(f"Skipping existing mutators for {packet.packet_type}.")
+                continue
+            selected.append(packet.packet_type)
+        if not selected:
+            set_active_packets(plan, [packet.packet_type for packet in plan.packets if packet.packet_type in existing_packets])
+            UI.success("All existing mutators were skipped.")
             return
-
-        types_to_generate = ask_select_types(types_to_generate, self.protocol_lower)
-        if not types_to_generate:
+        selected = ask_select_types(selected, self.protocol_lower)
+        active_packets = existing_packets.union(selected)
+        set_active_packets(plan, [packet.packet_type for packet in plan.packets if packet.packet_type in active_packets])
+        if not selected:
             UI.warn("No packet types selected. Skipping mutator generation.")
             return
 
-        def run_one(pkt_type: str, index: int):
-            mutator_prompt = f"""
-            List ALL fields for the {self.protocol_lower} {pkt_type} packet.
+        # Host-owned sources and manifest entries are prepared before parallel agents.
+        packets = [packet for packet in plan.packets if packet.packet_type in selected]
+        for packet in packets:
+            prepare_packet(plan, packet)
 
-            For EACH field <field_name> in the {self.protocol_lower} {pkt_type} packet:
-            1. Fixed value? If the field is fixed per the spec, output exactly: not mutable and stop. Do not generate any mutator functions.
-            2. Otherwise (the field is mutable):
-            a. If the field is optional, implement:
-            class {self.protocol_upper}{pkt_type.capitalize()}Add<field_name.capitalize()>
-            class {self.protocol_upper}{pkt_type.capitalize()}Remove<field_name.capitalize()>
-            b. If the field may appear multiple times, also implement:
-            class {self.protocol_upper}{pkt_type.capitalize()}Repeat<field_name.capitalize()>
-            c. Mutate. Design semantic-aware mutators for this field by covering the following field-local semantic categories:
-                A. Canonical form
-                B. Boundaries
-                C. Equivalence-class alternatives
-                D. Allowed bitfield/enum/range
-                E. Encoding-shape variant
-                F. Padding/alignment
-                G. prefix/suffix
-                H. Random valid mix
-            Add randomized perturbations mixing shallow and deep changes to preserve long-term diversity and avoid collapse into a single pattern.
-            class {self.protocol_upper}{pkt_type.capitalize()}Mutate<field_name.capitalize()>
-
-            Write in C# using the llm-peach sdk in namespace Peach.LLM.Generated.Mutators.{self.protocol_upper}.{pkt_type.capitalize()}. Use C# 5.0.
-            ```csharp
-            using System;
-            using System.ComponentModel;
-            using Peach.Core;
-            using Peach.Core.Dom;
-            using Peach.LLM.Core;
-            using Peach.LLM.Core.Mutators;
-            
-            [Mutator("<mutator_class_name>")]
-            [Description("Description of the mutator")]
-            public class <mutator_class_name> : LLMMutator
-            {{
-                public <mutator_class_name>(DataElement obj) : base(obj) {{ }}
-                public new static bool supportedDataElement(DataElement obj) 
-                {{
-                    // Return true if this mutator supports the given DataElement based on its name, type, or other characteristics. This is used to determine which mutators can be applied to which fields.
-                    // Hint: A data element with maxOccurs and/or minOccurs is type `Array`.
-                    // Hint: obj.IsIn(...) can be used to check if the DataElement is part of a specific packet type or field.
-                }}
-
-                protected override void PerformMutation(DataElement obj)
-                {{
-                    // Implement the mutation logic here
-                    // Hint: obj.Bytes() gives you the raw bytes of the field.
-                    // Hint: obj.MutatedValue = new Variant(...) can be used to set the mutated value.
-                    // Hint: obj.parent.Remove(obj) can be used to remove the field.
-                }}
-            }}
-            ```
-
-            **You must not stop until you have generated mutators for ALL fields of the {self.protocol_lower} {pkt_type} packet, and built the DLL successfully without syntax errors.**
-
-            Use "Read_File" to list "./llm/peach/{self.protocol_lower}/datamodel_dsl" and read shared_model.py plus the family module that defines this packet. Treat those DSL files as the DataModel source of truth; do not edit or rely on derived datamodel.xml.
-            Use the "Read_File" tool to read the llm-peach generated-code API reference in "./docs/llm-peach-sdk.md".
-            Use the "Search_Class" tool to check existing classes and class members in the SDK to understand how to implement the mutators.
-            Use the "Write_File" tool to save the generated mutator code to "./llm/peach/{self.protocol_lower}/Mutators/{self.protocol_upper}{pkt_type.capitalize()}Mutators.cs".
-            Use the "Build_DotNet_DLL" tool to compile the generated mutators into a DLL "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}{pkt_type.capitalize()}Mutators.dll" and verify there are no syntax errors.
-            Use the "RFC_Search" tool to look up protocol details in the RFC as needed.
-            """
-
-            agent = build_agent_graph(
-                retriever=self.retriever, config=self.agent_config
-            )
-
-            self.call_agent(
-                mutator_prompt,
-                f"Step 4.{index + 1}: Mutator Generation for {pkt_type}",
-                agent_graph=agent,
-            )
-
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        def run_one(packet: PacketMutatorPlan, index: int) -> None:
+            if any(spec.hooks for spec in packet.mutators):
+                self.call_agent(
+                    self._mutator_prompt(packet),
+                    f"Step 4.{index + 1}: Mutator Generation for {packet.packet_type}",
+                    agent_graph=self._mutator_agent(plan, packet),
+                )
+            self._compile_mutator_with_repairs(plan, packet)
 
         with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(run_logged_task, f"Mutator {pkt_type}", run_one, pkt_type, idx) for idx, pkt_type in enumerate(types_to_generate)]
+            futures = [
+                executor.submit(run_logged_task, f"Mutator {packet.packet_type}", run_one, packet, index)
+                for index, packet in enumerate(packets)
+            ]
             for future in as_completed(futures):
                 future.result()
 
     def step_5_mutator_validation_and_fix(self):
         UI.title("Step 5: Mutator Validation & Fix")
+        if not self.state.get("packet_types"):
+            UI.warn("packet_types is empty. Step 5 has no mutators to validate.")
+            return
+        ensure_mutator_sdk()
+        plan = self._mutator_plan(active=True)
+        results_dir = plan.output_dir.parent / "mutator_test_logs"
+        error_dir = results_dir / "error"
+        results_path = results_dir / "results.txt"
+        skip_first = [ask_skip_verification("Mutator Validation")]
+        affected_packets: set[str] = set()
 
-        import os
-        import glob
-
-        skip_first = ask_skip_verification("Mutator Validation")
-        _skip_this_verify = [skip_first]  # mutable, flipped after first use
-        _failing_mutators: list[str] = []  # names of currently-failing mutators
+        def error_groups() -> dict[str, list[tuple[str, str]]]:
+            grouped: dict[str, list[tuple[str, str]]] = {}
+            for log_file in sorted(error_dir.glob("*.log")):
+                mutator_name = log_file.stem
+                try:
+                    packet = packet_for_class(plan, mutator_name)
+                except (KeyError, ValueError) as error:
+                    raise RuntimeError(f"Cannot route mutator error log {log_file}: {error}") from error
+                spec = next(spec for spec in packet.mutators if spec.class_name == mutator_name)
+                output = log_file.read_text(encoding="utf-8")
+                # Structural templates have no semantic implementation to repair.
+                # For semantic classes, exceptions inside a helper may omit the
+                # MutateCore name, but their generated selector/constructor errors
+                # must never be handed to the LLM.
+                generated_frame = re.search(
+                    re.escape(spec.class_name) + r"\.(?:supportedDataElement|\.ctor)\s*\(",
+                    output,
+                )
+                if not spec.hooks or generated_frame:
+                    raise RuntimeError(
+                        f"{mutator_name} failed in generated code or the structural SDK. "
+                        f"Fix the generator/SDK rather than editing partial sources.\n{output}"
+                    )
+                grouped.setdefault(packet.packet_type, []).append((mutator_name, output))
+            return grouped
 
         def fix_fn(output: str, hint: str | None) -> None:
-            error_log_dir = (
-                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
-            )
-            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
+            groups = error_groups()
+            if not groups:
+                raise RuntimeError("Mutator validation failed without routable ERROR logs.\n" + output)
+            affected_packets.clear()
+            affected_packets.update(groups)
 
-            if not error_logs:
-                UI.success("No mutator errors to fix.")
-                return
+            def fix_one(packet: PacketMutatorPlan) -> None:
+                errors = "\n\n".join(
+                    f"Mutator {name}:\n{log}" for name, log in groups[packet.packet_type]
+                )
+                prompt = self._mutator_prompt(packet) + f"""
+Repair runtime ERRORs in the semantic implementation for this packet. These
+classes share {packet.semantic_file}; repair all reported errors together.
+The generated file and SDK are read-only. Use Apply_Patch for localized fixes.
+Re-crack FAILs can be intentional fuzz outcomes; this task repairs exceptions.
 
-            UI.warn(
-                f"Found {len(error_logs)} mutators with ERRORs. Attempting to fix..."
-            )
+{errors}
 
-            def fix_one(log_file: str) -> None:
-                with open(log_file, "r", encoding="utf-8") as f:
-                    test_output = f.read()
-
-                mutator_name = os.path.basename(log_file).replace(".log", "")
-
-                prompt = f"""
-        We ran a verification test against the generated mutators. The test failed with an ERROR for the mutator `{mutator_name}`.
-        Here is the test error output for this mutator:
-
-        ```
-        {test_output}
-        ```
-
-        The test logs indicate there are issues with the generated C# code for `{mutator_name}`.
-
-        You need to:
-        1. Find the C# file containing the `{mutator_name}` class in `./llm/peach/{self.protocol_lower}/Mutators/`. The file name should be {self.protocol_upper}<pkt_type>Mutators.cs where <pkt_type> is the packet type this mutator is associated with.
-        2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
-        3. Use the "Read_File" tool to read the corresponding mutator file.
-        4. Fix the bug in the C# code. 
-        5. Use "Apply_Patch" for a localized fix. Use "Write_File" only if the
-           complete file genuinely needs to be replaced.
-        6. Use the "Build_DotNet_DLL" tool to recompile the mutators and ensure there are no syntax errors. The DLL should be at "./llm/peach/{self.protocol_lower}/Mutators/out/{self.protocol_upper}<pkt_type>Mutators.dll".
-        
-        Hint for common errors:
-        - InternalValueToBitStream called on DataElement where InternalValue is not a BitStream. Type is String. 
-          Do not set a Variant(String) to DataElement that is not of type String. Instead, set the a Variant of bytes using System.Text.Encoding.XX.GetBytes(...).
-        - Detected duplicate child name of 'xx'.
-          When copying a DataElement, use elem.Clone(newName) to avoid duplicate names in the same parent.
-
-        Be thorough and ensure the C# code will successfully compile.
-        """
+Common fixes: use byte-backed Variant values for non-String DataElements;
+clone elements with unique names; verify SDK APIs before using them.
+"""
                 if hint:
-                    prompt += (
-                        f"\n\nAdditional guidance from the user:\n{hint}\n"
-                    )
-
-                agent = build_agent_graph(
-                    retriever=self.retriever, config=self.agent_config
-                )
-
+                    prompt += f"\nAdditional guidance from the user:\n{hint}\n"
                 self.call_agent(
-                    prompt,
-                    f"Step 5: Fix Mutator {mutator_name}",
-                    agent_graph=agent,
+                    prompt, f"Step 5: Fix Mutators for {packet.packet_type}",
+                    agent_graph=self._mutator_agent(plan, packet),
                 )
-
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+                self._compile_mutator_with_repairs(plan, packet, step_title="Step 5")
 
             with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = [executor.submit(run_logged_task, f"Mutator fix {log_file}", fix_one, log_file) for log_file in error_logs]
+                futures = [
+                    executor.submit(run_logged_task, f"Mutator fix {packet.packet_type}", fix_one, packet)
+                    for packet in plan.packets if packet.packet_type in groups
+                ]
                 for future in as_completed(futures):
                     future.result()
 
         def verify_fn() -> tuple[bool, str]:
-            if not _skip_this_verify[0]:
+            expected = {
+                spec.class_name for packet in plan.packets
+                if not affected_packets or packet.packet_type in affected_packets
+                for spec in packet.mutators
+            }
+            if skip_first[0]:
+                skip_first[0] = False
+                try:
+                    output = results_path.read_text(encoding="utf-8")
+                except OSError as error:
+                    raise RuntimeError(
+                        "No saved mutator verification report is available. "
+                        "Rerun Step 5 without skipping verification."
+                    ) from error
+                if output.startswith(_COMMAND_FAILURE_PREFIX):
+                    raise RuntimeError(
+                        "Saved mutator verification records a failed validator command. "
+                        "Rerun Step 5 without skipping verification.\n" + output
+                    )
+            else:
                 cmd = [
                     "./tests/peach_mutator/run_peach_mutator_test.sh",
-                    self.protocol_lower,
-                    self.seed_dir,
+                    self.protocol_lower, self.seed_dir,
                 ]
-                if _failing_mutators:
-                    cmd.append(",".join(_failing_mutators))
-                    UI.dim(
-                        "Filtering to previously-failing mutators: "
-                        + ", ".join(_failing_mutators)
-                    )
+                if affected_packets:
+                    cmd.append(",".join(sorted(expected)))
+                    UI.dim("Retesting all mutators in affected packets: " + ", ".join(sorted(affected_packets)))
                 result = UI.run_with_live_output(cmd, title="Running Mutator Tests")
-
-                # Save results to file
-                results_dir = os.path.join("llm", "peach", self.protocol_lower, "mutator_test_logs")
-                os.makedirs(results_dir, exist_ok=True)
-                results_path = os.path.join(results_dir, "results.txt")
-                with open(results_path, "w", encoding="utf-8") as f:
-                    f.write(result.stdout)
-                UI.dim(f"  Mutator test results saved to: {results_path}")
-            _skip_this_verify[0] = False
-
-            error_log_dir = (
-                f"./llm/peach/{self.protocol_lower}/mutator_test_logs/error"
-            )
-            error_logs = glob.glob(os.path.join(error_log_dir, "*.log"))
-
-            _failing_mutators[:] = [
-                os.path.basename(l).replace(".log", "")
-                for l in error_logs
-            ]
-
-            if not error_logs:
-                return True, ""
-
-            parts: list[str] = []
-            for log_file in error_logs:
-                with open(log_file, "r", encoding="utf-8") as f:
-                    parts.append(
-                        f"--- {os.path.basename(log_file)} ---\n{f.read()}"
+                output = (result.stdout or "") + (result.stderr or "")
+                results_dir.mkdir(parents=True, exist_ok=True)
+                if result.returncode != 0:
+                    output = f"{_COMMAND_FAILURE_PREFIX} (exit {result.returncode}).\n{output}"
+                results_path.write_text(output, encoding="utf-8")
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"Mutator validator command failed (exit {result.returncode}). "
+                        f"Check compiler, Docker and SDK diagnostics.\n{output}"
                     )
-            return False, "\n\n".join(parts)
+            if "Mutator Test Results:" not in output:
+                raise RuntimeError("Mutator validator did not complete its results report.\n" + output)
+            report = output.rsplit("Mutator Test Results:", 1)[1]
+            result_rows = _RESULT_LINE.findall(report)
+            statuses = {name: status for status, name in result_rows}
+            if len(result_rows) != len(statuses):
+                raise RuntimeError("Mutator validator reported duplicate class names; check generated classes and plugin assemblies.")
+            missing = expected.difference(statuses)
+            if missing:
+                raise RuntimeError("Mutator validator omitted planned classes: " + ", ".join(sorted(missing)))
+            unexpected = statuses.keys() - expected
+            if unexpected:
+                raise RuntimeError("Mutator validator reported unplanned classes: " + ", ".join(sorted(unexpected)))
+            if expected and all(statuses[name] == "SKIP" for name in expected):
+                raise RuntimeError(
+                    "Mutator validator skipped every planned class; no mutations were tested. "
+                    "Check that seeds parse and target paths match the model.\n" + output
+                )
+            failed = sorted(name for name, status in statuses.items() if status == "FAIL")
+            if failed:
+                UI.warn("Re-crack FAILs (reported without automatic repair): " + ", ".join(failed))
+            groups = error_groups()
+            reported_errors = {name for name, status in statuses.items() if status == "ERROR"}
+            logged_errors = {name for items in groups.values() for name, _ in items}
+            if reported_errors != logged_errors:
+                raise RuntimeError("Mutator ERROR results and log files disagree; rerun validation.")
+            if not groups:
+                return True, ""
+            return False, "\n\n".join(log for items in groups.values() for _, log in items)
 
-        if not self.fix_verify_loop(
-            "Step 5: Mutator Validation & Fix", verify_fn, fix_fn
-        ):
-            return
+        if not self.fix_verify_loop("Step 5: Mutator Validation & Fix", verify_fn, fix_fn):
+            raise RuntimeError("Mutator validation was stopped before all runtime ERRORs were resolved.")

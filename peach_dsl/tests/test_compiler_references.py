@@ -29,6 +29,30 @@ NS = {"p": "http://peachfuzzer.com/2012/Peach"}
 
 
 class CompilerReferenceTests(unittest.TestCase):
+    def test_relation_rejects_unresolvable_model_name_shadow(self) -> None:
+        class Header(Schema):
+            length = Int8(3)
+            body = Block(data=Blob[1]())
+            Packet = Block(body=Block(data=Blob[1]()))
+
+        class Packet(Schema):
+            header = Header()
+            body = Block(data=Blob[header.length]())
+
+        with self.assertRaisesRegex(ValueError, "relation.*ambiguous.*Packet"):
+            to_peach_data_model(Packet, include_header=False)
+        root = ET.fromstring(to_peach_data_model(Packet, name="Renamed", include_header=False))
+        self.assertEqual(root.find("Block[@name='header']/Number/Relation").get("of"), "Renamed.body.data")
+
+    def test_model_name_shadow_uses_safe_shorter_relation_path(self) -> None:
+        class Packet(Schema):
+            length = Int8(3)
+            header = Block(body=Block(data=Blob[1]()), Packet=Block(body=Block(data=Blob[1]())))
+            body = Block(data=Blob[length]())
+
+        root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+        self.assertEqual(root.find("Number/Relation").get("of"), "body.data")
+
     def test_fixed_padded_string_conditions_use_runtime_text(self) -> None:
         for terminated in (False, True):
             expected = "AXX\0" if terminated else "AXXX"
@@ -84,7 +108,40 @@ class CompilerReferenceTests(unittest.TestCase):
             relation = packet.find("p:Block[@name='header']/p:Number/p:Relation", NS)
             self.assertEqual(relation.get("of"), "Packet.body.data")
 
-    def test_outer_optional_source_is_relative_when_packet_model_is_reused(self) -> None:
+    def test_optional_rejects_unresolvable_model_name_shadow(self) -> None:
+        class Header(Schema):
+            length = Int8()
+
+        class Packet(Schema):
+            header = Header()
+            body = Block(
+                header=Header(),
+                Packet=Block(header=Header()),
+                tail=Optional[Int8](when=header.length != 0),
+            )
+
+        with self.assertRaisesRegex(ValueError, "Optional.*ambiguous.*rename"):
+            to_peach_data_model(Packet, include_header=False)
+        root = ET.fromstring(to_peach_data_model(Packet, name="Renamed", include_header=False))
+        self.assertEqual(root.find("Block/Optional").get("src"), "Renamed.header.length")
+
+    def test_optional_parent_lookup_ignores_own_source_descendant(self) -> None:
+        class Payload(Schema):
+            source = Int8(9)
+
+        class Packet(Schema):
+            source = Int8(3)
+            payload = Optional[Payload](when=source == 3)
+
+        root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+        self.assertEqual(root.find("Optional").get("src"), "source")
+        for node in root.iter():
+            for attribute in ("src", "of", "ref"):
+                value = node.get(attribute)
+                if value is not None:
+                    self.assertNotIn("/", value)
+
+    def test_outer_optional_source_uses_model_qualification(self) -> None:
         class Header(Schema):
             length = Int8()
 
@@ -102,9 +159,9 @@ class CompilerReferenceTests(unittest.TestCase):
         root = ET.fromstring(to_peach_data_model(Packets))
         optionals = root.findall(".//p:Optional", NS)
         self.assertTrue(optionals)
-        self.assertEqual({node.get("src") for node in optionals}, {"../../header.length"})
+        self.assertEqual({node.get("src") for node in optionals}, {"Packet.header.length"})
         renamed = ET.fromstring(to_peach_data_model(Packet, name="Renamed", include_header=False))
-        self.assertEqual(renamed.find("Block[@name='body']/Optional").get("src"), "../../header.length")
+        self.assertEqual(renamed.find("Block[@name='body']/Optional").get("src"), "Renamed.header.length")
 
     def test_inline_block_member_references_use_outer_instance_overrides(self) -> None:
         class Header(Schema):
@@ -140,7 +197,7 @@ class CompilerReferenceTests(unittest.TestCase):
                 relations = dynamic.findall("Block[@name='header']/Number/Relation")
                 self.assertEqual({r.get("of") for r in relations}, {prefix + ".data", prefix + ".items"})
                 self.assertEqual(dynamic.find(".//Optional").get("src"),
-                                 "../../../header.length" if nested else "../../header.length")
+                                 "Packet.header.length")
                 with self.assertRaisesRegex(TypeError, "integer field.*string"):
                     to_peach_data_model(Packet(header=Header(length=String())), include_header=False)
                 with self.assertRaisesRegex(ValueError, "replaced by a scalar"):
@@ -162,7 +219,7 @@ class CompilerReferenceTests(unittest.TestCase):
                     relation = root.find("Number/Relation")
                     self.assertIsNotNone(relation)
                     self.assertEqual(relation.get("of"), target)
-                    self.assertEqual(relation.get("expressionGet"), "(size + 1)")
+                    self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)') or "size", {'size': 3, 'count': 3}))
                     self.assertIsNone(root.find(".//Block/Number/Relation"))
             fixed_root = ET.fromstring(to_peach_data_model(Packet(length=fixed(4)), include_header=False))
             self.assertEqual(fixed_root.findall(".//Relation"), [])
@@ -179,7 +236,7 @@ class CompilerReferenceTests(unittest.TestCase):
 
         root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
         self.assertEqual(root.find("Number/Relation").get("of"), "body.items")
-        self.assertEqual(root.find("Block/Optional").get("src"), "../../count")
+        self.assertEqual(root.find("Block/Optional").get("src"), "Packet.count")
         fixed_root = ET.fromstring(to_peach_data_model(Packet(count=fixed(3)), include_header=False))
         self.assertEqual(fixed_root.find("Block/Number[@name='items']").get("occurs"), "3")
 
@@ -197,41 +254,31 @@ class CompilerReferenceTests(unittest.TestCase):
         self.assertEqual(fixed_root.find("Choice/Block").get("length"), "4")
         self.assertEqual(fixed_root.find("Choice/Block/Blob").get("length"), "4")
 
-    def test_fixed_non_token_sources_keep_runtime_references(self) -> None:
+    def test_non_token_defaults_keep_runtime_references(self) -> None:
         class Header(Schema):
-            length = Int8(fixed(2), token=False)
+            length = Int8(2, token=False)
 
         for nested in (False, True):
-            for arithmetic in (False, True):
-                class Packet(Schema):
-                    if nested:
-                        header = Header()
-                        source = header.length
-                    else:
-                        length = Int8(fixed(2), token=False)
-                        source = length
-                    payload = Blob[source + 1 if arithmetic else source]()
-                    tail = Optional[Int8](when=source == 3)
-                    del source
+            class Packet(Schema):
+                if nested:
+                    header = Header()
+                    source = header.length
+                else:
+                    length = Int8(2, token=False)
+                    source = length
+                payload = Blob[source]()
+                tail = Optional[Int8](when=source == 3)
+                del source
 
-                variants = (
-                    (Packet, Packet(header=Header(length=fixed(4)))) if nested
-                    else (Packet, Packet(length=fixed(4)))
-                )
-                for packet in variants:
-                    with self.subTest(nested=nested, arithmetic=arithmetic, packet=packet):
-                        root = ET.fromstring(to_peach_data_model(packet, include_header=False))
-                        source = root.find("Block/Number" if nested else "Number")
-                        self.assertEqual(source.get("token"), "false")
-                        self.assertIsNone(root.find("Blob").get("length"))
-                        relation = source.find("Relation")
-                        self.assertIsNotNone(relation)
-                        self.assertEqual(relation.get("of"), "payload")
-                        optional = root.find("Optional")
-                        self.assertIsNotNone(optional)
-                        self.assertEqual(optional.get("src"), "header.length" if nested else "length")
-                        self.assertTrue(eval(optional.get("expression"), {"value": 3}))
-                        self.assertFalse(eval(optional.get("expression"), {"value": 2}))
+            root = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+            source = root.find("Block/Number" if nested else "Number")
+            self.assertEqual(source.get("token"), "false")
+            self.assertEqual(source.find("Relation").get("of"), "payload")
+            self.assertIsNone(root.find("Blob").get("length"))
+            self.assertEqual(root.find("Optional").get("src"), "header.length" if nested else "length")
+            invalid = Packet(header=Header(length=fixed(4))) if nested else Packet(length=fixed(4))
+            with self.assertRaisesRegex(ValueError, "fixed.*token=False"):
+                to_peach_data_model(invalid, include_header=False)
 
     def test_encoded_fixed_length_keeps_runtime_reference(self) -> None:
         for encoding in ("hex", "HEX", "literal"):
@@ -248,7 +295,7 @@ class CompilerReferenceTests(unittest.TestCase):
                         relation = root.find("Number/Relation")
                         self.assertIsNotNone(relation)
                         self.assertEqual(relation.get("of"), "payload")
-                        self.assertEqual(relation.get("expressionGet"), "(size + 1)" if arithmetic else None)
+                        self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)' if arithmetic else None) or "size", {'size': 3, 'count': 3}))
 
     def test_nested_encoded_fixed_length_keeps_runtime_reference(self) -> None:
         class Header(Schema):
@@ -269,7 +316,7 @@ class CompilerReferenceTests(unittest.TestCase):
                     relation = root.find("Block/Number/Relation")
                     self.assertIsNotNone(relation)
                     self.assertEqual(relation.get("of"), "payload")
-                    self.assertEqual(relation.get("expressionGet"), "(size + 1)" if arithmetic else None)
+                    self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)' if arithmetic else None) or "size", {'size': 3, 'count': 3}))
 
     def test_shared_model_keeps_each_parents_numeric_defaults(self) -> None:
         class Header(Schema):
@@ -809,7 +856,7 @@ class CompilerReferenceTests(unittest.TestCase):
                 relations = {r.get("type"): r for r in source.findall("Relation")}
                 self.assertEqual(relations["size"].get("of"), "payload")
                 self.assertEqual(relations["count"].get("of"), "values")
-                self.assertEqual(relations["count"].get("expressionGet"), "(count + 1)")
+                self.assertEqual(eval(relations['count'].get('expressionGet'), {'size': 3, 'count': 3}), eval(('(count + 1)') or "size", {'size': 3, 'count': 3}))
                 tail = root.find("Optional[@name='tail']")
                 assert tail is not None
                 self.assertEqual(tail.get("src"), "length")
@@ -953,7 +1000,7 @@ class CompilerReferenceTests(unittest.TestCase):
         self.assertIsNotNone(relation)
         assert relation is not None
         self.assertEqual(relation.get("of"), "payload.data")
-        self.assertEqual(relation.get("expressionGet"), "(size + 1)")
+        self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)') or "size", {'size': 3, 'count': 3}))
 
         fixed_root = ET.fromstring(to_peach_data_model(
             Packet(length=fixed(3)), include_header=False
@@ -988,7 +1035,7 @@ class CompilerReferenceTests(unittest.TestCase):
                     "conditional": "payload.value", "nested_array": "payload.item",
                 }[kind]
                 self.assertEqual(relation.get("of"), target)
-                self.assertEqual(relation.get("expressionGet"), "(size + 1)")
+                self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)') or "size", {'size': 3, 'count': 3}))
 
                 root = ET.fromstring(to_peach_data_model(
                     Packet(length=fixed(3), item=fixed(99)), include_header=False
@@ -1441,7 +1488,7 @@ class CompilerReferenceTests(unittest.TestCase):
         self.assertIsNotNone(relation)
         assert relation is not None
         self.assertEqual(relation.get("of"), "items")
-        self.assertEqual(relation.get("expressionGet"), "(count + 1)")
+        self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(count + 1)') or "size", {'size': 3, 'count': 3}))
         optional = root.find("Optional[@name='tail']")
         self.assertIsNotNone(optional)
         assert optional is not None

@@ -1,5 +1,6 @@
 from core.log import run_logged_task
 from core.agent import build_agent_graph
+from core.peach_sdk import csharp_language_guidance
 from pipeline.peach_steps.common import PeachStepMixin
 from core.ui import UI
 
@@ -78,7 +79,7 @@ class FixerSteps(PeachStepMixin):
             - DO NOT abbreviate or truncate the code. Output the complete implementation for all items.
             - When writing helper functions, add Part{index} to the function name. This is important to avoid naming conflicts across chunks.
             
-            Write in C# 5.0.
+            {csharp_language_guidance()}
             File: ./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixers_part_{index}.cs
             ```csharp
             using System;
@@ -152,7 +153,8 @@ class FixerSteps(PeachStepMixin):
         fixup_prompt = f"""
         Now that we have generated the individual fixer functions in partial classes, we need to generate the main Fixup class that calls them.
 
-        Write the main Fixup class in C# 5.0.
+        Write the main Fixup class in C#.
+        {csharp_language_guidance()}
         File: ./llm/peach/{self.protocol_lower}/Fixers/{self.protocol_upper}Fixup.cs
         ```csharp
         using System;
@@ -288,7 +290,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
 
             Here is an example structure for the test in file "./tests/peach_fixer/example.cs".
 
-            Write in C# 5.0.
+            {csharp_language_guidance()}
             File: ./llm/peach/{self.protocol_lower}/Fixers/Validations/{self.protocol_upper}FixerTest_part_{index}.cs
 
             Constraints for this task:
@@ -384,6 +386,7 @@ Fixer Function: [C# static method name, e.g., FixMQTT2212]
                 test_name = os.path.basename(log_file).replace(".log", "")
 
                 prompt = f"""
+        {csharp_language_guidance()}
         We ran a verification test against the generated fixers. The test failed for the fixer/test `{test_name}`.
         Here is the test error output:
 

@@ -147,9 +147,12 @@ scheduled to move into a hardened, network-disabled Docker compiler container.
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
 | 2. Datamodel Planning & Generation | One planning call reports only concrete protocol-field encodings that require custom scalar support and produces the split DataModel manifest from the same RFC evidence. Unsupported scalars require explicit approval and receive protocol-prefixed `ExtendedType` names. `shared_model.py` is generated and Pyright-checked first; family modules are then generated in parallel and Pyright-checked before one integrated compilation. |
 | 3. Datamodel Validation & Fix | Parses seeds through the compiled Pit and compares re-serialized bytes. The test script immediately converts every Peach report node to compact DSL-path text in `datamodel_error_report.txt`; it performs no root-cause selection. A diagnosis agent analyzes that text and produces a repair plan; the auto-fix agent edits only DSL and recompiles. Up to 3 auto-retries, then interactive fallback. |
-| 4. Mutator Generation | Generates **C# mutator classes** per field per packet type. Each inherits from `LLMMutator` and covers `Add`/`Remove`/`Repeat`/`Mutate` semantics. Parallelized with 4 workers. |
-| 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Each iteration: clone → mutate → serialize → re-parse. Failures trigger LLM fixes. |
-| Final Compilation | Compiles all `.cs` files into a single `{PROTO}.dll`. |
+| 4. Mutator Generation | Plans field operations from validated DSL. The host writes `.g.cs` partial classes, using SDK Add/Remove/Repeat bases; the LLM implements `MutateCore` in `.semantic.cs`. Each packet compiles independently with 4 workers. |
+| 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Runtime ERRORs are grouped and repaired per packet's semantic file; re-parse FAILs are reported. Compiler, SDK and incomplete-validation errors stop the pipeline. |
+| Final Compilation | Compiles active manifest mutator sources and fixer sources into `{PROTO}.dll`. |
+
+See [mutator generation](docs/mutator-generation.md) for operation mapping,
+source ownership, regeneration choices and SDK requirements.
 
 ## What gets generated
 
@@ -170,10 +173,13 @@ llm/peach/<proto>/
 ├── <PROTO>.dll                         # Final compiled DLL
 ├── dm_test_logs/                       # DataModel test logs (deleted on pass)
 ├── Mutators/
-│   ├── <Proto><PktType>Mutators.cs     # Mutator source per packet type
+│   ├── mutator_manifest.json          # Active packets, interfaces and source files
+│   ├── <Proto><PktType>Mutators.g.cs   # Deterministic classes and selectors
+│   ├── <Proto><PktType>Mutators.semantic.cs # LLM-written semantic methods
 │   └── out/
 │       └── <Proto><PktType>Mutators.dll
 └── mutator_test_logs/
+    ├── results.txt                     # Saved validator output
     ├── fail/                           # Mutation re-parse failures
     └── error/                          # Mutation exceptions
 ```

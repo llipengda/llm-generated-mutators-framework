@@ -18,6 +18,95 @@ COMPUTED_TABLE = (1, 3, 7)
 
 
 class ComputedFieldTests(unittest.TestCase):
+    def test_computed_uses_safe_shorter_anchor_under_model_name_shadow(self) -> None:
+        @compute
+        def add(left: int, right: int) -> int:
+            return left + right
+
+        class Body(Schema):
+            left = Int8(3)
+            right = Int8(4)
+
+        class Packet(Schema):
+            body = Body()
+            header = Block(body=Body(left=9, right=10), Packet=Block(body=Body(left=12, right=13)))
+            result = Int8(add(body.left, body.right))
+
+        artifacts = to_peach_artifacts(Packet, include_header=False)
+        root = ET.fromstring(artifacts.xml)
+        self.assertEqual(root.find("Number[@name='result']/Fixup/Param[@name='ref']").get("value"), "body")
+        assert artifacts.python_fixup is not None
+        module = ast.parse(artifacts.python_fixup)
+        module.body = [node for node in module.body if isinstance(node, ast.ClassDef)]
+        namespace: dict[str, object] = {}
+        exec(compile(module, "<generated-fixup>", "exec"), namespace)
+        generated = next(item for name, item in namespace.items() if name.startswith("Fixup_"))
+        assert callable(generated)
+        body = SimpleNamespace(find=lambda name: SimpleNamespace(InternalValue={"left": 3, "right": 4}[name]))
+        self.assertEqual(generated(None).fixup(body), 7)
+
+    def test_computed_rejects_unresolvable_model_name_shadow(self) -> None:
+        @compute
+        def increment(value: int) -> int:
+            return value + 1
+
+        class Packet(Schema):
+            source = Int8(3)
+            body = Block(source=Int8(9), Packet=Block(source=Int8(12)), result=Int8(increment(source)))
+
+        with self.assertRaisesRegex(ValueError, "computed.*ambiguous.*Packet"):
+            to_peach_artifacts(Packet, include_header=False)
+        root = ET.fromstring(to_peach_artifacts(Packet, name="Renamed", include_header=False).xml)
+        self.assertEqual(root.find("Block/Number[@name='result']/Fixup/Param[@name='ref']").get("value"), "Renamed.source")
+
+    def test_computed_rejects_syntax_unsupported_by_peach_python(self) -> None:
+        def assignment(value: int) -> int:
+            return (result := value + 1)
+
+        def pattern(value: int) -> int:
+            match value:
+                case 1:
+                    return 2
+                case _:
+                    return value
+
+        def asynchronous_helper(value: int) -> int:
+            async def helper() -> int:
+                return value
+            return value
+
+        async def asynchronous(value: int) -> int:
+            return value
+
+        for function, feature in ((assignment, "assignment expressions"), (pattern, "pattern matching"),
+                                  (asynchronous_helper, "async functions"), (asynchronous, "async functions")):
+            source = Int8()
+            packet = type("UnsupportedPython", (Schema,), {"source": source, "result": Int8(compute(function)(source))})
+            with self.subTest(function=function.__name__):
+                with self.assertRaisesRegex(ValueError, "IronPython does not support " + feature):
+                    to_peach_artifacts(packet, include_header=False)
+
+    def test_computed_keeps_supported_fstrings_and_unpacking(self) -> None:
+        @compute
+        def calculate(value: int) -> int:
+            values = [0, *[value]]
+            mapping = {**{"number": value}}
+            return int(f"{value}") + sum(values) + mapping["number"]
+
+        class Packet(Schema):
+            source = Int8()
+            result = Int8(calculate(source))
+
+        artifacts = to_peach_artifacts(Packet, include_header=False)
+        assert artifacts.python_fixup is not None
+        module = ast.parse(artifacts.python_fixup)
+        module.body = [node for node in module.body if isinstance(node, ast.ClassDef)]
+        namespace: dict[str, object] = {}
+        exec(compile(module, "<generated-fixup>", "exec"), namespace)
+        generated = next(item for name, item in namespace.items() if name.startswith("Fixup_"))
+        assert callable(generated)
+        self.assertEqual(generated(None).fixup(SimpleNamespace(InternalValue=7)), 21)
+
     def test_local_computed_block_remains_reusable_with_overrides(self) -> None:
         @compute
         def increment(value: int) -> int:

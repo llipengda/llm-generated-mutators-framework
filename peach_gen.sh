@@ -9,6 +9,7 @@ fi
 PROTO=$(echo "$1" | tr '[:upper:]' '[:lower:]')
 PROTO_UPPER=$(echo "$PROTO" | tr '[:lower:]' '[:upper:]')
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
 GENERATED="$ROOT/llm/peach/$PROTO"
 SDK_VARIANT="${PEACH_SDK:-legacy}"
 if [ "${2:-}" = "--modern-sdk" ]; then
@@ -53,15 +54,27 @@ if [ "$SDK_VARIANT" = "modern" ] || [ "$SDK_VARIANT" = "modern-sdk" ]; then
   WORKDIR="/opt/peach"
   RUNNER="dotnet Peach.dll"
   PLATFORM="--platform=linux/amd64"
+  SDK_DIR="$ROOT/peach/modern-sdk"
+  export PEACH_SDK=modern
 elif [ "$SDK_VARIANT" = "legacy" ] || [ "$SDK_VARIANT" = "sdk" ]; then
   BASE_IMAGE="pdli/llm-peach:sdk"
   WORKDIR="/peach/output/linux_x86_64_release/bin"
   RUNNER="./peach"
   PLATFORM=""
+  SDK_DIR="$ROOT/peach/sdk"
+  export PEACH_SDK=legacy
 else
   echo "Error: PEACH_SDK must be 'legacy' or 'modern'." >&2
   exit 2
 fi
+
+# Build only current manifest sources and use the same SDK at runtime.
+uv run --project "$ROOT" python -m core.mutator_codegen compile "$PROTO" \
+  --output "$GENERATED/Mutators/out/${PROTO_UPPER}Mutators.dll"
+mkdir -p "$GENERATED/runtime_sdk"
+for assembly in Peach.Core.dll Peach.Pro.dll Peach.LLM.dll; do
+  cp "$SDK_DIR/$assembly" "$GENERATED/runtime_sdk/$assembly"
+done
 
 for flavor in llm peach; do
   dockerfile="$GENERATED/Dockerfile.$flavor"
@@ -74,6 +87,7 @@ FROM $PLATFORM $BASE_IMAGE
 WORKDIR $WORKDIR
 ENV HOST= PORT= PEACH_ARGS=
 COPY datamodel.xml pit.$flavor.xml ./
+COPY runtime_sdk/Peach.Core.dll runtime_sdk/Peach.Pro.dll runtime_sdk/Peach.LLM.dll ./
 $plugin_copy
 ENTRYPOINT []
 CMD ["bash", "-c", "sed -i 's/##HOST##/'\"\${HOST}\"'/g; s/##PORT##/'\"\${PORT}\"'/g' pit.$flavor.xml && $RUNNER pit.$flavor.xml \${PEACH_ARGS}"]

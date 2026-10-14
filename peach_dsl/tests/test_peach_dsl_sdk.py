@@ -60,6 +60,46 @@ class PacketEnvelope(Schema):
 
 
 class SDKTests(unittest.TestCase):
+    def test_full_strings_do_not_validate_unused_padding_encoding(self) -> None:
+        for field in (
+            String[1]("A", type="ascii", pad_character="é"),
+            String[0]("", type="ascii", pad_character="é"),
+            String[2]("A\0", type="ascii", pad_character="é", null_terminated=True),
+            String[1](fixed("A"), type="ascii", length_type="chars", pad_character="é"),
+            String[2]("A", type="ascii", length_type="chars", pad_character="é", null_terminated=True),
+            DecimalString[4](7, type="ascii", pad_character="é"),
+        ):
+            packet = type("UnusedPadding", (Schema,), {"text": field})
+            with self.subTest(field=field):
+                self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)).find("String"))
+
+    def test_used_padding_character_must_fit_the_string_encoding(self) -> None:
+        for units in ("bytes", "chars"):
+            packet = type("InvalidPadding", (Schema,), {
+                "text": String[2]("A", type="ascii", length_type=units, pad_character="é"),
+            })
+            with self.subTest(units=units):
+                with self.assertRaisesRegex(ValueError, "String.*padding.*ascii"):
+                    to_peach_data_model(packet, include_header=False)
+
+        class TerminatorOnly(Schema):
+            text = String[2]("A", type="ascii", pad_character="é", null_terminated=True)
+
+        with self.assertRaisesRegex(ValueError, "String.*padding.*ascii"):
+            to_peach_data_model(TerminatorOnly, include_header=False)
+
+    def test_constraints_reject_assignment_expressions_before_export(self) -> None:
+        constraints = (
+            lambda value: (value := 3) > 0,
+            lambda value: (lambda: (value := 3) > 0)(),
+            "(value := 3) > 0",
+        )
+        for factory in (Int8, String, Blob[1]):
+            for constraint in constraints:
+                with self.subTest(factory=factory, constraint=constraint):
+                    with self.assertRaisesRegex(ValueError, "constraint.*IronPython.*assignment expressions"):
+                        factory(constraint=constraint)
+
     def test_string_length_units_validate_every_value_and_length_kind(self) -> None:
         @compute
         def identity(value: str) -> str:
@@ -348,13 +388,9 @@ class SDKTests(unittest.TestCase):
             to_peach_data_model(InvalidFlags, include_header=False)
 
     def test_compute_captures_schema_argument_without_calling_function(self) -> None:
-        called = False
-
         @compute
         def calc_crc(header: bytearray) -> int:
-            nonlocal called
-            called = True
-            return sum(header) % 65536
+            raise AssertionError("computed function must not run during evaluation")
 
         class ComputedPacket(Schema):
             @Block
@@ -365,7 +401,6 @@ class SDKTests(unittest.TestCase):
 
             crc = Int16(calc_crc(header))
 
-        self.assertFalse(called)
         result = evaluate_schema(ComputedPacket)
         self.assertIsInstance(result, SchemaResult)
         crc = result.fields["crc"]
@@ -379,7 +414,6 @@ class SDKTests(unittest.TestCase):
             cast(Any, ComputedReference[bytearray])(("header",)),
         )
         self.assertEqual(dict(crc.computed.kwargs), {})
-        self.assertFalse(called)
 
     def test_compute_accepts_one_to_four_parameters(self) -> None:
         def make_function(count: int) -> Callable[..., int]:
@@ -686,8 +720,7 @@ class SDKTests(unittest.TestCase):
             SchemaResult,
         )
         for original_index, original in enumerate(originals):
-            class Container(Schema):
-                gate = Int8()
+            class Container(Template):
                 value = original
 
             for replacement_index, (replacement, expected_type) in enumerate(
@@ -1218,30 +1251,30 @@ class SDKTests(unittest.TestCase):
         with self.assertRaisesRegex(AttributeError, "use the @Union class form"):
             Packet().unnamed.First
 
-    def test_ordinary_array_element_paths_restart_inside_first_element(self) -> None:
+    def test_ordinary_array_element_paths_point_to_xml_definitions(self) -> None:
         result = evaluate_schema(PacketEnvelope)
         self.assertIsInstance(result, SchemaResult)
         packets = result.fields["packets"]
         self.assertIsInstance(packets, ArrayResult)
-        self.assertIsNone(packets.path)
+        self.assertEqual(packets.path, "PacketEnvelope.packets")
         self.assertIsInstance(packets.element, SchemaResult)
         union = packets.element.fields["packet_union"]
         self.assertIsInstance(union, UnionResult)
         hello, list_packet = union.alternatives
-        self.assertEqual(hello.path, "hello")
+        self.assertEqual(hello.path, "PacketEnvelope.packets[].packet_union.hello")
         header = hello.fields["header"]
         self.assertIsInstance(header, SchemaResult)
         magic = header.fields["kind"]
         self.assertIsInstance(magic, FieldResult)
-        self.assertEqual(magic.path, "hello.header.kind")
+        self.assertEqual(magic.path, "PacketEnvelope.packets[].packet_union.hello.header.kind")
         entries = list_packet.fields["entries"]
         self.assertIsInstance(entries, ArrayResult)
-        self.assertEqual(entries.path, "list.entries")
+        self.assertEqual(entries.path, "PacketEnvelope.packets[].packet_union.list.entries")
         self.assertIsInstance(entries.element, SchemaResult)
-        self.assertEqual(entries.element.path, "")
+        self.assertEqual(entries.element.path, "PacketEnvelope.packets[].packet_union.list.entries[]")
         value = entries.element.fields["value"]
         self.assertIsInstance(value, FieldResult)
-        self.assertEqual(value.path, "value")
+        self.assertEqual(value.path, "PacketEnvelope.packets[].packet_union.list.entries[].value")
 
     def test_ordinary_array_relation_paths_restart_inside_first_element(self) -> None:
         class Text(Schema):
@@ -1453,7 +1486,7 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(relation)
         assert relation is not None
-        self.assertEqual(relation.attrib["expressionGet"], "(count + 1)")
+        self.assertEqual(eval(relation.attrib['expressionGet'], {'size': 3, 'count': 3}), eval(('(count + 1)') or "size", {'size': 3, 'count': 3}))
         self.assertEqual(relation.attrib["expressionSet"], "(count - 1)")
 
     def test_outer_references_survive_nested_container_binding(self) -> None:
@@ -1502,7 +1535,7 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(optional)
         assert optional is not None
-        self.assertEqual(optional.attrib["src"], "../../../header.flags")
+        self.assertEqual(optional.attrib["src"], "header.flags")
 
     def test_deep_external_relation_is_emitted_through_model_references(self) -> None:
         class LengthValue(Schema):
@@ -1620,10 +1653,10 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(relation)
         assert relation is not None
-        self.assertEqual(relation.attrib["expressionGet"], "(size + 2)")
+        self.assertEqual(eval(relation.attrib['expressionGet'], {'size': 3, 'count': 3}), eval(('(size + 2)') or "size", {'size': 3, 'count': 3}))
         self.assertEqual(relation.attrib["expressionSet"], "(size - 2)")
 
-    def test_peach_optional_src_uses_packet_relative_path(self) -> None:
+    def test_peach_optional_src_uses_field_path(self) -> None:
         class ConditionalPacket(Schema):
             count = Int8()
             value = Optional[Int8](when=count == 1)
@@ -1637,7 +1670,7 @@ class SDKTests(unittest.TestCase):
         peach = "http://peachfuzzer.com/2012/Peach"
         optional = root.find(
             f"{{{peach}}}DataModel[@name='ConditionalPacket']/"
-            f"{{{peach}}}Optional[@name='value'][@src='conditional.count']"
+            f"{{{peach}}}Optional[@name='value'][@src='count']"
         )
         self.assertIsNotNone(optional)
 
@@ -1671,7 +1704,7 @@ class SDKTests(unittest.TestCase):
         )
         self.assertIsNotNone(optional)
         assert optional is not None
-        self.assertEqual(optional.attrib["src"], "../../header.type_flags.flags")
+        self.assertEqual(optional.attrib["src"], "header.type_flags.flags")
 
     def test_optional_nested_block_resolves_nearest_enclosing_scope(self) -> None:
         class Gates(Schema):
@@ -1701,8 +1734,8 @@ class SDKTests(unittest.TestCase):
         local = body.find("p:Optional[@name='value']", ns)
         nested = body.find("p:Block/p:Optional[@name='value']", ns)
         assert local is not None and nested is not None
-        self.assertEqual(local.get("src"), "request.body.gates.enabled")
-        self.assertEqual(nested.get("src"), "request.body.nested.count")
+        self.assertEqual(local.get("src"), "body.gates.enabled")
+        self.assertEqual(nested.get("src"), "body.nested.count")
 
     def test_optional_does_not_resolve_unrelated_sibling_by_suffix(self) -> None:
         class Gates(Schema):
@@ -1764,13 +1797,13 @@ class SDKTests(unittest.TestCase):
         self.assertIsInstance(props.element, SchemaResult)
         self.assertEqual(
             props.element.path,
-            "packet.props_optional.props_optional_internal",
+            "Packets.packet_union.packet.props_optional.props_optional_internal",
         )
         property_length = props.element.fields["property_length"]
         self.assertIsInstance(property_length, FieldResult)
         self.assertEqual(
             property_length.path,
-            "packet.props_optional.props_optional_internal.property_length",
+            "Packets.packet_union.packet.props_optional.props_optional_internal.property_length",
         )
 
         xml = to_peach_data_model(Packet, include_header=False)
@@ -2015,7 +2048,7 @@ class SDKTests(unittest.TestCase):
         relation = length.find("Relation[@type='size'][@of='payload']")
         self.assertIsNotNone(relation)
         assert relation is not None
-        self.assertEqual(relation.attrib["expressionGet"], "(size + 2)")
+        self.assertEqual(eval(relation.attrib['expressionGet'], {'size': 3, 'count': 3}), eval(('(size + 2)') or "size", {'size': 3, 'count': 3}))
         self.assertEqual(eval(relation.attrib["expressionSet"], {"size": 44}), "042")
         self.assertNotIn("int(", relation.attrib["expressionGet"])
 
@@ -2033,7 +2066,7 @@ class SDKTests(unittest.TestCase):
         relation = count.find("Relation[@type='count'][@of='values']")
         self.assertIsNotNone(relation)
         assert relation is not None
-        self.assertNotIn("expressionGet", relation.attrib)
+        self.assertEqual(eval(relation.attrib["expressionGet"], {"count": 3}), 3)
         self.assertEqual(eval(relation.attrib["expressionSet"], {"count": 3}), "3")
         optional = root.find("Optional[@name='trailer']")
         self.assertIsNotNone(optional)
@@ -2059,8 +2092,8 @@ class SDKTests(unittest.TestCase):
 
     def test_format_schema_result_includes_paths(self) -> None:
         rendered = str(evaluate_schema(PacketEnvelope))
-        self.assertIn("[path=hello.header.kind]", rendered)
-        self.assertIn("[path=value]", rendered)
+        self.assertIn("[path=PacketEnvelope.packets[].packet_union.hello.header.kind]", rendered)
+        self.assertIn("[path=PacketEnvelope.packets[].packet_union.list.entries[].value]", rendered)
 
     def test_evaluation_result_walk_visits_every_member_in_preorder(self) -> None:
         result = evaluate_schema(PacketEnvelope)

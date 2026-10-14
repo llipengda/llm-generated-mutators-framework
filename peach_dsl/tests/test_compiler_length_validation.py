@@ -9,13 +9,89 @@ if __package__ in ("", "tests"):
 
 from .. import (
     Array, Bit, Blob, Block, DecimalString, Double, Expr, Flags, Int8, Int64, Occurs, Optional, Schema, String,
-    compute, fixed, to_peach_artifacts, to_peach_data_model,
+    Union, compute, fixed, to_peach_artifacts, to_peach_data_model,
 )
 
 CONSTRAINT_LIMITS = (1, 3, 7)
 
 
 class LengthValidationTests(unittest.TestCase):
+    def test_constant_lengths_cannot_overflow_peach_bit_capacity(self) -> None:
+        for field in (Blob[2**60](), Blob[2**63](length_type="bits"),
+                      String[2**60](), String[2**63](length_type="bits"),
+                      Block[2**60](data=Int8())):
+            packet = type("OverflowingCapacity", (Schema,), {"data": field})
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "length exceeds Peach's maximum"):
+                    to_peach_data_model(packet, include_header=False)
+
+        for field in (Blob[2**60 - 1](), Blob[2**63 - 1](length_type="bits"),
+                      Block[2**60 - 1](data=Int8())):
+            packet = type("MaximumCapacity", (Schema,), {"data": field})
+            with self.subTest(field=field):
+                self.assertIsNotNone(ET.fromstring(to_peach_data_model(packet, include_header=False)))
+
+    def test_computed_and_literal_strings_allow_representable_capacities(self) -> None:
+        @compute
+        def identity(value: str) -> str:
+            return value
+
+        cases = (
+            (8, "ascii", "bits", False),
+            (4, "utf16", "bytes", True),
+            (4, "utf16be", "bytes", False),
+            (8, "utf32", "bytes", True),
+            (8, "utf32be", "bytes", False),
+            (32, "utf16", "bits", False),
+            (64, "utf32", "bits", False),
+            (1, "utf16", "chars", False),
+        )
+        for length, encoding, units, terminated in cases:
+            for computed in (False, True):
+                source = String("A")
+                text = String[length](identity(source) if computed else "'A'", type=encoding,
+                                      length_type=units, null_terminated=terminated,
+                                      value_type="string" if computed else "literal")
+                packet = type("ValidStringCapacity", (Schema,), {"source": source, "text": text})
+                with self.subTest(length=length, encoding=encoding, units=units, computed=computed):
+                    root = ET.fromstring(to_peach_artifacts(packet, include_header=False).xml)
+                    self.assertIsNotNone(root.find("String[@name='text']"))
+
+    def test_string_encoding_capacity_is_checked_for_computed_and_literal_values(self) -> None:
+        @compute
+        def identity(value: str) -> str:
+            return value
+
+        cases = (
+            (7, "ascii", "bits", False),
+            (3, "utf16", "bytes", False),
+            (3, "utf16be", "bytes", False),
+            (6, "utf32", "bytes", False),
+            (6, "utf32be", "bytes", False),
+            (24, "utf16", "bits", False),
+            (48, "utf32", "bits", False),
+            (0, "utf8", "bytes", True),
+        )
+        for length, encoding, units, terminated in cases:
+            for value_kind in ("computed", "literal"):
+                for wrapper in ("plain", "optional", "array", "union"):
+                    source = String("A")
+                    value = identity(source) if value_kind == "computed" else "'A'"
+                    field = String[length](value, type=encoding, length_type=units,
+                                           null_terminated=terminated,
+                                           value_type="literal" if value_kind == "literal" else "string")
+                    if wrapper == "optional":
+                        field = Optional[field]()
+                    elif wrapper == "array":
+                        field = Array[field, 2]()
+                    elif wrapper == "union":
+                        field = Union(text=field, other=Int8())
+                    packet = type("InvalidStringCapacity", (Schema,), {"source": source, "text": field})
+                    with self.subTest(length=length, encoding=encoding, units=units,
+                                      value_kind=value_kind, wrapper=wrapper):
+                        with self.assertRaisesRegex(ValueError, "String.*length"):
+                            to_peach_artifacts(packet, include_header=False)
+
     def test_array_occurrence_counts_respect_peach_int32_limit(self) -> None:
         for value in (2**31, 2**63, 10**30):
             with self.subTest(value=value):
@@ -441,7 +517,7 @@ class LengthValidationTests(unittest.TestCase):
         @Flags(Int8, endian="big")
         class Header(Schema):
             first = Bit[3](
-                fixed(5), mutable=False, token=False, field_id="flag_id",
+                fixed(5), mutable=False, token=True, field_id="flag_id",
                 constraint="value < 6", value_type="string",
             )
             second = Bit[5](1, token=True)
@@ -451,7 +527,7 @@ class LengthValidationTests(unittest.TestCase):
         second = root.find("Flags/Flag[@name='second']")
         assert first is not None and second is not None
         self.assertEqual(first.get("mutable"), "false")
-        self.assertEqual(first.get("token"), "false")
+        self.assertEqual(first.get("token"), "true")
         self.assertEqual(first.get("fieldId"), "flag_id")
         self.assertEqual(first.get("constraint"), "value < 6")
         self.assertEqual(first.get("valueType"), "string")

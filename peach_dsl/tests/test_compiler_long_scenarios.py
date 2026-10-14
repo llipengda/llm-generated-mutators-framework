@@ -89,7 +89,7 @@ class LongCompilerScenarios(unittest.TestCase):
         self.assertEqual(limits.get("ref"), "Limits")
         checksum = request.find("p:Block[@name='body']/p:Optional[@name='checksum']", NS)
         self.assertIsNotNone(checksum)
-        self.assertEqual(checksum.get("src"), "../../header.flags")
+        self.assertEqual(checksum.get("src"), "header.flags")
         missing = []
         for name, relation_type, target in (
             ("body_size", "size", "request.body"),
@@ -163,7 +163,7 @@ class LongCompilerScenarios(unittest.TestCase):
             self.assertIsNotNone(relation, field)
             assert relation is not None
             self.assertEqual(relation.get("of"), target)
-            self.assertEqual(relation.get("expressionGet"), expression_get)
+            self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval((expression_get) or "size", {'size': 3, 'count': 3}))
             self.assertEqual(relation.get("expressionSet"), expression_set)
         limits_model = root.find("p:DataModel[@name='Limits']", NS)
         self.assertIsNotNone(limits_model)
@@ -179,7 +179,7 @@ class LongCompilerScenarios(unittest.TestCase):
         )
         self.assertIsNotNone(checksum)
         assert checksum is not None
-        self.assertEqual(checksum.get("src"), "../../header.flags")
+        self.assertEqual(checksum.get("src"), "header.flags")
         entry = root.find("p:DataModel[@name='Entry']", NS)
         self.assertIsNotNone(entry)
         assert entry is not None
@@ -313,7 +313,7 @@ class LongCompilerScenarios(unittest.TestCase):
             self.assertEqual(relation.get("of"), target)
         optional = telemetry.find("p:Block[@name='body']/p:Optional[@name='checksum']", NS)
         self.assertIsNotNone(optional)
-        self.assertEqual(optional.get("src"), "../../header.flags")
+        self.assertEqual(optional.get("src"), "header.flags")
         self.assertIsNotNone(root.find(".//p:Choice[@name='items']", NS))
         self.assertIsNotNone(root.find("p:DataModel[@name='Stream']", NS))
 

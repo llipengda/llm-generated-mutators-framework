@@ -21,7 +21,15 @@ and ``Block ref`` overrides.
 """
 
 from collections.abc import Callable, Iterator, Mapping
+from enum import IntFlag
 from typing import Any, Generic, Literal, Self, TypeVar, overload
+
+
+class NodeType(IntFlag):
+    FIXED = 1
+    MUTABLE = 2
+    REPEATABLE = 4
+    OPTIONAL = 8
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
@@ -471,6 +479,8 @@ class FieldReference:
     def __init__(self, name: str, value_cast: str | None = None) -> None: ...
 class ExprResult:
     operation: str
+    left: int | float | str | bytes | bool | FieldReference | ExprResult
+    right: int | float | str | bytes | bool | FieldReference | ExprResult
 class FieldResult:
     name: str
     kind: str
@@ -478,17 +488,23 @@ class FieldResult:
     value: ScalarValue | None
     computed: Computed[ScalarValue] | None
     path: str | None
+    _dsl_path: str | None
+    _xml_paths: bool
 class SchemaResult:
     flags_layout: FlagsLayout | None
     name: str
     fields: Mapping[str, FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult]
     packet_union: str | None
     path: str | None
+    _dsl_path: str | None
+    _xml_paths: bool
     def walk(self) -> Iterator[ResultMember]:
         """Yield this result and its descendants in depth-first pre-order."""
 class UnionResult:
     alternatives: tuple[FieldResult | SchemaResult, ...]
     path: str | None
+    _dsl_path: str | None
+    _xml_paths: bool
     def walk(self) -> Iterator[ResultMember]:
         """Yield this result and its descendants in depth-first pre-order."""
 class ArrayResult:
@@ -496,18 +512,50 @@ class ArrayResult:
     element: FieldResult | SchemaResult | UnionResult | ArrayResult
     count: int | FieldReference | ExprResult | Occurs | None
     path: str | None
+    _dsl_path: str | None
+    _xml_paths: bool
 class OptionalResult:
     name: str
     element: FieldResult | SchemaResult | UnionResult | ArrayResult
     condition: ExprResult
     path: str | None
+    _dsl_path: str | None
+    _xml_paths: bool
     source_path: str | None
 
 SchemaInput = type[Schema] | Schema | SchemaUnion | NamedUnion
 EvaluationResult = SchemaResult | UnionResult
 ResultMember = FieldResult | SchemaResult | UnionResult | ArrayResult | OptionalResult
-def evaluate_schema(target: SchemaInput) -> EvaluationResult:
-    """Evaluate a DSL declaration into an immutable, inspectable result tree."""
+def evaluate_schema(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> EvaluationResult:
+    """Evaluate rooted instance paths; array items use name[] patterns."""
+def get_node_types(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> list[tuple[NodeType, str]]:
+    """Return rooted path patterns (array items use name[]).
+
+    REPEATABLE and OPTIONAL mark only their corresponding wrappers,
+    without propagating to descendants.
+    """
+class MutationNode:
+    path: str
+    node_type: NodeType
+    runtime_type: str
+    kind: str
+    dsl_path: str | None
+    empty_branch_name: str | None
+    source_path: str | None
+    description: str
+    condition: ExprResult | None
+    def __init__(self, path: str, node_type: NodeType, runtime_type: str, kind: str, dsl_path: str | None, empty_branch_name: str | None, source_path: str | None, description: str, condition: ExprResult | None = None) -> None: ...
+def get_mutation_nodes(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> list[MutationNode]:
+    """Return declared nodes with rooted paths and compiler-selected metadata.
+
+    Excludes the root, generated empty branches, nested-array scaffold Blocks,
+    and the compiler's single-packet duplicate alternative. Repeated/optional
+    properties remain local to their corresponding wrapper.
+    """
+def supported_data_element_expression(path: str) -> str:
+    """Generate obj.MatchesPath(path); requires the updated Peach.LLM.Core SDK."""
+def get_supported_data_element_expressions(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> list[tuple[NodeType, str, str]]:
+    """Return (type, rooted path pattern, C# supportedDataElement expression)."""
 def format_schema_result(result: EvaluationResult) -> str: ...
 def to_peach_data_model(target: SchemaInput, *, name: str | None = None, include_header: bool = True) -> str:
     """Export Peach XML; PacketUnion schemas become dependency-ordered DataModels."""
