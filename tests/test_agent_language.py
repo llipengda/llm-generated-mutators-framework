@@ -94,7 +94,7 @@ class AgentLanguageTests(unittest.TestCase):
 
     def test_pipeline_applies_language_to_generation_diagnosis_and_repair(self) -> None:
         def initialize(pipeline: PeachPipeline) -> None:
-            pipeline.state = {"peach_step_layout": "combined-dsl-plan-v2", "current_step_index": 0}
+            pipeline.state = {"peach_step_layout": "combined-dsl-mutators-v3", "current_step_index": 0}
             pipeline.retriever = Mock()
 
         self.stack.enter_context(patch("pipeline.peach.BasePipeline.__init__", initialize))

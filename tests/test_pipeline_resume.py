@@ -2,10 +2,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from typing import Mapping
 
-from core.state import new_usage_bucket
+from core.state import load_pipeline_state, new_usage_bucket, save_pipeline_state
 from core.usage_tracking import ReasoningContentLogger, TokenUsageTracker
 from pipeline.base import BasePipeline
 
@@ -17,7 +17,6 @@ class _Pipeline(BasePipeline):
         self.state = {
             "packet_types": [],
             "data_type_analysis": {},
-            "constraints": "",
             "token_usage_total": new_usage_bucket(),
             "token_usage_by_step": {},
             "current_step_index": 0,
@@ -64,6 +63,55 @@ class _ReasoningResponse:
 
 
 class PipelineResumeTests(unittest.TestCase):
+    def test_old_pipeline_positions_resume_at_retained_steps(self) -> None:
+        from pipeline.peach import PeachPipeline
+
+        for layout, index, expected in (
+            ("combined-dsl-plan-v2", 0, 0),
+            ("combined-dsl-plan-v2", 4, 4),
+            ("combined-dsl-plan-v2", 5, 5),
+            ("combined-dsl-plan-v2", 8, 5),
+            ("combined-dsl-plan-v2", 12, 5),
+            ("combined-dsl-mutators-v3", 6, 6),
+        ):
+            with self.subTest(layout=layout, index=index):
+                def initialize(pipeline: PeachPipeline) -> None:
+                    pipeline.state = {
+                        "peach_step_layout": layout, "current_step_index": index,
+                        "datamodel_format": "peach-dsl-v1",
+                        "data_type_analysis": {"unsupported_types": []},
+                    }
+                    pipeline.retriever = Mock()
+
+                with patch("pipeline.peach.BasePipeline.__init__", initialize), \
+                    patch("pipeline.peach.build_agent_graph"), \
+                    patch("pipeline.peach.get_language", return_value="en"), \
+                    patch.object(PeachPipeline, "save_state"):
+                    pipeline = PeachPipeline()
+                self.assertEqual(pipeline.state["current_step_index"], expected)
+                self.assertEqual(pipeline.state["peach_step_layout"], "combined-dsl-mutators-v3")
+                self.assertEqual(len(pipeline.steps()), 6)
+                self.assertEqual(pipeline.steps()[-1][0], "Final Compilation")
+
+    def test_state_without_constraints_loads_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pipeline_state.json"
+            path.write_text('{"packet_types": ["request"], "current_step_index": 4}')
+            with patch("core.state.pipeline_state_path", return_value=str(path)):
+                state = load_pipeline_state("demo")
+                self.assertEqual(state["packet_types"], ["request"])
+                save_pipeline_state(state, "demo")
+                self.assertEqual(load_pipeline_state("demo"), state)
+
+    def test_legacy_constraints_are_removed_when_loading_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pipeline_state.json"
+            path.write_text('{"packet_types": ["request"], "constraints": "old extracted rules"}')
+            with patch("core.state.pipeline_state_path", return_value=str(path)):
+                state = load_pipeline_state("demo")
+            self.assertEqual(state["packet_types"], ["request"])
+            self.assertNotIn("constraints", state)
+
     def test_completed_resume_can_select_any_step(self) -> None:
         for selected in (0, 1):
             with self.subTest(selected=selected):

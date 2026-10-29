@@ -12,7 +12,6 @@
 | `discovery/` | Step 1 报文类型提取、Step 2 自定义标量运行时生成 |
 | `datamodel/` | Step 2 规划、共享模块和报文族生成、组装修复，以及 Step 3 诊断和修复 |
 | `mutators/` | Step 4 语义价值评估、方法契约和实现，以及 Step 5 验证修复 |
-| `fixers/` | Step 6–9 约束提取、过滤、Fixer/Fixup 生成、约束映射、测试生成和修复 |
 | `diagnosis/` | 独立 DataModel 诊断 CLI 的系统提示词和任务，输出结构直接写在任务中 |
 | `shared/` | 随运行状态变化的自定义标量上下文和用户补充指令 |
 | `tools/` | 模型可见的工具说明，如 `Read_File`、`Apply_Patch`、`RFC_Search` |

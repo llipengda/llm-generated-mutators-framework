@@ -333,53 +333,6 @@ namespace Smoke {
                     peach_runtime._run("DataModel", [], protocol="tftp", datamodel=sdk / "datamodel.xml", logs=sdk / "logs", plugins=[])
                 execute.assert_not_called()
 
-    def test_fixer_test_plugin_does_not_load_production_fixers(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary) / "tftp"
-            files = (directory / "DataElements" / "out" / "TFTPDataElements.dll",
-                     directory / "Fixers" / "out" / "TFTPFixers.dll",
-                     directory / "Fixers" / "Validations" / "out" / "TFTPFixerTests.dll")
-            for path in files:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.touch()
-            self.assertEqual(peach_runtime._protocol_plugins(directory, "custom", "fixer_tests"), [files[0], files[2]])
-
-    def test_native_fixer_resolves_nunit_and_removes_passing_case_log(self) -> None:
-        sdk = peach_runtime.peach_sdk_dir()
-        if shutil.which("dotnet") is None or not all((sdk / name).is_file() for name in (
-            "Peach.LLM.Validations.Fixer.runtimeconfig.json", "nunit.framework.dll",
-        )):
-            self.skipTest("Run ./setup.sh to install the local fixer runtime")
-        with tempfile.TemporaryDirectory(prefix="native-fixer-test-") as temporary:
-            root = Path(temporary)
-            directory = root / "llm" / "peach" / "smoke"
-            validations = directory / "Fixers" / "Validations"
-            validations.mkdir(parents=True)
-            (directory / "datamodel.xml").write_text('<Peach xmlns="http://peachfuzzer.com/2012/Peach"/>')
-            (validations / "NativeTests.cs").write_text('''
-using NUnit.Framework;
-using Peach.Core.Dom;
-using Peach.LLM.Validations.Common;
-public static class NativeTests {
-    [FixerTest("native-nunit-dependency")]
-    public static void Verify() {
-        var value = DataElementMaker.Make<Number>("value", (ulong)7);
-        Assert.That((ulong)value.DefaultValue, Is.EqualTo((ulong)7));
-    }
-}
-''')
-            with patch.object(peach_runtime, "ROOT", root):
-                self.assertEqual(peach_runtime.run_fixer("smoke"), 0)
-            logs = directory / "fixer_test_logs"
-            self.assertIn("[PASS] 001/001 tests passed.", (logs / "fixer.log").read_text())
-            self.assertFalse((logs / "native-nunit-dependency.log").exists())
-
-    def test_data_rejects_invalid_hex_before_running_validator(self) -> None:
-        with patch.object(peach_runtime, "_run") as execute:
-            for value in ("1", "0x01", "zz"):
-                with self.assertRaises(ValueError):
-                    peach_runtime.run_data("tftp", value)
-            execute.assert_not_called()
 
     def test_invalid_protocol_cannot_escape_project_directory(self) -> None:
         for protocol in ("../mqtt", "a/b", ""):
@@ -407,8 +360,6 @@ public static class NativeTests {
                  ["mutator", "tftp", str(seeds), "OnlyMutator"]),
                 ("tests/datamodel/run_datamodel_test.sh", ["TFTP", seeds.name, datamodel.name, "model", "log files"],
                  ["datamodel", "tftp", str(seeds), str(datamodel), "model", str(caller / "log files")]),
-                ("tests/peach_fixer/run_peach_fixer_test.sh", ["tftp"], ["fixer", "tftp"]),
-                ("tests/peach_fixer/run_data_test.sh", ["tftp", "0001"], ["data", "tftp", "0001"]),
             ]
             for script, arguments, expected in cases:
                 with self.subTest(script=script):

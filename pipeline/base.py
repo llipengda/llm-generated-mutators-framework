@@ -62,7 +62,7 @@ class BasePipeline:
         if os.path.exists(state_path):
             existing = load_pipeline_state(self.protocol_lower)
             has_data = bool(
-                existing.get("packet_types") or existing.get("constraints")
+                existing.get("packet_types")
             )
             if has_data and ask_resume_state(self.protocol_lower):
                 state = existing
@@ -76,7 +76,6 @@ class BasePipeline:
                 state: PipelineState = {
                     "packet_types": [],
                     "data_type_analysis": {},
-                    "constraints": "",
                     "token_usage_total": new_usage_bucket(),
                     "token_usage_by_step": {},
                     "current_step_index": 0,
@@ -86,7 +85,6 @@ class BasePipeline:
             state = {
                 "packet_types": [],
                 "data_type_analysis": {},
-                "constraints": "",
                 "token_usage_total": new_usage_bucket(),
                 "token_usage_by_step": {},
                 "current_step_index": 0,

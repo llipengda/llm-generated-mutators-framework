@@ -542,7 +542,6 @@ def get_tools(
         _PROJECT_ROOT / "peach" / "README.md",
         _PROJECT_ROOT / "peach" / "peach.txt",
         _PROJECT_ROOT / "examples" / "ExampleEscapedUInt.cs",
-        _PROJECT_ROOT / "tests" / "peach_fixer" / "example.cs",
     )
     if read_files is None:
         scoped_read_roots = default_read_roots

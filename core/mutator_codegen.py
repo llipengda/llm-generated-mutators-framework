@@ -146,7 +146,7 @@ def _hash_file(path: Path) -> str:
 
 
 def _excluded_sdk_references() -> list[str]:
-    """Keep copied fixer/test/plugin artifacts out of mutator compilation."""
+    """Keep copied protocol and test artifacts out of mutator compilation."""
     return sorted(path.name for path in peach_sdk_dir().glob("*.dll") if path.name not in MUTATOR_SDK_REFERENCE_NAMES)
 
 

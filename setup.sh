@@ -43,7 +43,6 @@ PROJECTS=(
   pro/PitTool/PitTool.csproj
   llm/Validations/DataModel/Peach.LLM.Validations.DataModel.csproj
   llm/Validations/Mutator/Peach.LLM.Validations.Mutator.csproj
-  llm/Validations/Fixer/Peach.LLM.Validations.Fixer.csproj
 )
 for project in "${PROJECTS[@]}"; do
   if [ ! -f "$SOURCE_DIR/$project" ]; then
@@ -74,7 +73,7 @@ done
   ./peach --showenv > peach.txt
   ./pittool makexsd
 )
-for assembly in Peach PitTool Peach.LLM.Validations.DataModel Peach.LLM.Validations.Mutator Peach.LLM.Validations.Fixer; do
+for assembly in Peach PitTool Peach.LLM.Validations.DataModel Peach.LLM.Validations.Mutator; do
   for suffix in dll deps.json runtimeconfig.json; do
     if [ ! -f "$STAGING/$assembly.$suffix" ]; then
       echo "Error: published installation is missing '$assembly.$suffix'." >&2

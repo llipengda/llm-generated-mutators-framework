@@ -23,22 +23,21 @@ class ConfigTests(unittest.TestCase):
     def test_builds_protocol_config_without_backend_environment_changes(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             config_module.build_config_from_args(
-                "mqtt", "seeds/mqtt", ["rfc/one.pdf", "rfc/two.pdf"], fixer=True,
+                "mqtt", "seeds/mqtt", ["rfc/one.pdf", "rfc/two.pdf"],
             )
             self.assertEqual(dict(os.environ), {})
         self.assertEqual(config_module.get_protocol_name(), "mqtt")
         self.assertEqual(config_module.get_seed_dir(), "seeds/mqtt")
         self.assertEqual(config_module.get_rfc_paths(), ["rfc/one.pdf", "rfc/two.pdf"])
-        self.assertTrue(config_module.get_fixer_enabled())
         self.assertEqual(config_module.get_language(), "en")
         self.assertEqual(set(config_module.config or {}), {
-            "protocol_name", "seed_dir", "rfc_paths", "fixer", "language",
+            "protocol_name", "seed_dir", "rfc_paths", "language",
         })
 
     def test_config_getters_require_initialization(self) -> None:
         for getter in (
             config_module.get_protocol_name, config_module.get_seed_dir,
-            config_module.get_rfc_paths, config_module.get_fixer_enabled,
+            config_module.get_rfc_paths,
             config_module.get_language,
         ):
             with self.subTest(getter=getter.__name__):
@@ -54,14 +53,13 @@ class ConfigTests(unittest.TestCase):
             patch("main.load_env"), patch("main.log_session", return_value=nullcontext()):
             result = CliRunner().invoke(main, [
                 "--protocol", "mqtt", "--seed-dir", "seeds/mqtt",
-                "--rfc-path", "rfc/one.pdf", "--rfc-path", "rfc/two.pdf", "--fixer",
+                "--rfc-path", "rfc/one.pdf", "--rfc-path", "rfc/two.pdf",
                 "--language", "zh-CN",
             ])
         self.assertEqual(result.exit_code, 0, result.output)
         pipeline_factory.assert_called_once_with()
         pipeline.assert_called_once_with()
         self.assertEqual(config_module.get_rfc_paths(), ["rfc/one.pdf", "rfc/two.pdf"])
-        self.assertTrue(config_module.get_fixer_enabled())
         self.assertEqual(config_module.get_language(), "zh-CN")
 
     def test_language_accepts_names_and_rejects_empty_values(self) -> None:
@@ -89,6 +87,11 @@ class ConfigTests(unittest.TestCase):
         result = CliRunner().invoke(main, ["--modern-sdk"])
         self.assertEqual(result.exit_code, 2)
         self.assertIn("No such option", result.output)
+
+    def test_cli_rejects_removed_fixer_option(self) -> None:
+        result = CliRunner().invoke(main, ["--fixer"])
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("No such option: --fixer", result.output)
 
 
 if __name__ == "__main__":

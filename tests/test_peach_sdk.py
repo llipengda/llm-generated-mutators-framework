@@ -30,10 +30,6 @@ class PeachSdkTests(unittest.TestCase):
         for template in (
             "discovery/custom_scalar_generation.txt",
             "mutators/implementation.txt",
-            "fixers/generation.txt",
-            "fixers/fixup_generation.txt",
-            "fixers/test_generation.txt",
-            "fixers/test_repair.txt",
         ):
             with self.subTest(template=template):
                 prompt = load_prompt(template)

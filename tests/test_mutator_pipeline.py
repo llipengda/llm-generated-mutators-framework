@@ -32,7 +32,7 @@ class _Harness(MutatorSteps):
         self.seed_dir = "seeds/demo"
         self.state = {
             "packet_types": [packet.packet_type for packet in plan.packets],
-            "constraints": "", "data_type_analysis": {}, "current_step_index": 0,
+            "data_type_analysis": {}, "current_step_index": 0,
             "token_usage_total": new_usage_bucket(), "token_usage_by_step": {},
         }
         self.retriever = Mock()

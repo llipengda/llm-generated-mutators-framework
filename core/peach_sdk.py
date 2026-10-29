@@ -14,8 +14,7 @@ from xml.sax.saxutils import escape
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# Step 8 copies generated fixer DLLs into the SDK. Mutator builds and their
-# capability probe depend only on these stable SDK assemblies.
+# Mutator builds and their capability probe use only stable SDK assemblies.
 MUTATOR_SDK_REFERENCE_NAMES = frozenset({
     "BouncyCastle.Crypto.dll", "NLog.dll", "Newtonsoft.Json.dll",
     "Peach.Core.dll", "Peach.LLM.dll", "Peach.Pro.dll",
@@ -47,10 +46,9 @@ def _sdk_references(sdk_dir: Path) -> list[Path]:
     }
     # Runtime assets such as IronPython's WPF adapter are not compilation
     # references. Extra libraries can be passed explicitly by the caller.
-    # Step 8 also stages generated fixer APIs for its test-generation compiler.
     return sorted(
         path for path in sdk_dir.glob("*.dll")
-        if path.name in preferred_names or path.name.endswith("Fixers.dll")
+        if path.name in preferred_names
     )
 
 

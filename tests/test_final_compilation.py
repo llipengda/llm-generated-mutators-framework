@@ -64,10 +64,7 @@ class FinalCompilationTests(unittest.TestCase):
                     )
                     (mutators / "Orphan.cs").write_text("invalid C#", encoding="utf-8")
                     fixer.parent.mkdir()
-                    fixer.write_text(
-                        "public class DemoFixer { public Demo.DemoNumber Value = new(); }",
-                        encoding="utf-8",
-                    )
+                    fixer.write_text("invalid retired source", encoding="utf-8")
                     validations = fixer.parent / "Validations"
                     validations.mkdir()
                     (validations / "Test.cs").write_text("invalid C#", encoding="utf-8")
@@ -93,11 +90,12 @@ class FinalCompilationTests(unittest.TestCase):
 
     def test_protocol_without_custom_sources_still_compiles(self) -> None:
         self.source.unlink()
-        fixers = self.root / "Fixers"
-        fixers.mkdir()
-        source = fixers / "DemoFixer.cs"
-        source.write_text("public class DemoFixer {}", encoding="utf-8")
-        with patch(f"{_TARGET}.compile_csharp", return_value=subprocess.CompletedProcess([], 0, "", "")) as compiler:
+        mutators = self.root / "Mutators"
+        mutators.mkdir()
+        source = mutators / "Active.cs"
+        source.write_text("public class Active {}", encoding="utf-8")
+        with patch(f"{_TARGET}.manifest_sources", return_value=[source]), \
+            patch(f"{_TARGET}.compile_csharp", return_value=subprocess.CompletedProcess([], 0, "", "")) as compiler:
             self.pipeline.step_final_compile()
         self.assertEqual([Path(path) for path in compiler.call_args.args[0]], [source])
         self.assertFalse(compiler.call_args.kwargs.get("additional_references"))

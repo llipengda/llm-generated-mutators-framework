@@ -177,7 +177,7 @@ print it to stdout.
 | 3. Datamodel Validation & Fix | Parses seeds through the compiled Pit and compares re-serialized bytes. The test script immediately converts every Peach report node to compact DSL-path text in `datamodel_error_report.txt`; it performs no root-cause selection. A diagnosis agent analyzes that text and produces a repair plan; the auto-fix agent edits only DSL and recompiles. Up to 3 auto-retries, then interactive fallback. |
 | 4. Mutator Generation | Dispatches packet workers first. Each packet agent assesses all candidate fields against ordinary random mutation, returning only keep/skip and a short reason. The host saves `.assessment.json` and generates `.g.cs` only for retained fields; the LLM implements `.semantic.cs`, then the packet compiles. Up to 4 packets run in parallel. |
 | 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Reports ERROR if any iteration throws; otherwise summarizes total, PASS, FAIL and UNCHANGED counts. Mutators with ERRORs or PASS=0 must be repaired or disabled. Repairs are grouped by packet's semantic file. Disabling persists per class in the manifest and generates selectors that always return false. Both choices rebuild and retest affected packets; unresolved issues prompt again. Compiler and incomplete-validation errors stop the pipeline; generated-code/SDK failures can be disabled but cannot be repaired by semantic agents. |
-| Final Compilation | Compiles custom DataElement sources, active manifest mutator sources and fixer sources together into `{PROTO}.dll`, including the custom type definitions. |
+| Final Compilation | Compiles custom DataElement sources and active manifest mutator sources together into `{PROTO}.dll`, including the custom type definitions. |
 
 See [semantic-value assessment](docs/mutator-assessment.md) for selection,
 source ownership and regeneration behavior, and the [SDK reference](docs/llm-peach-sdk.md)
@@ -253,13 +253,6 @@ manifest, and groups repairs by packet. Skipping verification reuses `results.tx
 (or `summary.log` from a standalone test); an incomplete report or a failed command
 cannot be reused as a successful result. Old-format reports must be regenerated.
 
-Fixer validation and direct packet parsing:
-
-```bash
-./tests/peach_fixer/run_peach_fixer_test.sh mqtt
-./tests/peach_fixer/run_data_test.sh mqtt <hex-data>
-```
-
 Generate native fuzzing bundles and run one against the target:
 
 ```bash
@@ -285,7 +278,7 @@ This launcher uses the existing compiled artifacts in `llm/peach/mqtt/`;
 recompile changed mutators before running. It creates fresh `pdli/mosquitto:latest`
 containers with automatically allocated localhost ports and isolated plugin
 directories. The Pit explicitly names its MQTT root so generated selectors
-match. Fixers are not loaded. Both strategies use the same seeds and RNG seed;
+match. Both strategies use the same seeds and RNG seed;
 the LLM strategy defaults to three mutations per element (`--mutations`).
 Docker, the coverage image, `uv`, and the runtime required by `~/peach` must
 already be installed.

@@ -11,22 +11,14 @@ class CompilationStep(PeachStepMixin):
     def step_final_compile(self) -> None:
         UI.title("Final Compilation")
 
-        import glob
-
         cs_files: list[str] = []
         mutators_dir = f"./llm/peach/{self.protocol_lower}/Mutators/"
-        fixers_dir = f"./llm/peach/{self.protocol_lower}/Fixers/"
         _, data_elements_dir, _ = self._data_type_paths()
 
         # References do not embed type definitions in the final protocol DLL.
         cs_files.extend(str(path) for path in sorted(data_elements_dir.glob("*.cs")) if path.is_file())
         if os.path.isdir(mutators_dir):
             cs_files.extend(str(path) for path in manifest_sources(Path(mutators_dir)))
-        if os.path.isdir(fixers_dir):
-            cs_files.extend(
-                f for f in glob.glob(os.path.join(fixers_dir, "*.cs"))
-                if "Validations" not in f
-            )
 
         if not cs_files:
             UI.warn("No .cs files found to compile.")

@@ -16,7 +16,6 @@ PROJECTS = (
     "pro/PitTool/PitTool.csproj",
     "llm/Validations/DataModel/Peach.LLM.Validations.DataModel.csproj",
     "llm/Validations/Mutator/Peach.LLM.Validations.Mutator.csproj",
-    "llm/Validations/Fixer/Peach.LLM.Validations.Fixer.csproj",
 )
 
 
@@ -102,7 +101,7 @@ fi
         self.assertEqual((self.root / "peach/README.md").read_text(), "SDK reference")
         commands = self.log.read_text().splitlines()
         published = [command for command in commands if command.startswith("publish ")]
-        self.assertEqual(len(published), 5)
+        self.assertEqual(len(published), 4)
         self.assertTrue(all("--framework net8.0" in command for command in published))
         self.assertTrue(all("-p:PeachInstallTargetFramework=net8.0" in command for command in published))
         for project in PROJECTS:
@@ -187,7 +186,7 @@ touch "$output"
         for flavor in ("llm", "peach"):
             self.assertEqual((bundles / flavor / "python_fixup.py").read_text(), "value = 42")
             plugins = bundles / flavor / "ProtocolPlugins"
-            self.assertTrue((plugins / "DEMOFixers.dll").is_file())
+            self.assertFalse((plugins / "DEMOFixers.dll").exists())
             self.assertFalse((plugins / "UnmanagedDataElements.dll").exists())
             self.assertFalse((plugins / "UnmanagedFixers.dll").exists())
             for directory in (bundles / flavor, bundles / flavor / "Plugins"):

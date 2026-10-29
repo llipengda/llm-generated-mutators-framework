@@ -174,7 +174,7 @@ class PipelineLogTests(unittest.TestCase):
                 self.agent_graph = Agent()
                 self._state_lock = Lock()
                 self.state = {
-                    "packet_types": [], "data_type_analysis": {}, "constraints": "",
+                    "packet_types": [], "data_type_analysis": {},
                     "token_usage_total": new_usage_bucket(), "token_usage_by_step": {},
                     "current_step_index": 0,
                 }

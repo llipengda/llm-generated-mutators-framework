@@ -21,7 +21,8 @@ from core.peach_sdk import MUTATOR_SDK_REFERENCE_NAMES, compile_csharp, peach_sd
 
 
 ROOT = Path(__file__).resolve().parents[1]
-Validator = Literal["DataModel", "Mutator", "Fixer"]
+Validator = Literal["DataModel", "Mutator"]
+# Include retired plugin names so old SDK installations remain isolated.
 _PROTOCOL_PLUGIN_SUFFIXES = ("Mutators.dll", "Fixers.dll", "FixerTests.dll", "DataElements.dll")
 
 
@@ -142,9 +143,7 @@ def runtime_directory(
 def _protocol_plugins(directory: Path, *categories: str) -> list[Path]:
     name = directory.name.upper()
     paths = {"custom": directory / "DataElements" / "out" / f"{name}DataElements.dll",
-             "mutator": directory / "Mutators" / "out" / f"{name}Mutators.dll",
-             "fixer": directory / "Fixers" / "out" / f"{name}Fixers.dll",
-             "fixer_tests": directory / "Fixers" / "Validations" / "out" / f"{name}FixerTests.dll"}
+             "mutator": directory / "Mutators" / "out" / f"{name}Mutators.dll"}
     return [paths[category] for category in categories if paths[category].is_file()]
 
 
@@ -277,41 +276,6 @@ def run_mutator(protocol: str, seeds: Path | None = None, mutator_filter: str = 
                 plugins=_protocol_plugins(directory, "custom", "mutator"))
 
 
-def run_fixer(protocol: str) -> int:
-    directory = protocol_directory(protocol)
-    datamodel = _require_file(directory / "datamodel.xml", "DataModel")
-    fixers = directory / "Fixers"
-    sources = [*sorted(fixers.glob("*.cs")), *sorted((fixers / "Validations").glob("*.cs"))]
-    output = fixers / "Validations" / "out" / f"{protocol.upper()}FixerTests.dll"
-    result = compile_csharp(sources, output,
-                            additional_references=_protocol_plugins(directory, "custom"),
-                            excluded_reference_names=[f"{protocol.upper()}Fixers.dll"])
-    if _print_compile(result):
-        return result.returncode
-    _require_file(output, "Compiled fixer tests")
-    logs = directory / "fixer_test_logs"
-    _clean_logs(logs, all_files=True)
-    nunit = _require_file(peach_sdk_dir() / "nunit.framework.dll", "Fixer test dependency")
-    return _run("Fixer", [], protocol=protocol, datamodel=datamodel, logs=logs,
-                plugins=[*_protocol_plugins(directory, "custom", "fixer_tests"), nunit])
-
-
-def run_data(protocol: str, data: str) -> int:
-    if len(data) % 2 or re.fullmatch(r"[0-9a-fA-F]*", data) is None:
-        raise ValueError("Data must contain an even number of hexadecimal digits.")
-    directory = protocol_directory(protocol)
-    datamodel = _require_file(directory / "datamodel.xml", "DataModel")
-    logs = directory / "data_test_logs"
-    _clean_logs(logs, all_files=False)
-    status = _run("Fixer", ["-d", str(datamodel), f"{protocol.lower()}_packet_array", data],
-                  protocol=protocol, datamodel=datamodel, logs=logs,
-                  plugins=_protocol_plugins(directory, "custom", "fixer"))
-    failure_log = logs / "fixer.log"
-    if status and failure_log.is_file():
-        print(failure_log.read_text(encoding="utf-8", errors="replace"), end="")
-    return status
-
-
 def run_crack(protocol: str, datamodel: Path, name: str, sample: Path, *, verbose: bool = False) -> int:
     directory = protocol_directory(protocol)
     datamodel = _require_file(datamodel, "DataModel")
@@ -319,7 +283,7 @@ def run_crack(protocol: str, datamodel: Path, name: str, sample: Path, *, verbos
     sdk = peach_sdk_dir().resolve()
     _require_file(sdk / "PitTool.dll", "PitTool")
     logs = directory / "crack_logs"
-    with runtime_directory(sdk, logs, plugins=_protocol_plugins(directory, "custom", "mutator", "fixer"),
+    with runtime_directory(sdk, logs, plugins=_protocol_plugins(directory, "custom", "mutator"),
                            datamodel=datamodel) as runtime:
         arguments = ["crack", *(["-v"] if verbose else []), str(runtime / "datamodel.xml"), name, str(sample)]
         return subprocess.run(["dotnet", str(runtime / "PitTool.dll"), *arguments], cwd=runtime).returncode
@@ -338,11 +302,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     mutator.add_argument("protocol")
     mutator.add_argument("seeds", type=Path, nargs="?")
     mutator.add_argument("filter", nargs="?", default="")
-    fixer = commands.add_parser("fixer")
-    fixer.add_argument("protocol")
-    data = commands.add_parser("data")
-    data.add_argument("protocol")
-    data.add_argument("hex_data")
     crack = commands.add_parser("crack")
     crack.add_argument("protocol")
     crack.add_argument("--verbose", action="store_true")
@@ -355,10 +314,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_datamodel(args.protocol, args.seeds, args.datamodel, args.name, args.logs)
         if args.command == "mutator":
             return run_mutator(args.protocol, args.seeds, args.filter)
-        if args.command == "fixer":
-            return run_fixer(args.protocol)
-        if args.command == "data":
-            return run_data(args.protocol, args.hex_data)
         return run_crack(args.protocol, args.datamodel, args.name, args.sample, verbose=args.verbose)
     except (OSError, ValueError, RuntimeError) as error:
         print(f"[ERROR] {error}", file=sys.stderr)

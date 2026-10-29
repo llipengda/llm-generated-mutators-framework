@@ -3,13 +3,12 @@ from typing import override
 
 from core.prompts import render_prompt
 from core.agent import AgentConfig, build_agent_graph
-from core.config import get_fixer_enabled, get_language
+from core.config import get_language
 from pipeline.base import BasePipeline
 from pipeline.peach_steps import (
     CompilationStep,
     DatamodelGenerationSteps,
     DatamodelValidationSteps,
-    FixerSteps,
     MutatorSteps,
     ProtocolDiscoverySteps,
 )
@@ -21,20 +20,27 @@ class PeachPipeline(
     DatamodelGenerationSteps,
     DatamodelValidationSteps,
     MutatorSteps,
-    FixerSteps,
     CompilationStep,
     BasePipeline,
 ):
     def __init__(self):
         super().__init__()
         state_changed = False
-        if self.state.get("peach_step_layout") != "combined-dsl-plan-v2":
+        if self.state.get("peach_step_layout") not in {
+            "combined-dsl-plan-v2", "combined-dsl-mutators-v3",
+        }:
             previous_index = self.state.get("current_step_index", 0)
             if previous_index >= 2:
                 self.state["current_step_index"] = previous_index - 1
             elif previous_index >= 1:
                 self.state["current_step_index"] = 1
             self.state["peach_step_layout"] = "combined-dsl-plan-v2"
+            state_changed = True
+        if self.state.get("peach_step_layout") != "combined-dsl-mutators-v3":
+            # Old runs can point into removed steps or beyond the new step list.
+            # Resume these runs at final compilation with the retained sources.
+            self.state["current_step_index"] = min(self.state.get("current_step_index", 0), 5)
+            self.state["peach_step_layout"] = "combined-dsl-mutators-v3"
             state_changed = True
         if (
             self.state.get("current_step_index", 0) >= 2
@@ -85,16 +91,6 @@ class PeachPipeline(
             ("Step 4: Mutator Generation", self.step_4_mutator_generation),
             ("Step 5: Mutator Validation & Fix", self.step_5_mutator_validation_and_fix),
         ]
-
-        if get_fixer_enabled():
-            steps += [
-                ("Step 6: Constraint Extraction", self.step_6_constraint_extraction),
-                ("Step 6.1: Constraint Filtering", self.step_6_1_constraint_filtering),
-                ("Step 7: Fixer Generation", self.step_7_fixer_generation),
-                ("Step 7.5: Fixer-Constraint Mapping", self.step_7_5_fixer_constraint_mapping),
-                ("Step 8: Fixer Test Generation", self.step_8_fixer_test_generation),
-                ("Step 9: Fixer Validation & Fix", self.step_9_fixer_validation_and_fix),
-            ]
 
         steps.append(
             ("Final Compilation", self.step_final_compile),

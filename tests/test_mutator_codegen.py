@@ -271,11 +271,11 @@ ROOT = PacketArray
         changed = self.plan()
         self.assertTrue(packet_outputs_exist(changed, changed.packets[0]))
 
-    def test_copied_fixer_dll_is_excluded_from_mutator_compilation(self) -> None:
+    def test_copied_protocol_dll_is_excluded_from_mutator_compilation(self) -> None:
         plan = self.plan()
         packet = plan.packets[0]
         self.fake_build(plan, packet)
-        (self.sdk / "DEMOFixers.dll").write_bytes(b"Step 8 copies this into the SDK")
+        (self.sdk / "DEMOFixers.dll").write_bytes(b"artifact from an older installation")
         (self.sdk / "UnrelatedMutators.dll").write_bytes(b"another protocol's artifact")
         changed = self.plan()
         self.assertTrue(packet_outputs_exist(changed, changed.packets[0]))

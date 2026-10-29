@@ -72,10 +72,8 @@ for flavor in llm peach; do
   PLUGINS="$STAGING/ProtocolPlugins"
   mkdir -p "$PLUGINS"
   cp "$SDK_DIR/Peach.LLM.dll" "$SDK_DIR/Peach.LLM.Validations.Common.dll" "$PLUGINS/"
-  for directory in DataElements Fixers; do
-    assembly="$GENERATED/$directory/out/${PROTO_UPPER}${directory}.dll"
-    [ ! -f "$assembly" ] || cp "$assembly" "$PLUGINS/"
-  done
+  assembly="$GENERATED/DataElements/out/${PROTO_UPPER}DataElements.dll"
+  [ ! -f "$assembly" ] || cp "$assembly" "$PLUGINS/"
   if [ "$flavor" = llm ]; then
     cp "$GENERATED/Mutators/out/${PROTO_UPPER}Mutators.dll" "$PLUGINS/"
     strategy='<Strategy class="TwoPhaseRandom"><Param name="TwoPhaseMutation" value="True"/><Param name="MultipleMutationsPerElement" value="3"/></Strategy>'
