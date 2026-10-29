@@ -1,0 +1,9 @@
+For {{protocol_name}} protocol, list ALL the packet types according to the RFC document.
+
+Use the "RFC_Search" tool to look up the relevant sections in the RFC.
+Return the list as a comma-separated string.
+ONLY output the types without any additional explanation or formatting. For example: "CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, AUTH, PUBACK, PUBREC, PUBREL, PUBCOMP, PINGREQ, DISCONNECT".
+
+When using the "RFC_Search" tool, **ASK questions instead of assuming knowledge**.
+For example:
+- "MQTT packet types"

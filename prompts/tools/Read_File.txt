@@ -1,0 +1,1 @@
+Read an allowed file with stable 1-based line numbers.

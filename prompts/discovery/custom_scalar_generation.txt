@@ -1,0 +1,51 @@
+Generate runtime implementations for the DSL ExtendedType declarations
+required by the confirmed unsupported types in "{{report_path}}": {{names}}.
+Exact custom type contracts:
+{{custom_contracts_json}}
+
+Every generated custom type name must start with the protocol prefix
+"{{custom_prefix}}". This applies to the DSL ExtendedType element_name,
+the [DataElement]/[PitParsable] name, and the C# class name. For example,
+use "{{custom_prefix}}VarInt", never the unprefixed "VarInt".
+
+Before writing code, read
+"./examples/ExampleEscapedUInt.cs" completely. It is the only
+custom DataElement source-code reference you may use. It is a verified,
+demonstration-only encoding: reuse its Peach plugin API patterns, strict
+validation, Pit parsing, and serialization structure, but do NOT copy
+its invented wire encoding into a real protocol type. Do not read or rely
+on source files from the sibling llm-peach project.
+
+Use C# 12.0 features supported by the .NET SDK compiler. Use only APIs available in .NET 8 and the referenced Peach SDK assemblies.
+Use the namespace Peach.LLM.Generated.Dom.{{protocol_upper}}.
+Implement complete, strict, symmetric cracking and serialization for every
+valid encoding in the report, including malformed/truncated input handling,
+bounds, Sanitize, framework clone compatibility, PitParser, WritePit,
+common attributes/children/value,
+and Relation behavior when applicable. Use unique [DataElement] and
+[PitParsable] names. Do not use placeholders, TODOs, seed-specific logic,
+silent clamping, or a Blob fallback.
+
+Exception handling must distinguish cracking from fuzzing. During Crack,
+throw Peach.Core.PeachException for malformed/truncated input, invalid
+encodings, and other cracking errors. During fuzzing, throw
+Peach.Core.SoftException for invalid mutated values or failures in value
+conversion, Sanitize, and serialization (including
+InternalValueToBitStream), so Peach can skip the current fuzzing iteration.
+Shared validation/encoding helpers must surface the exception appropriate
+to the calling phase. These exception rules override the example's error
+handling; do not copy its CrackingFailure wrapping or its use of
+PeachException for fuzzing-time errors.
+
+Put the classes in "{{source_dir}}". Put `[assembly: PluginAssembly]` exactly
+once in "{{source_dir}}/AssemblyInfo.cs" (and never in each class).
+Write "{{source_dir}}/manifest.json" as a JSON array with exactly one
+object per generated type: {"wire_type": "...", "element_name":
+"exact type name to pass to DSL ExtendedType", "class_name":
+"fully qualified C# class"}.
+Use the "Build_DotNet_DLL" tool to compile all generated sources in
+"{{source_dir}}" to "{{dll_path}}". If it reports errors or warnings, read the
+diagnostics, fix the sources, and invoke the tool again. Continue until it
+reports success. Avoid ambiguous Peach/System type names: fully qualify
+framework types such as System.Text.Encoding when both namespaces expose
+the same short name. Write no files outside "{{source_dir}}".

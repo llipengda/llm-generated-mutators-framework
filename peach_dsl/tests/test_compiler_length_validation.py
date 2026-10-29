@@ -115,6 +115,26 @@ class LengthValidationTests(unittest.TestCase):
             root = ET.fromstring(to_peach_data_model(packet, include_header=False))
             self.assertIsNotNone(root.find("Number[@name='items']"))
 
+    def test_direct_decimal_relation_writeback_uses_native_integer_range(self) -> None:
+        for kind in ("size", "count"):
+            for width in (None, 6):
+                amount = DecimalString() if width is None else DecimalString[width]()
+                target = Blob[amount]() if kind == "size" else Array[Int8, amount]()
+                packet = type("Packet", (Schema,), {"amount": amount, "body": target})
+                relation = ET.fromstring(to_peach_data_model(packet, include_header=False)).find("String/Relation")
+                assert relation is not None
+                expression = relation.attrib["expressionSet"]
+                with self.subTest(kind=kind, width=width):
+                    if width is None:
+                        self.assertEqual(expression, f"str({kind})")
+                        boundary = 2**60 - 1 if kind == "size" else 2**31 - 1
+                        self.assertEqual(eval(expression, {kind: boundary}), str(boundary))
+                    else:
+                        self.assertNotIn("signed 64-bit", expression)
+                        self.assertEqual(eval(expression, {kind: 42}), "000042")
+                        with self.assertRaisesRegex(OverflowError, "declared length"):
+                            eval(expression, {kind: 10**width})
+
     def test_decimal_relation_writeback_rejects_values_that_cannot_be_read(self) -> None:
         for boundary in (-(2**63), 2**63 - 1):
             for decimal_type in (DecimalString, DecimalString[30]):
@@ -518,7 +538,7 @@ class LengthValidationTests(unittest.TestCase):
         class Header(Schema):
             first = Bit[3](
                 fixed(5), mutable=False, token=True, field_id="flag_id",
-                constraint="value < 6", value_type="string",
+                value_type="string",
             )
             second = Bit[5](1, token=True)
 
@@ -529,9 +549,43 @@ class LengthValidationTests(unittest.TestCase):
         self.assertEqual(first.get("mutable"), "false")
         self.assertEqual(first.get("token"), "true")
         self.assertEqual(first.get("fieldId"), "flag_id")
-        self.assertEqual(first.get("constraint"), "value < 6")
+        self.assertNotIn("constraint", first.attrib)
         self.assertEqual(first.get("valueType"), "string")
         self.assertEqual(second.get("token"), "true")
+
+    def test_flags_reject_member_constraints_but_plain_bits_allow_them(self) -> None:
+        for constraint in ("value < 6", lambda value: value < 6):
+            class Header(Schema):
+                mode = Bit[3](constraint=constraint)
+                reserved = Bit[5]()
+
+            with self.subTest(constraint=constraint):
+                root = ET.fromstring(to_peach_data_model(Header, include_header=False))
+                mode = root.find("Number[@name='mode']")
+                assert mode is not None
+                self.assertIn("constraint", mode.attrib)
+                with self.assertRaisesRegex(ValueError, r"^Flags field Header\.mode cannot use constraint$"):
+                    Flags(Int8, endian="big")(Header)
+
+    def test_flags_overrides_and_subclasses_cannot_add_constraints(self) -> None:
+        @Flags(Int8, endian="big")
+        class Header(Schema):
+            mode = Bit[3]()
+            reserved = Bit[5]()
+
+        for constraint in ("value < 6", lambda value: value < 6):
+            replacement = Bit[3](constraint=constraint)
+
+            class Packet(Schema):
+                header = Header(mode=replacement)
+
+            class Derived(type(Header)):
+                mode = replacement
+
+            for target in (Header(mode=replacement), Packet, Derived):
+                with self.subTest(constraint=constraint, target=target):
+                    with self.assertRaisesRegex(ValueError, r"^Flags field \w+\.mode cannot use constraint$"):
+                        to_peach_data_model(target, include_header=False)
 
     def test_computed_flag_emits_fixup_and_script(self) -> None:
         @compute

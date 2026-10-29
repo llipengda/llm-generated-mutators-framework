@@ -1,3 +1,4 @@
+from core.prompts import render_prompt
 from core.log import run_logged_task
 import json
 from pathlib import Path
@@ -14,8 +15,6 @@ from core.datamodel_dsl import (
 )
 from peach_dsl.compiler import DSLValidationError, validate_dsl_dependencies
 from pipeline.peach_steps.common import (
-    DATAMODEL_DSL_SOURCE_STYLE,
-    DATAMODEL_MODELING_GUARDRAILS,
     env_int,
     PeachStepMixin,
 )
@@ -109,116 +108,17 @@ class DatamodelGenerationSteps(PeachStepMixin):
                     "DSL planning was skipped without an existing manifest and type analysis"
                 )
 
-        planner_prompt = f"""
-        In one coordinated task, identify unsupported protocol field encodings and
-        plan a split Peach DSL DataModel for {self.protocol_name} packet types:
-        {packet_types}
-
-        The generated DataModel for each packet type must represent a complete 
-        {self.protocol_name} packet of that type.
-
-
-        First read "./docs/peach-dsl.md" completely. It is the authoritative DSL
-        language and capability reference. Use RFC_Search to inspect the concrete
-        protocol fields used by the requested packet types and to plan shared
-        structures, discriminators, length/count rules, and packet families.
-
-        For the type audit, analyze only wire encodings used by independently
-        defined protocol fields. An RFC grammar production is not automatically a
-        field type. Treat structures, containers, alternatives, repetition,
-        delimiters, lexical rules, and field-validity rules as ordinary DSL
-        composition or constraints when that is operationally sufficient.
-
-        Judge support only from the documented DSL. Do not inspect peach.txt, Peach
-        classes, generated XML, or runtime internals. An encoding needs no report
-        entry when documented scalar and container composition is sufficient for
-        expected DataModel cracking, serialization, and field relationships. The
-        representation need not implement every valid or invalid RFC case.
-
-        Report an encoding as unsupported only the following conditions are ALL met:
-        1. It is used by a concrete protocol field;
-        2. At least one another field ACTUALLY uses its decoded value as length or count;
-        3. It CAN NOT be represented with combination of documented DSL types
-           (losing some semantic detail is acceptable);
-        Group all fields using the same wire encoding into one entry.
-
-        DOUBLE-CHECK every reported encoding against the DSL guide.
-
-        For every unsupported encoding, recommend exactly one ExtendedType. Its DSL
-        symbol and element name must start with "{custom_prefix}", and its value
-        type must be int, float, str, or bytes.
-
-        Write the type audit to "{report_path}" with exactly this JSON shape:
-        {{
-          "protocol": "{self.protocol_lower}",
-          "packet_types": {json.dumps(packet_types)},
-          "unsupported_types": [{{
-            "wire_type": "concise name of the field encoding",
-            "used_by_fields": ["PacketOrStructure.field"],
-            "encoding": "wire representation required by the DataModel",
-            "required_behavior": "value or parsing behavior the DataModel requires",
-            "rfc_evidence": "relevant RFC section and concise evidence",
-            "dsl_gap": "why documented ordinary DSL elements and composition are insufficient",
-            "recommended_dsl": "{custom_prefix}TypeName = ExtendedType[value_type](\"{custom_prefix}TypeName\")",
-            "confidence": "high | medium | low",
-            "custom_type": {{
-              "symbol": "{custom_prefix}TypeName",
-              "element_name": "{custom_prefix}TypeName",
-              "value_type": "int | float | str | bytes"
-            }}
-          }}]
-        }}
-
-        If no custom scalar is required, write an empty unsupported_types array.
-        Every reported item must name a concrete field, describe one scalar wire
-        encoding rather than a structure, explain why ordinary documented DSL
-        composition is insufficient, and contain enough wire behavior to implement
-        its parser and serializer.
-
-        Then group packet types into families of at most {group_size} items and
-        write the DataModel plan to "{manifest_path}" with exactly this JSON shape:
-        {{
-          "protocol": "{self.protocol_lower}",
-          "shared_models": [{{
-            "symbol": "PublicCamelCaseSymbol",
-            "purpose": "wire responsibility",
-            "fields": [{{"name": "field_name", "dsl_type": "DSL construct",
-                        "wire_contract": "ordered encoding responsibility"}}]
-          }}],
-          "packet_groups": [{{
-            "id": "lower_snake_case",
-            "description": "brief whole-group description covering its family role, common outer framing, and packet structure",
-            "packet_types": ["exact requested packet type"],
-            "shared_refs": [{{
-              "symbol": "shared DSL symbol or prefixed custom type symbol",
-              "usage": "exact packet models, fields, or enclosing structures where this symbol is used"
-            }}],
-            "rfc_queries": ["focused evidence query"],
-            "packet_models": [{{
-              "packet_type": "exact requested packet type",
-              "symbol": "PublicCamelCasePacketSymbol"
-            }}]
-          }}]
-        }}
-
-        Every packet type must appear exactly once and all symbols must be globally
-        unique valid Python identifiers. Every planned Python identifier, including
-        symbols and field names, must avoid Python keywords. Do not specify
-        choice_name, runtime names, or Pit model names; the compiler derives them.
-        Each packet group description must give its generation agent the whole
-        family context, including common outer framing, discriminators, variable
-        headers, payloads, and the group's role in the protocol, so it cannot lose
-        outer structure while modeling a local detail.
-
-        shared_refs contains one object per DSL dependency, never runtime names.
-        Its symbol may name a declaration in shared_models or a protocol-prefixed
-        custom type from the unsupported type audit. Its usage must say concretely
-        which packet model(s), field(s), or enclosing structure use that symbol.
-        Include no speculative or unused reference, and omit no
-        dependency described by the group. A structure used by multiple families
-        belongs in shared_models. Write both requested JSON files in this single
-        planning task. Do not generate Python, C#, XML, or any other file.
-        """
+        planner_prompt = render_prompt(
+            "datamodel/planning.txt",
+            protocol_name=self.protocol_name,
+            packet_types=packet_types,
+            custom_prefix=custom_prefix,
+            report_path=report_path,
+            protocol_lower=self.protocol_lower,
+            packet_types_json=json.dumps(packet_types),
+            group_size=group_size,
+            manifest_path=manifest_path,
+        )
         if run_planner:
             manifest_path.unlink(missing_ok=True)
             report_path.unlink(missing_ok=True)
@@ -231,7 +131,7 @@ class DatamodelGenerationSteps(PeachStepMixin):
             )
             self.call_agent(
                 planner_prompt
-                + (f"\nAdditional user instruction:\n{planner_extra}" if planner_extra else ""),
+                + (render_prompt("shared/planner_user_instruction.txt", planner_extra=planner_extra) if planner_extra else ""),
                 "Step 2.1: DSL Type Analysis & Schema Planning",
                 agent_graph=agent,
             )
@@ -272,33 +172,13 @@ class DatamodelGenerationSteps(PeachStepMixin):
 
         def generate_shared() -> Path:
             shared_path.write_text("from peach_dsl import *\n", encoding="utf-8")
-            prompt = f"""
-            Generate only the shared Peach DSL schemas for {self.protocol_name}.
-            Contract:
-            {manifest_json}
-
-            {custom_element_context}
-
-            Use Read_File to read "./docs/peach-dsl.md", the type
-            analysis, schema manifest, and current shared module as needed. This
-            tool intentionally cannot read Peach XML, C#, examples, packet-family
-            modules, or arbitrary project files. Read the DSL guide completely and
-            follow it exactly. Use RFC_Search to confirm every shared field. Use
-            Write_File to write "{shared_path}" with `from peach_dsl import
-            *`, then define every contracted shared symbol exactly once. Also
-            declare every protocol-prefixed ExtendedType from the type analysis
-            that appears in shared_refs. Do not specify runtime model names or
-            invent a naming decorator. Do not define packet models, packet union,
-            ROOT, or family-local structures.
-
-            {DATAMODEL_MODELING_GUARDRAILS}
-
-            {DATAMODEL_DSL_SOURCE_STYLE}
-
-            Do not perform I/O or import any non-DSL module. Call
-            Validate_Peach_DSL_Module after writing, repair at most three times,
-            and finish only after PASS. Never write XML.
-            """
+            prompt = render_prompt(
+                "datamodel/shared_generation.txt",
+                protocol_name=self.protocol_name,
+                manifest_json=manifest_json,
+                custom_element_context=custom_element_context,
+                shared_path=shared_path,
+            )
             agent = build_agent_graph(
                 retriever=self.retriever,
                 config=self.agent_config,
@@ -329,38 +209,14 @@ class DatamodelGenerationSteps(PeachStepMixin):
         def generate_family(group: dict[str, Any], index: int) -> Path:
             family_path = dsl_dir / f"family_{group['id']}.py"
             family_path.unlink(missing_ok=True)
-            prompt = f"""
-            Generate one Peach DSL packet family for {self.protocol_name}.
-            Read "./docs/peach-dsl.md" completely.
-
-            Complete immutable contract:
-            {manifest_json}
-
-            Assigned family:
-            {json.dumps(group, ensure_ascii=False, indent=2)}
-
-            {custom_element_context}
-
-            Treat the assigned family's description and every shared_refs usage as
-            a required whole-model checklist. Use RFC_Search separately for each
-            assigned packet. Confirm exact
-            discriminator, wire order, sizes/endianness, length/count relations,
-            optional conditions, repetition and payload structure. Write only
-            "{family_path}". Import exact referenced symbols with
-            `from shared_model import ...`; never use the relative form
-            `from .shared_model import ...`. Define every Python symbol from
-            packet_models exactly once. The compiler derives runtime model names;
-            do not express them with a DSL decorator. Do not define shared models,
-            packet union, packet array, or ROOT.
-
-            {DATAMODEL_MODELING_GUARDRAILS}
-
-            {DATAMODEL_DSL_SOURCE_STYLE}
-
-            Call Validate_Peach_DSL_Module after writing and use Apply_Patch to
-            repair type or syntax failures, at most three times. Never modify
-            shared_model.py or write XML.
-            """
+            prompt = render_prompt(
+                "datamodel/family_generation.txt",
+                protocol_name=self.protocol_name,
+                manifest_json=manifest_json,
+                group_json=json.dumps(group, ensure_ascii=False, indent=2),
+                custom_element_context=custom_element_context,
+                family_path=family_path,
+            )
             agent = build_agent_graph(
                 retriever=self.retriever,
                 config=self.agent_config,
@@ -465,24 +321,14 @@ class DatamodelGenerationSteps(PeachStepMixin):
             modules = [dsl_dir / "shared_model.py"] + [
                 dsl_dir / f"family_{group['id']}.py" for group in manifest["packet_groups"]
             ]
-            prompt = f"""
-            Repair the split {self.protocol_name} Peach DSL after this integration
-            compiler error:
-            {error}
-
-            Read "./docs/peach-dsl.md", "{manifest_path}", "{root_path}", and:
-            {chr(10).join(f'- "{path}"' for path in modules)}
-
-            Preserve every packet assignment and RFC wire semantic. Change only
-            schema_manifest.json, shared_model.py, and family modules; root.py and
-            datamodel.xml are derived and must not be edited. Shared structures
-            used by multiple families belong in shared_model.py. Keep DSL symbols
-            globally unique. Make the smallest correction with Apply_Patch when
-            editing an existing file, then call
-            Validate_Peach_DSL_Module on each changed module. Never write XML.
-
-            {DATAMODEL_DSL_SOURCE_STYLE}
-            """
+            prompt = render_prompt(
+                "datamodel/assembly_repair.txt",
+                protocol_name=self.protocol_name,
+                error=error,
+                manifest_path=manifest_path,
+                root_path=root_path,
+                module_paths=chr(10).join((f'- "{path}"' for path in modules)),
+            )
             agent = build_agent_graph(
                 retriever=self.retriever,
                 config=self.agent_config,

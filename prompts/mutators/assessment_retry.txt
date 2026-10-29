@@ -1,0 +1,2 @@
+Your last report was invalid: {{error}}
+Return the complete corrected JSON report.

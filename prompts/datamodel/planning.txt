@@ -1,0 +1,107 @@
+In one coordinated task, identify unsupported protocol field encodings and
+plan a split Peach DSL DataModel for {{protocol_name}} packet types:
+{{packet_types}}
+
+The generated DataModel for each packet type must represent a complete
+{{protocol_name}} packet of that type.
+
+First read "./docs/peach-dsl.md" completely. It is the authoritative DSL
+language and capability reference. Use RFC_Search to inspect the concrete
+protocol fields used by the requested packet types and to plan shared
+structures, discriminators, length/count rules, and packet families.
+
+For the type audit, analyze only wire encodings used by independently
+defined protocol fields. An RFC grammar production is not automatically a
+field type. Treat structures, containers, alternatives, repetition,
+delimiters, lexical rules, and field-validity rules as ordinary DSL
+composition or constraints when that is operationally sufficient.
+
+Judge support only from the documented DSL. Do not inspect peach.txt, Peach
+classes, generated XML, or runtime internals. An encoding needs no report
+entry when documented scalar and container composition is sufficient for
+expected DataModel cracking, serialization, and field relationships. The
+representation need not implement every valid or invalid RFC case.
+
+Report an encoding as unsupported only the following conditions are ALL met:
+1. It is used by a concrete protocol field;
+2. At least one another field ACTUALLY uses its decoded value as length or count;
+3. It CAN NOT be represented with combination of documented DSL types
+   (losing some semantic detail is acceptable);
+Group all fields using the same wire encoding into one entry.
+
+DOUBLE-CHECK every reported encoding against the DSL guide.
+
+For every unsupported encoding, recommend exactly one ExtendedType. Its DSL
+symbol and element name must start with "{{custom_prefix}}", and its value
+type must be int, float, str, or bytes.
+
+Write the type audit to "{{report_path}}" with exactly this JSON shape:
+{
+  "protocol": "{{protocol_lower}}",
+  "packet_types": {{packet_types_json}},
+  "unsupported_types": [{
+    "wire_type": "concise name of the field encoding",
+    "used_by_fields": ["PacketOrStructure.field"],
+    "encoding": "wire representation required by the DataModel",
+    "required_behavior": "value or parsing behavior the DataModel requires",
+    "rfc_evidence": "relevant RFC section and concise evidence",
+    "dsl_gap": "why documented ordinary DSL elements and composition are insufficient",
+    "recommended_dsl": "{{custom_prefix}}TypeName = ExtendedType[value_type]("{{custom_prefix}}TypeName")",
+    "confidence": "high | medium | low",
+    "custom_type": {
+      "symbol": "{{custom_prefix}}TypeName",
+      "element_name": "{{custom_prefix}}TypeName",
+      "value_type": "int | float | str | bytes"
+    }
+  }]
+}
+
+If no custom scalar is required, write an empty unsupported_types array.
+Every reported item must name a concrete field, describe one scalar wire
+encoding rather than a structure, explain why ordinary documented DSL
+composition is insufficient, and contain enough wire behavior to implement
+its parser and serializer.
+
+Then group packet types into families of at most {{group_size}} items and
+write the DataModel plan to "{{manifest_path}}" with exactly this JSON shape:
+{
+  "protocol": "{{protocol_lower}}",
+  "shared_models": [{
+    "symbol": "PublicCamelCaseSymbol",
+    "purpose": "wire responsibility",
+    "fields": [{"name": "field_name", "dsl_type": "DSL construct",
+                "wire_contract": "ordered encoding responsibility"}]
+  }],
+  "packet_groups": [{
+    "id": "lower_snake_case",
+    "description": "brief whole-group description covering its family role, common outer framing, and packet structure",
+    "packet_types": ["exact requested packet type"],
+    "shared_refs": [{
+      "symbol": "shared DSL symbol or prefixed custom type symbol",
+      "usage": "exact packet models, fields, or enclosing structures where this symbol is used"
+    }],
+    "rfc_queries": ["focused evidence query"],
+    "packet_models": [{
+      "packet_type": "exact requested packet type",
+      "symbol": "PublicCamelCasePacketSymbol"
+    }]
+  }]
+}
+
+Every packet type must appear exactly once and all symbols must be globally
+unique valid Python identifiers. Every planned Python identifier, including
+symbols and field names, must avoid Python keywords. Do not specify
+choice_name, runtime names, or Pit model names; the compiler derives them.
+Each packet group description must give its generation agent the whole
+family context, including common outer framing, discriminators, variable
+headers, payloads, and the group's role in the protocol, so it cannot lose
+outer structure while modeling a local detail.
+
+shared_refs contains one object per DSL dependency, never runtime names.
+Its symbol may name a declaration in shared_models or a protocol-prefixed
+custom type from the unsupported type audit. Its usage must say concretely
+which packet model(s), field(s), or enclosing structure use that symbol.
+Include no speculative or unused reference, and omit no
+dependency described by the group. A structure used by multiple families
+belongs in shared_models. Write both requested JSON files in this single
+planning task. Do not generate Python, C#, XML, or any other file.

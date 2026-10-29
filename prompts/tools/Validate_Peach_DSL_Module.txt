@@ -1,0 +1,1 @@
+Type-check a Peach DSL module and evaluate every Schema it defines.

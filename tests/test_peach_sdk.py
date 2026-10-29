@@ -8,11 +8,11 @@ from unittest.mock import patch
 
 from core.peach_sdk import (
     compile_csharp,
-    csharp_language_guidance,
     csharp_language_version,
     ensure_mutator_sdk,
     peach_sdk_dir,
 )
+from core.prompts import load_prompt
 
 
 class PeachSdkTests(unittest.TestCase):
@@ -27,8 +27,18 @@ class PeachSdkTests(unittest.TestCase):
 
     def test_language_guidance_matches_net8_compiler(self) -> None:
         self.assertEqual(csharp_language_version(), "12.0")
-        self.assertIn("C# 12", csharp_language_guidance())
-        self.assertIn(".NET 8", csharp_language_guidance())
+        for template in (
+            "discovery/custom_scalar_generation.txt",
+            "mutators/implementation.txt",
+            "fixers/generation.txt",
+            "fixers/fixup_generation.txt",
+            "fixers/test_generation.txt",
+            "fixers/test_repair.txt",
+        ):
+            with self.subTest(template=template):
+                prompt = load_prompt(template)
+                self.assertIn(f"C# {csharp_language_version()}", prompt)
+                self.assertIn(".NET 8", prompt)
 
     def test_compiles_csharp12_against_installed_peach(self) -> None:
         if shutil.which("dotnet") is None:

@@ -1,0 +1,23 @@
+Use C# 12.0 features supported by the .NET SDK compiler. Use only APIs available in .NET 8 and the referenced Peach SDK assemblies.
+We ran a verification test against the generated fixers. The test failed for the fixer/test `{{test_name}}`.
+Here is the test error output:
+
+```
+{{test_output}}
+```
+
+The test logs indicate there are issues with either the generated C# code for the fixer or the test itself.
+
+You need to:
+1. Find the C# file containing the fixer function in `./llm/peach/{{protocol_lower}}/Fixers/` and the test in `./llm/peach/{{protocol_lower}}/Fixers/Validations/`.
+2. Analyze the traceback and error message to understand the logic flaw or runtime exception.
+3. Use the "Read_File" tool to read the corresponding file(s).
+4. Fix the bug in the C# code. Make sure to handle potential nulls, index out of bounds, etc., that might occur at runtime.
+5. Use "Apply_Patch" for localized fixes. Use "Write_File" only if a
+   complete file genuinely needs to be replaced.
+6. Use the "Build_DotNet_DLL" tool to recompile:
+   - The fixers DLL at "./llm/peach/{{protocol_lower}}/Fixers/out/{{protocol_upper}}Fixers.dll"
+   - The test DLL at "./llm/peach/{{protocol_lower}}/Fixers/Validations/out/{{protocol_upper}}FixerTests.dll"
+   Ensure there are no syntax errors.
+
+Be thorough and ensure the C# code will successfully compile and pass the tests.

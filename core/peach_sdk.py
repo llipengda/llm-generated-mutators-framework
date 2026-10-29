@@ -34,14 +34,6 @@ def csharp_language_version() -> str:
     return "12.0"
 
 
-def csharp_language_guidance() -> str:
-    """Keep agent language and API guidance aligned with the selected compiler."""
-    return (
-        f"Use C# {csharp_language_version()} features supported by the .NET SDK compiler. "
-        "Use only APIs available in .NET 8 and the referenced Peach SDK assemblies."
-    )
-
-
 def _sdk_references(sdk_dir: Path) -> list[Path]:
     preferred_names = {
         "BouncyCastle.Crypto.dll",
@@ -155,7 +147,7 @@ def compile_csharp(
 
 
 def ensure_mutator_sdk() -> None:
-    """Check required structural APIs before spending agent calls."""
+    """Check required mutator APIs before spending agent calls."""
     with tempfile.TemporaryDirectory(prefix="peach-mutator-sdk-check-") as directory:
         source = Path(directory) / "MutatorSdkProbe.cs"
         source.write_text(
@@ -163,8 +155,19 @@ def ensure_mutator_sdk() -> None:
 using Peach.LLM.Core;
 using Peach.LLM.Core.Mutators;
 
-public static class MutatorSdkProbe
+public class MutatorSdkProbe : LLMMutator
 {
+    public MutatorSdkProbe(DataElement obj) : base(obj) { }
+    public DataElement Resolve(DataElement obj) => Find(obj, "Root.items");
+    protected override void PerformMutation(DataElement obj)
+    {
+        Find("Root.items");
+        obj.SetValue(new byte[] { 0x2a });
+        obj.SetValue(42u);
+        obj.SetValue("text");
+        obj.SetValue(new Peach.Core.IO.BitStream(new byte[] { 0x2a }));
+    }
+
     public static bool Supports(DataElement obj)
     {
         return obj.MatchesPath("Root.items") &&
@@ -188,7 +191,7 @@ public static class MutatorSdkProbe
         raise RuntimeError(
             "The installed Peach SDK cannot compile structural mutators. "
             "Update Peach.LLM.dll to include LLMAddMutator, LLMRemoveMutator, "
-            "LLMRepeatMutator and MatchesPath, and use matching runtime assemblies. "
+            "LLMRepeatMutator, MatchesPath, SetValue and LLMMutator.Find, and use matching runtime assemblies. "
             "Run ./setup.sh with the updated llm-peach sources to install .NET 8 assemblies.\n"
             + details
         )

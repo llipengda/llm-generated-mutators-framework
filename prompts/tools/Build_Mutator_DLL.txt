@@ -1,0 +1,4 @@
+Compile only the current packet's generated and semantic sources.
+
+Source paths, SDK references and the output DLL are fixed by the
+host's mutation plan. No paths or compiler options are accepted.

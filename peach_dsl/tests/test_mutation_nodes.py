@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import unittest
+from xml.etree import ElementTree as ET
 
 if __package__ in ("", "tests"):
     __package__ = "peach_dsl.tests"
@@ -27,10 +28,65 @@ from .. import (
     fixed,
     get_mutation_nodes,
     get_node_types,
+    to_peach_data_model,
 )
 
 
 class MutationNodeTests(unittest.TestCase):
+    def test_derived_relations_follow_effective_references_without_propagating(self) -> None:
+        class Item(Schema):
+            length = Int16()
+            text = Blob[length + 1]()
+
+        class Packet(Schema):
+            count = Int8()
+            items = Array[Item, count]()
+            ordinary = Item()
+            overridden = Item(text=Blob[2]())
+            gate = Int8()
+            tail = Optional[Item](when=gate != 0)
+
+        nodes = self.nodes(Packet)
+        derived = {path for path, node in nodes.items() if node.node_type & NodeType.DERIVED}
+        self.assertEqual(derived, {
+            "Root.count", "Root.items[].length", "Root.ordinary.length",
+            "Root.tail.tail_internal.length",
+        })
+        self.assertTrue(all(nodes[path].node_type == NodeType.MUTABLE | NodeType.DERIVED for path in derived))
+        self.assertEqual(nodes["Root.gate"].node_type, NodeType.MUTABLE)
+        self.assertEqual(nodes["Root.overridden.length"].node_type, NodeType.MUTABLE)
+        self.assertEqual(nodes["Root.items"].node_type, NodeType.MUTABLE | NodeType.REPEATABLE | NodeType.OPTIONAL)
+        xml = ET.fromstring(to_peach_data_model(Packet, include_header=False))
+        self.assertIsNotNone(xml.find("Number[@name='count']/Relation[@type='count']"))
+        count = xml.find("Number[@name='count']")
+        assert count is not None
+        self.assertIsNone(count.get("mutable"))
+
+    def test_derived_external_relation_in_packet_library_and_custom_number(self) -> None:
+        VarInt = ExtendedType("MqttVarInt")
+
+        class Header(Schema):
+            length = VarInt()
+            gate = Int8()
+
+        class Packet(Schema):
+            header = Header()
+            payload = Blob[header.length]()
+            tail = Optional[Int8](when=header.gate != 0)
+
+        @PacketUnion
+        class Packets(Schema):
+            packet_union = Union(first=Packet, second=Packet, plain=Packet(payload=Blob[2]()))
+
+        nodes = self.nodes(Packets)
+        derived = {path for path, node in nodes.items() if node.node_type & NodeType.DERIVED}
+        self.assertEqual(derived, {
+            "Root.packet_union.first.header.length",
+            "Root.packet_union.second.header.length",
+        })
+        self.assertEqual(nodes["Root.packet_union.first.header.gate"].node_type, NodeType.MUTABLE)
+        self.assertEqual(nodes["Root.packet_union.first.payload"].node_type, NodeType.MUTABLE)
+
     def nodes(self, target: type[Schema], *, name: str = "Root", include_header: bool = True) -> dict[str, MutationNode]:
         rows = get_mutation_nodes(target, name=name, include_header=include_header)
         nodes = {row.path: row for row in rows}

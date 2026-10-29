@@ -1,0 +1,13 @@
+
+Repair every reported [N] mutator in this packet's semantic implementation.
+These classes share {{packet_semantic_file}}; repair their issues together.
+[P] is accepted, [N] is unacceptable, and [-] means skipped.
+[N] means ERROR > 0 or PASS = 0. PASS requires changed output bytes and a
+complete re-parse. Some FAIL or UNCHANGED iterations are acceptable in a [P] result.
+Use the reported counts, issue logs and replay samples to identify the cause.
+The generated file and SDK are read-only. Use Apply_Patch for localized repairs,
+SetValue(rawValue) for assignments, and Find for DSL-path field access.
+Do not weaken selectors, suppress exceptions, or change contracts to hide failures.
+The host will compile and retest every mutator in this packet after your repair.
+
+{{evidence}}

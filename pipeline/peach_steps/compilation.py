@@ -16,7 +16,10 @@ class CompilationStep(PeachStepMixin):
         cs_files: list[str] = []
         mutators_dir = f"./llm/peach/{self.protocol_lower}/Mutators/"
         fixers_dir = f"./llm/peach/{self.protocol_lower}/Fixers/"
+        _, data_elements_dir, _ = self._data_type_paths()
 
+        # References do not embed type definitions in the final protocol DLL.
+        cs_files.extend(str(path) for path in sorted(data_elements_dir.glob("*.cs")) if path.is_file())
         if os.path.isdir(mutators_dir):
             cs_files.extend(str(path) for path in manifest_sources(Path(mutators_dir)))
         if os.path.isdir(fixers_dir):
@@ -32,15 +35,11 @@ class CompilationStep(PeachStepMixin):
         output_dll = f"./llm/peach/{self.protocol_lower}/{self.protocol_upper}.dll"
         os.makedirs(os.path.dirname(output_dll), exist_ok=True)
 
-        _, _, custom_dll = self._data_type_paths()
-        extra_refs = [custom_dll] if custom_dll.is_file() else []
-
         UI.dim(f"Compiling {len(cs_files)} .cs files into {output_dll}...")
 
         result = compile_csharp(
             cs_files,
             output_dll,
-            additional_references=extra_refs,
             warnings_as_errors=False,
         )
         if result.returncode == 0:

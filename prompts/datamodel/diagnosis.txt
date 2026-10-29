@@ -1,0 +1,122 @@
+Diagnose the failed {{protocol_name}} Peach DataModel.
+Validator summary: {{validator_summary}}
+
+**FIRST ACTION**: Use "Read_File" to read
+"./docs/peach-dsl.md" completely before inspecting the failure report or
+proposing any repair.
+
+1. Read "{{converted_report_path}}". It is a compact, mechanical
+   conversion of every Peach cracking tree. Indentation preserves the
+   complete parent-child hierarchy; each node carries its DSL type,
+   bound DSL path, state, offsets, size, and value. Nested ERROR lines
+   and trailing PARSE or MISMATCH lines preserve the failure evidence.
+2. Do not read raw files from "{{log_dir}}". Analyze the converted report
+   yourself: group repeated symptoms, ignore cascading Choice failures,
+   and determine the most likely root causes.
+3. Read "{{dsl_dir}}/schema_manifest.json", then use the converted DSL
+   paths to select the relevant shared_model.py or family_<id>.py files.
+   Use Read_File on those DSL modules and confirm the
+   final editable file and line for every proposed repair.
+4. You may read "{{dsl_dir}}/root.py" to understand the complete
+   host-generated assembly and how the editable schemas are composed.
+   root.py is strictly read-only: do not write, modify, patch, validate,
+   or propose changes to it, and never use it as a diagnosis location.
+   Do not read datamodel.xml; it is also a derived artifact, and the
+   converted report already contains its relevant evaluated structure.
+5. Identify every distinct root cause supported by the evidence. Do not
+   target a fixed number of issues and do not merge independent causes
+   merely to limit the issue count. Use RFC_Search only when a
+   wire-format fact must be confirmed.
+
+A root cause may be that Step 1 omitted an RFC-defined packet type which
+is present in the validation corpus. Diagnose this only when the converted
+report shows that no existing packet branch can represent the packet and
+RFC_Search confirms it is a distinct protocol packet type. In that case,
+use action `add_packet_type`, set `packet_type` to the RFC's canonical
+name, and point a locations entry at the proposed new family_<id>.py
+module (line 1 and the proposed packet schema symbol are acceptable).
+Do not relabel a malformed instance of an existing type as a new type.
+
+DataModel structural, fixed-value, and generalization rules:
+- Model RFC-defined length and count relationships whenever the documented DSL
+  can express them. Connect a length/count field to the data it governs with
+  `Blob[length]`, `String[length]`, `Block[length]`, `Array[element, count]`, or
+  a supported field expression as appropriate. Prefer these relationships over
+  an unrelated scalar plus an unbounded `Blob` or `Array`; do not leave a known
+  relationship implicit merely because the supplied seeds still crack.
+- Small, deterministic, side-effect-free helper functions may be defined at
+  module scope when they reduce repeated declarations or substantially shorten
+  the generated DSL. Do not define them as members of a `Schema` class. Give
+  their parameters and return values Pyright-compatible type annotations.
+  Helpers may construct DSL declarations, but must not perform I/O, mutate global
+  state, dynamically evaluate code, or import non-DSL modules.
+- DSL `fixed(value)` is allowed when, and only when, the RFC requires one exact
+  wire value and matching that value is needed to crack the correct model or
+  Choice branch. Typical valid cases are protocol magic/literals, packet type
+  or opcode discriminators, and reserved bits or fixed flags that the RFC says
+  MUST have one value. A fixed protocol version may be a token only when this
+  model intentionally supports exactly that version.
+- Every fixed value must be justified by RFC evidence. Put it
+  on the smallest discriminating scalar/string in the packet-specific model.
+  Do not tokenize a container or a larger byte region merely because it happens
+  to distinguish the supplied samples.
+- Do NOT use `fixed(...)` for lengths/counts, identifiers, sequence numbers,
+  timestamps, checksums, payload data, optional content, variable flags, or an
+  enum/version field with multiple valid values. If several exact alternatives
+  require distinct cracking branches, model the alternatives explicitly and
+  fix only each branch's true discriminator. A fixed value is not a substitute
+  for a length reference, Optional, repetition, or a semantic constraint.
+- The RFC defines the accepted wire-language; seeds are only examples and
+  regression inputs. The DataModel must accept valid unseen packets, including
+  other legal values, lengths, counts, option combinations, repetitions, and
+  payload sizes for every requested packet type.
+- Never copy a seed-observed value into `fixed(...)`, infer a fixed size or
+  occurrence bound from the largest sample, remove an RFC-defined optional or
+  alternate branch because no seed exercises it, or replace known structure
+  with Blob just to make current seeds crack.
+- During repair, fix the general RFC-level structural rule causing the failure
+  and preserve all valid variants. Passing the supplied seeds is necessary but
+  not sufficient; reject any repair that merely special-cases seed bytes,
+  filenames, observed lengths, or the current corpus distribution.
+
+A converted failure observation proves that a particular seed failed;
+it does not prove
+that the seed's observed value, size, option set, or packet layout is the
+only valid one. Before recommending a new token or any narrowing change,
+confirm the exact invariant with RFC_Search. In each proposed fix, state
+the general protocol rule being restored; do not propose a seed-specific
+fixed value or exception.
+
+Special Common Problems:
+1. The packet is encrypted.
+   Recommend: add a new packet type with a single Blob field for the encrypted payload.
+   The new packet type must be added to schema_manifest.json and a new family_<id>.py module must be created.
+   The family should be placed as the last family in schema_manifest.json.
+
+Use Write_File to write exactly this compact JSON object, with explanatory
+strings in the configured language, to
+"{{report_path}}":
+{
+  "status": "ok",
+  "summary": "One-sentence conclusion",
+  "issues": [{
+    "action": "modify_existing | add_packet_type",
+    "packet_type": null,
+    "locations": [{
+      "dsl_file": "llm/peach/{{protocol_lower}}/datamodel_dsl/family_x.py",
+      "dsl_line": 123,
+      "dsl_path": "PacketClass.field_name"
+    }],
+    "cause": "Why this is a root cause",
+    "evidence": "Direct evidence from the validator log",
+    "fix": "The complete correction across every listed location"
+  }]
+}
+
+Each issue must contain one or more entries in `locations`. Include every
+declaration that must change to fix that root cause, even when those
+declarations are in different editable DSL modules. Do not emit
+`pit_path`.
+
+Write no other file. After Write_File succeeds, your final response may
+only briefly confirm that the report was saved; do not print the JSON.

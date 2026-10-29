@@ -71,9 +71,10 @@ setup.sh                 # Publishes the sibling llm-peach checkout for .NET 8 i
 2. Combined DSL type-support analysis and DataModel planning, then
    `shared_model.py`, followed by parallel family DSL generation → derived Peach Pit XML
 3. Datamodel validation & DSL fix
-4. DSL-driven mutator plan and deterministic `.g.cs` partial generation, followed by
-   LLM `.semantic.cs` implementations and scoped packet compilation (parallel)
-5. Mutator validation and packet-grouped semantic ERROR repair (FAIL report only)
+4. Dispatch packet-local workers, assess candidate fields' semantic value against
+   random mutation with brief keep/skip reasons, then generate `.g.cs` only for
+   retained fields, LLM `.semantic.cs` implementations and scoped compilation
+5. Mutator validation using current `[P]` / `[N]` / `[-]` reports: every `[N]` requires user-selected repair or persistent disabling; repairs are grouped by packet and affected packets are retested. `[P]` is accepted and `[-]` is skipped.
 6. Constraint extraction from RFC
 6.1. Constraint filtering (checks if datamodel already guarantees each constraint)
 7. Fixer generation (chunked, parallelized)
@@ -85,9 +86,10 @@ Generated code lands in `llm/peach/<proto>/` with subdirectories `Mutators/`, `F
 Editable DataModel sources live in `datamodel_dsl/shared_model.py` and
 `datamodel_dsl/family_<id>.py`; `root.py` and `datamodel.xml` are deterministic
 derived artifacts and must not be hand-edited.
-Mutator agents may edit only the packet's `.semantic.cs`. Host-owned `.g.cs`
-and `mutator_manifest.json` define exact interfaces and active sources; see
-`docs/mutator-generation.md`. Missing required methods must fail compilation.
+Assessment agents are read-only; implementation agents may edit only the packet's
+`.semantic.cs`. Host-owned `.g.cs` and `mutator_manifest.json` define exact
+interfaces and active sources; per-packet `.assessment.json` retains selection
+reasons. See `docs/mutator-assessment.md`. Missing required methods must fail compilation.
 
 ### Key conventions
 
@@ -99,7 +101,7 @@ and `mutator_manifest.json` define exact interfaces and active sources; see
 - **Peach SDK**: `setup.sh` publishes the full .NET 8 runtime into `peach/sdk/`, including validators, dependencies and runtime configurations. `PEACH_SDK_DIR` can override this location. `dotnet_tools.py` uses CoreCLR and loads the SDK at import time; setup must run first. The `codex/legacy-support` branch preserves the prior backend.
 - **Token tracking**: Each `call_agent()` creates a local `TokenUsageTracker` (per-invocation, thread-safe). Tracks `prompt_tokens`, `completion_tokens`, `cached_tokens`, and `calls` (LLM API invocations). Summarized at pipeline end.
 - **Model configuration**: Set via environment variables. `LLM_PEACH_MODEL` / `LLM_PEACH_TEMPERATURE` override `LLM_MODEL` / `LLM_TEMPERATURE`. Defaults: `gpt-5.4` / 0.7.
-- **`fix_verify_loop`**: Generic verify → fix → re-verify loop in `BasePipeline`. Up to 3 auto-retries, then interactive fallback (stop / provide hint and retry). Used by Peach Steps 3 and 5.
+- **`fix_verify_loop`**: Generic verify → fix → re-verify loop in `BasePipeline`. Up to 3 auto-retries, then interactive fallback (stop / provide hint and retry). Used by Peach Steps 3 and 9. Step 5 asks the user to repair or disable `[N]` mutators after each verification, then rebuilds and retests affected packets. `[N]` means ERROR > 0 or PASS = 0; `[P]` is accepted even with some FAIL/UNCHANGED iterations; `[-]` is skipped.
 
 ## Sibling project: ../llm-peach
 
@@ -124,8 +126,9 @@ The `../llm-peach/` directory is the Peach Fuzzer engine + LLM SDK. The framewor
 | `elem.MatchesPath("Root.items[].value")` | Match the complete rooted DSL path, including array item indices |
 | `elem.Get<T>()` | Typed access with element-kind validation and numeric/string/byte-stream conversion |
 
-Set mutations through `elem.MutatedValue = new Variant(value)` using a numeric
-variant for Number values or a byte-backed variant for raw encoded bytes.
+Set all mutations through `elem.SetValue(rawValue)` without a Variant wrapper.
+Numeric/text values clear TypeTransform; byte[]/BitwiseStream values enable it.
+Do not assign MutatedValue directly or manually toggle TypeTransform in generated mutators.
 
 **Custom DataElements** (declared with DSL `ExtendedType`, compiled into `datamodel.xml`):
 
@@ -148,7 +151,7 @@ Each validator is a C# console app in `llm/Validations/`. Shell scripts in
 `tests/` invoke `core.peach_runtime`, which runs them locally with `dotnet` in
 isolated temporary runtime directories. Only the current protocol's plugins
 are staged. `PEACH_LOG_DIR` directs cleanup and NLog to persistent per-protocol
-logs. All use `[PASS]`/`[FAIL]`/`[ERROR]` markers that the pipeline parses.
+logs. DataModel and Fixer use `[PASS]`/`[FAIL]`/`[ERROR]`; Mutator uses `[P]`/`[N]`/`[-]` with per-class iteration counts.
 
 **DataModel Validator** (`Validations/DataModel/Program.cs`):
 1. For each seed file: parse (crack) binary data through the datamodel
@@ -165,9 +168,10 @@ Usage: run_datamodel_test.sh <proto> <seed_dir>
 1. Reflection discovers all `LLMMutator` subclasses in the compiled mutator DLL
 2. For each seed file × mutator × matching data element: runs 100 iterations
 3. Each iteration: clone model → `randomMutation()` → serialize → re-crack
-4. Re-crack succeeds = Pass, re-crack fails = Fail, mutation itself throws = Error
-5. Writes logs to `fail/<MutatorName>.log` and `error/<MutatorName>.log`
-6. Has a replay mechanism that retries failures to produce minimal repro `.raw` files
+4. Changed bytes plus complete re-crack = PASS; parse failure/trailing input = FAIL; mutation exceptions = ERROR; identical bytes = UNCHANGED
+5. Prints one completed row per class: `[P] Name TOTAL=... PASS=... FAIL=... ERROR=... UNCHANGED=...`, `[N]` when ERROR > 0 or PASS = 0, or `[-] Name` when skipped. The pipeline parser lives in `core/mutator_validation.py`; old `[PASS]` / `[RESULT]` mutator rows are unsupported.
+6. Writes logs to `fail/<MutatorName>.log` and `error/<MutatorName>.log`
+7. Has a replay mechanism that retries failures to produce minimal repro `.raw` files
 
 ```
 Usage: run_peach_mutator_test.sh <proto> <seed_dir>
@@ -190,7 +194,7 @@ Usage: run_data_test.sh <proto> <hex>
 → dotnet Peach.LLM.Validations.Fixer.dll -d datamodel.xml <proto>_packet_array <hex>
 ```
 
-**Result format** (parsed by pipeline):
+**DataModel/Fixer result format** (parsed by pipeline; Mutator uses the compact format above):
 ```
 [PASS] 003/003 tests passed.      ← all good
 [FAIL] 002/003 tests passed.      ← some failed

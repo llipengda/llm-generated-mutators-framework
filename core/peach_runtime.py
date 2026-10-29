@@ -127,7 +127,7 @@ def runtime_directory(
             if fixup.is_file():
                 shutil.copy2(fixup, runtime / fixup.name)
         (runtime / "NLog.config").write_text(_nlog_config(log_dir.resolve()), encoding="utf-8")
-        for name in ("fail", "error"):
+        for name in ("fail", "error", "unchanged"):
             target = log_dir / name
             target.mkdir(exist_ok=True)
             local = runtime / name
@@ -146,6 +146,26 @@ def _protocol_plugins(directory: Path, *categories: str) -> list[Path]:
              "fixer": directory / "Fixers" / "out" / f"{name}Fixers.dll",
              "fixer_tests": directory / "Fixers" / "Validations" / "out" / f"{name}FixerTests.dll"}
     return [paths[category] for category in categories if paths[category].is_file()]
+
+
+def _mutator_summary(lines: Sequence[str]) -> str:
+    """Keep the validator's result table with compact, local-only status tags."""
+    rows = ["Mutator Test Results:"]
+    for line in lines:
+        if line.startswith(("[P] ", "[N] ", "[-] ")):
+            rows.append(line)
+        elif line.startswith("[RESULT] "):
+            match = re.search(r"\bPASS=(\d+)\b", line)
+            if match is None:
+                raise ValueError(f"Mutator result is missing PASS count: {line}")
+            rows.append(("[P]" if int(match.group(1)) > 0 else "[N]") + line[len("[RESULT]"):])
+        elif line.startswith("[ERROR] ") or line.startswith("[FAIL] "):
+            rows.append("[N]" + line[line.index(" "):])
+        elif line.startswith("[SKIP]"):
+            rows.append("[-]" + line[line.index(" "):])
+        elif line.startswith("[PASS] "):
+            rows.append("[P]" + line[len("[PASS]"):])
+    return "\n".join(rows) + "\n"
 
 
 def _run(
@@ -172,8 +192,26 @@ def _run(
     with runtime_directory(sdk, logs, plugins=plugins, datamodel=datamodel) as runtime:
         staged_arguments = [str(runtime / "datamodel.xml") if argument == str(datamodel) else argument
                             for argument in arguments]
-        result = subprocess.run(["dotnet", str(runtime / executable), *staged_arguments],
-                                cwd=runtime, env=environment)
+        command = ["dotnet", str(runtime / executable), *staged_arguments]
+        if validator == "Mutator":
+            summary_lines: list[str] = []
+            in_summary = False
+            with subprocess.Popen(command, cwd=runtime, env=environment, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1) as process:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    if line.strip() == "Mutator Test Results:":
+                        in_summary = True
+                    elif in_summary:
+                        summary_lines.append(line.rstrip("\r\n"))
+                status = process.wait()
+            if in_summary:
+                summary = logs / "summary.log"
+                summary.write_text(_mutator_summary(summary_lines), encoding="utf-8")
+                print(f"Saved mutator summary: {summary}", flush=True)
+        else:
+            status = subprocess.run(command, cwd=runtime, env=environment).returncode
         for report in logs.rglob("*.log"):
             content = report.read_text(encoding="utf-8", errors="replace")
             report.write_text(content.replace(str(runtime / "datamodel.xml"), str(datamodel)), encoding="utf-8")
@@ -184,7 +222,7 @@ def _run(
         for report in logs.rglob("*.log"):
             content = report.read_text(encoding="utf-8", errors="replace")
             report.write_text(content.replace("./pittool crack -v", replay_command), encoding="utf-8")
-    return result.returncode
+    return status
 
 
 def _print_compile(result: subprocess.CompletedProcess[str]) -> int:

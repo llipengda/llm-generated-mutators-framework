@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import subprocess
+import json
+import threading
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -9,8 +11,11 @@ from types import SimpleNamespace
 from typing import Callable, cast
 from unittest.mock import Mock, patch
 
+from langchain_core.messages import AIMessage
+
 from core.agent_types import AgentGraph, AgentResponse
 from core.mutator_codegen import MutatorPlan, PacketMutatorPlan
+from core.mutator_assessment import assessment_path
 from core.state import new_usage_bucket
 from core.tool_result import DotNetBuildData, ToolResult, tool_success
 from core.tools import get_tools
@@ -42,17 +47,6 @@ class _Harness(MutatorSteps):
         self.prompts.append(prompt)
         return {"messages": []}
 
-    def fix_verify_loop(
-        self, title: str, verify_fn: Callable[[], tuple[bool, str]],
-        fix_fn: Callable[[str, str | None], None],
-    ) -> bool:
-        success, output = verify_fn()
-        if not success:
-            fix_fn(output, None)
-            success, _ = verify_fn()
-        return success
-
-
 class MutatorPipelineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -75,7 +69,8 @@ class MutatorPipelineTests(unittest.TestCase):
             class_name=name, packet_type=packet_type,
             path=f"demo_packet_array.packets[].{packet_type}.value", dsl_path="value",
             namespace="Peach.LLM.Generated.Mutators.DEMO.Request",
-            operation="Mutate", runtime_type="Number", description="Mutable field",
+            operation="Mutate", runtime_type="Number", description="Mutable field", source_path=None,
+            enabled=True,
             hooks=(SimpleNamespace(name="MutateCore", signature="private void MutateCore(DataElement obj)"),),
         ) for name in class_names)
         packet = cast(PacketMutatorPlan, SimpleNamespace(
@@ -93,6 +88,9 @@ class MutatorPipelineTests(unittest.TestCase):
         def select(items: list[str], protocol: str) -> list[str]:
             return items
 
+        def retain(plan: MutatorPlan, packet: PacketMutatorPlan, index: int) -> PacketMutatorPlan:
+            return packet
+
         stack = ExitStack()
         stack.enter_context(patch(f"{_TARGET}.ensure_mutator_sdk"))
         stack.enter_context(patch(f"{_TARGET}.UI.title"))
@@ -102,10 +100,121 @@ class MutatorPipelineTests(unittest.TestCase):
         stack.enter_context(patch(f"{_TARGET}.ask_select_types", side_effect=select))
         stack.enter_context(patch(f"{_TARGET}.ask_regenerate", return_value=False))
         stack.enter_context(patch(f"{_TARGET}.ask_skip_verification", return_value=False))
+        stack.enter_context(patch(f"{_TARGET}.ask_mutator_failure_action", return_value="repair"))
         stack.enter_context(patch(f"{_TARGET}.build_agent_graph", return_value=Mock()))
         stack.enter_context(patch(f"{_TARGET}.prepare_packet"))
+        stack.enter_context(patch.object(
+            _Harness, "_assess_mutator_packet", side_effect=retain,
+        ))
         stack.enter_context(patch(f"{_TARGET}.set_active_packets"))
         return stack
+
+    def assessment_response(self, packet: PacketMutatorPlan, retained: set[str]) -> AgentResponse:
+        return {"messages": [AIMessage(content=json.dumps({
+            "decisions": [[index, path in retained,
+                           "unique protocol case" if path in retained else "random baseline is sufficient"]
+                          for index, path in enumerate(dict.fromkeys(spec.path for spec in packet.mutators))],
+        }))]}
+
+    def test_packet_assessment_precedes_sources_and_only_retained_fields_are_generated(self) -> None:
+        other_spec = cast(SimpleNamespace, self.packet.mutators[1])
+        other_spec.path += "_other"
+        self.packet.generated_file.unlink()
+        events: list[str] = []
+        response = self.assessment_response(self.packet, {self.packet.mutators[0].path})
+
+        def invoke(prompt: str, title: str, *, agent_graph: AgentGraph) -> AgentResponse:
+            if "Semantic Value Assessment" in title:
+                self.assertFalse(self.packet.generated_file.exists())
+                events.append("assessment")
+                return response
+            self.assertTrue(assessment_path(self.packet).is_file())
+            self.assertNotIn("Class: DemoMutateOther", prompt)
+            self.assertIn("Class: DemoMutateValue", prompt)
+            events.append("semantic")
+            return {"messages": []}
+
+        def prepare(plan: MutatorPlan, packet: PacketMutatorPlan) -> None:
+            self.assertEqual(events, ["assessment"])
+            self.assertTrue(assessment_path(packet).is_file())
+            self.assertEqual([spec.class_name for spec in packet.mutators], ["DemoMutateValue"])
+            self.assertIn(packet, plan.packets)
+            packet.generated_file.write_text("// accepted contract")
+            events.append("prepare")
+
+        with self.patched(), \
+            patch.object(_Harness, "_assess_mutator_packet", getattr(MutatorSteps, "_assess_mutator_packet")), \
+            patch.object(self.pipeline, "call_agent", side_effect=invoke), \
+            patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
+            patch(f"{_TARGET}.prepare_packet", side_effect=prepare), \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")), \
+            patch(f"{_TARGET}.build_agent_graph", return_value=Mock()) as agents:
+            self.pipeline.step_4_mutator_generation()
+        self.assertEqual(events, ["assessment", "prepare", "semantic"])
+        scope = agents.call_args_list[0].kwargs
+        self.assertEqual(scope["write_files"], ())
+        self.assertNotIn("Write_File", scope["tool_names"])
+        self.assertNotIn("Build_Mutator_DLL", scope["tool_names"])
+        self.assertNotIn(self.packet.generated_file, scope["read_files"])
+        self.assertNotIn(self.packet.semantic_file, scope["read_files"])
+        self.assertNotIn(assessment_path(self.packet), agents.call_args.kwargs["read_files"])
+
+    def test_invalid_assessment_cannot_modify_existing_sources_or_start_generation(self) -> None:
+        original = self.packet.generated_file.read_bytes()
+        invalid = {"messages": [AIMessage(content='{"decisions":[]}')]}
+        with self.patched(), \
+            patch.object(_Harness, "_assess_mutator_packet", getattr(MutatorSteps, "_assess_mutator_packet")), \
+            patch.object(self.pipeline, "call_agent", return_value=invalid) as invoke, \
+            patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
+            patch(f"{_TARGET}.prepare_packet") as prepare, \
+            patch(f"{_TARGET}.compile_packet") as compile_packet:
+            with self.assertRaisesRegex(RuntimeError, "failed before code generation"):
+                self.pipeline.step_4_mutator_generation()
+        self.assertEqual(invoke.call_count, 2)
+        prepare.assert_not_called()
+        compile_packet.assert_not_called()
+        self.assertEqual(self.packet.generated_file.read_bytes(), original)
+        self.assertFalse(assessment_path(self.packet).exists())
+
+    def test_all_skipped_assessment_produces_empty_contract_without_semantic_agent(self) -> None:
+        response = self.assessment_response(self.packet, set())
+        with self.patched(), \
+            patch.object(_Harness, "_assess_mutator_packet", getattr(MutatorSteps, "_assess_mutator_packet")), \
+            patch.object(self.pipeline, "call_agent", return_value=response) as invoke, \
+            patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
+            patch(f"{_TARGET}.prepare_packet") as prepare, \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            self.pipeline.step_4_mutator_generation()
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(prepare.call_args.args[1].mutators, ())
+        self.assertTrue(assessment_path(self.packet).exists())
+
+    def test_packet_workers_are_dispatched_before_their_assessments(self) -> None:
+        other = self.make_packet("response", ("DemoMutateResponse",))
+        self.plan = cast(MutatorPlan, SimpleNamespace(**{**vars(self.plan), "packets": (self.packet, other)}))
+        self.pipeline = _Harness(self.plan)
+        barrier = threading.Barrier(2, timeout=5)
+        completed: set[str] = set()
+        lock = threading.Lock()
+
+        def assess(plan: MutatorPlan, packet: PacketMutatorPlan, index: int) -> PacketMutatorPlan:
+            barrier.wait()
+            with lock:
+                completed.add(packet.packet_type)
+            return packet
+
+        def prepare(plan: MutatorPlan, packet: PacketMutatorPlan) -> None:
+            with lock:
+                self.assertIn(packet.packet_type, completed)
+
+        with self.patched(), \
+            patch.object(_Harness, "_assess_mutator_packet", side_effect=assess) as assess_packet, \
+            patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
+            patch(f"{_TARGET}.prepare_packet", side_effect=prepare), \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            self.pipeline.step_4_mutator_generation()
+        self.assertEqual(assess_packet.call_count, 2)
+        self.assertEqual(completed, {"request", "response"})
 
     def test_generation_passes_semantic_scope_and_exact_required_signatures(self) -> None:
         with self.patched(), patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
@@ -166,6 +275,23 @@ class MutatorPipelineTests(unittest.TestCase):
                 self.pipeline.step_4_mutator_generation()
         self.assertEqual(len(self.pipeline.prompts), 1)
 
+    def test_missing_structural_hook_is_routed_to_semantic_repair(self) -> None:
+        for code, name in (("CS0534", "InitializeAddedContent"), ("CS8795", "UpdatePresenceSource")):
+            with self.subTest(code=code):
+                spec = cast(SimpleNamespace, self.packet.mutators[0])
+                original = spec.hooks
+                spec.hooks = (SimpleNamespace(name=name, signature=f"protected override void {name}(DataElement obj)"),)
+                diagnostics = f"{self.packet.generated_file}(20,9): error {code}: Missing implementation of '{name}'"
+                self.pipeline.prompts.clear()
+                with self.patched(), patch(f"{_TARGET}.packet_outputs_exist", return_value=False), \
+                    patch(f"{_TARGET}.compile_packet", side_effect=[
+                        subprocess.CompletedProcess([], 1, diagnostics, ""),
+                        subprocess.CompletedProcess([], 0, "", ""),
+                    ]):
+                    self.pipeline.step_4_mutator_generation()
+                self.assertEqual(len(self.pipeline.prompts), 2)
+                spec.hooks = original
+
     def test_fresh_subset_selection_records_only_selected_packets_as_active(self) -> None:
         other = self.make_packet("response", ("DemoMutateResponse",))
         self.plan = cast(MutatorPlan, SimpleNamespace(
@@ -214,212 +340,213 @@ class MutatorPipelineTests(unittest.TestCase):
         active.assert_called_once_with(self.plan, ["request"])
         self.assertFalse(self.pipeline.prompts)
 
-    def test_validation_loads_active_manifest_contract_without_rebuilding_dsl(self) -> None:
-        other = self.make_packet("response", ("DemoMutateResponse",))
-        self.plan = cast(MutatorPlan, SimpleNamespace(
-            **{**vars(self.plan), "packets": (self.packet, other)},
-        ))
-        self.pipeline = _Harness(self.plan)
-        active_plan = cast(MutatorPlan, SimpleNamespace(
-            **{**vars(self.plan), "packets": (self.packet,)},
-        ))
-        output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
+    def report(self, *rows: str) -> str:
+        return "Mutator Test Results:\n" + "\n".join(rows) + "\n"
+
+    def passed_report(self) -> str:
+        return self.report(
+            "[P] DemoMutateValue TOTAL=100 PASS=1 FAIL=49 ERROR=0 UNCHANGED=50",
+            "[P] DemoMutateOther TOTAL=100 PASS=100 FAIL=0 ERROR=0 UNCHANGED=0",
+        )
+
+    def issue_report(self, *, errors: int = 0) -> str:
+        return self.report(
+            f"[N] DemoMutateValue TOTAL=100 PASS=0 FAIL=0 ERROR={errors} UNCHANGED={100-errors}",
+            "[P] DemoMutateOther TOTAL=100 PASS=100 FAIL=0 ERROR=0 UNCHANGED=0",
+        )
+
+    def issue_log(self, category: str, name: str = "DemoMutateValue", text: str = "issue evidence") -> Path:
+        directory = self.root / "mutator_test_logs" / category
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{name}.log"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_validation_loads_active_manifest_without_rebuilding_dsl(self) -> None:
         with self.patched(), patch.object(_Harness, "_mutator_plan", getattr(MutatorSteps, "_mutator_plan")), \
-            patch(f"{_TARGET}.load_mutator_plan", return_value=active_plan) as load, \
+            patch(f"{_TARGET}.load_mutator_plan", return_value=self.plan) as load, \
             patch(f"{_TARGET}.build_mutator_plan") as build, \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
+            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, self.passed_report(), "")):
             self.pipeline.step_5_mutator_validation_and_fix()
         load.assert_called_once()
         build.assert_not_called()
 
     def test_validation_rejects_active_packet_absent_from_pipeline_state(self) -> None:
-        orphan = self.make_packet("orphan", ("OrphanMutator",))
-        active_plan = cast(MutatorPlan, SimpleNamespace(
-            **{**vars(self.plan), "packets": (orphan,)},
-        ))
+        self.pipeline.state["packet_types"] = ["other"]
         with self.patched(), patch.object(_Harness, "_mutator_plan", getattr(MutatorSteps, "_mutator_plan")), \
-            patch(f"{_TARGET}.load_mutator_plan", return_value=active_plan), \
-            patch(f"{_TARGET}.build_mutator_plan") as build:
+            patch(f"{_TARGET}.load_mutator_plan", return_value=self.plan):
             with self.assertRaisesRegex(RuntimeError, "absent from pipeline state"):
                 self.pipeline.step_5_mutator_validation_and_fix()
-        build.assert_not_called()
 
-    def test_stopped_fix_loop_cannot_advance_to_next_step(self) -> None:
-        with self.patched(), \
-            patch.object(self.pipeline, "fix_verify_loop", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "stopped before"):
+    def test_p_and_partial_skips_need_no_action(self) -> None:
+        for output in (self.passed_report(), self.passed_report().replace(
+            "[P] DemoMutateOther TOTAL=100 PASS=100 FAIL=0 ERROR=0 UNCHANGED=0", "[-] DemoMutateOther")):
+            with self.subTest(output=output), self.patched(), \
+                patch(f"{_TARGET}.ask_mutator_failure_action") as choose, \
+                patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
                 self.pipeline.step_5_mutator_validation_and_fix()
+                choose.assert_not_called()
+                self.assertFalse(self.pipeline.prompts)
 
-    def test_compiler_or_runtime_failure_cannot_pass_without_error_logs(self) -> None:
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 1, ".NET runtime failed", "")):
-            with self.assertRaisesRegex(RuntimeError, "validator command failed"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-        self.assertFalse(self.pipeline.prompts)
+    def test_n_cancellation_stops_for_error_and_zero_pass(self) -> None:
+        for errors in (0, 100):
+            with self.subTest(errors=errors):
+                if errors:
+                    self.issue_log("error")
+                with self.patched(), patch(f"{_TARGET}.ask_mutator_failure_action", return_value="exit"), \
+                    patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, self.issue_report(errors=errors), "")):
+                    with self.assertRaisesRegex(RuntimeError, r"\[N\] mutators"):
+                        self.pipeline.step_5_mutator_validation_and_fix()
 
-    def test_incomplete_successful_process_is_an_infrastructure_failure(self) -> None:
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, "Found 0 mutators", "")):
-            with self.assertRaisesRegex(RuntimeError, "did not complete"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_all_skipped_mutators_cannot_pass_validation(self) -> None:
-        output = "Unable to parse data: bad seed\nMutator Test Results:\n[SKIP][000/000] DemoMutateValue\n[SKIP][000/000] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            with self.assertRaisesRegex(RuntimeError, "skipped every planned class"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_partial_skips_are_accepted_but_unplanned_classes_are_rejected(self) -> None:
-        output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[SKIP][000/000] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            self.pipeline.step_5_mutator_validation_and_fix()
-        output += "[PASS][100/100] UnplannedMutator\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            with self.assertRaisesRegex(RuntimeError, "unplanned classes"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_duplicate_validator_class_results_are_rejected(self) -> None:
-        output = "Mutator Test Results:\n[ERROR] DemoMutateValue\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            with self.assertRaisesRegex(RuntimeError, "duplicate class names"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_recrack_fail_is_reported_without_semantic_repair(self) -> None:
-        output = "Mutator Test Results:\n[FAIL][001/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            self.pipeline.step_5_mutator_validation_and_fix()
-        self.assertFalse(self.pipeline.prompts)
-
-    def test_error_logs_are_grouped_per_semantic_file_and_retest_whole_packet(self) -> None:
-        error_dir = self.root / "mutator_test_logs" / "error"
-        error_dir.mkdir(parents=True)
-        for name in ("DemoMutateValue", "DemoMutateOther"):
-            (error_dir / f"{name}.log").write_text(f"at {name}.MutateCore(DataElement obj): overflow", encoding="utf-8")
-        calls: list[list[str]] = []
-
-        def run(cmd: list[str], *, title: str) -> subprocess.CompletedProcess[str]:
-            calls.append(cmd)
-            if len(calls) == 1:
-                output = "Mutator Test Results:\n[ERROR] DemoMutateValue\n[ERROR] DemoMutateOther\n"
-            else:
-                for path in error_dir.glob("*.log"):
-                    path.unlink()
-                output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-            return subprocess.CompletedProcess(cmd, 0, output, "")
-
-        with self.patched(), \
-            patch(f"{_TARGET}.packet_for_class", return_value=self.packet), \
-            patch(f"{_TARGET}.UI.run_with_live_output", side_effect=run), \
-            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
-            self.pipeline.step_5_mutator_validation_and_fix()
-        self.assertEqual(len(self.pipeline.prompts), 1)
-        self.assertIn("DemoMutateValue", self.pipeline.prompts[0])
-        self.assertIn("DemoMutateOther", self.pipeline.prompts[0])
-        self.assertEqual(calls[1][-1], "DemoMutateOther,DemoMutateValue")
-
-    def test_unknown_error_log_is_rejected(self) -> None:
-        error_dir = self.root / "mutator_test_logs" / "error"
-        error_dir.mkdir(parents=True)
-        (error_dir / "UnknownMutator.log").write_text("error", encoding="utf-8")
-        output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.packet_for_class", side_effect=KeyError("unknown")), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            with self.assertRaisesRegex(RuntimeError, "Cannot route"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_generated_constructor_exception_is_not_sent_to_semantic_agent(self) -> None:
-        error_dir = self.root / "mutator_test_logs" / "error"
-        error_dir.mkdir(parents=True)
-        (error_dir / "DemoMutateValue.log").write_text(
-            "at DemoMutateValue..ctor (Peach.Core.Dom.DataElement obj): invalid argument", encoding="utf-8",
-        )
-        output = "Mutator Test Results:\n[ERROR] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.packet_for_class", return_value=self.packet), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
-            with self.assertRaisesRegex(RuntimeError, "generator/SDK"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-        self.assertFalse(self.pipeline.prompts)
-
-    def test_skip_verification_reuses_saved_results_without_source_checks(self) -> None:
-        output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        results_dir = self.root / "mutator_test_logs"
-        results_dir.mkdir()
-        (results_dir / "results.txt").write_text(output, encoding="utf-8")
-        self.packet.semantic_file.write_text("// edited after test", encoding="utf-8")
-        self.packet.generated_file.write_text("// changed contract", encoding="utf-8")
-        self.packet.output_dll.write_bytes(b"changed dll")
-        (self.dsl / "shared_model.py").write_text("# changed schema", encoding="utf-8")
-        with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True), \
-            patch(f"{_TARGET}.UI.run_with_live_output") as run:
-            self.pipeline.step_5_mutator_validation_and_fix()
-        run.assert_not_called()
-        self.assertFalse((results_dir / "verification.json").exists())
-
-    def test_skip_verification_requires_saved_complete_report(self) -> None:
-        with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True), \
-            patch(f"{_TARGET}.UI.run_with_live_output") as run:
-            with self.assertRaisesRegex(RuntimeError, "No saved mutator verification report"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-        run.assert_not_called()
-        results_dir = self.root / "mutator_test_logs"
-        results_dir.mkdir()
-        (results_dir / "results.txt").write_text(".NET runtime failed", encoding="utf-8")
-        with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True):
-            with self.assertRaisesRegex(RuntimeError, "did not complete"):
-                self.pipeline.step_5_mutator_validation_and_fix()
-
-    def test_failed_command_report_cannot_pass_when_verification_is_skipped(self) -> None:
-        output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-        with self.patched(), \
-            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 1, output, "")):
+    def test_failed_command_is_saved_and_cannot_be_reused(self) -> None:
+        with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 1, self.passed_report(), "runtime failed")):
             with self.assertRaisesRegex(RuntimeError, "validator command failed"):
                 self.pipeline.step_5_mutator_validation_and_fix()
         with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True), \
             patch(f"{_TARGET}.UI.run_with_live_output") as run:
             with self.assertRaisesRegex(RuntimeError, "failed validator command"):
                 self.pipeline.step_5_mutator_validation_and_fix()
-        run.assert_not_called()
+            run.assert_not_called()
 
-    def test_saved_filtered_retest_cannot_replace_full_report_on_next_run(self) -> None:
-        other = self.make_packet("response", ("DemoMutateResponse",))
-        self.plan = cast(MutatorPlan, SimpleNamespace(
-            **{**vars(self.plan), "packets": (self.packet, other)},
-        ))
-        self.pipeline = _Harness(self.plan)
-        error_dir = self.root / "mutator_test_logs" / "error"
-        error_dir.mkdir(parents=True)
-        (error_dir / "DemoMutateValue.log").write_text(
-            "at DemoMutateValue.MutateCore(DataElement obj): overflow", encoding="utf-8",
+    def test_repair_groups_n_classes_and_retests_whole_packet(self) -> None:
+        error = self.issue_log("error", text="at DemoMutateValue.MutateCore(DataElement obj): overflow")
+        self.issue_log("unchanged", "DemoMutateOther", "unchanged evidence")
+        output = self.report(
+            "[N] DemoMutateValue TOTAL=100 PASS=1 FAIL=0 ERROR=99 UNCHANGED=0",
+            "[N] DemoMutateOther TOTAL=100 PASS=0 FAIL=0 ERROR=0 UNCHANGED=100",
         )
-        calls = [0]
+        calls: list[list[str]] = []
 
-        def run(cmd: list[str], *, title: str) -> subprocess.CompletedProcess[str]:
-            calls[0] += 1
-            if calls[0] == 1:
-                output = "Mutator Test Results:\n[ERROR] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n[PASS][100/100] DemoMutateResponse\n"
-            else:
-                (error_dir / "DemoMutateValue.log").unlink()
-                output = "Mutator Test Results:\n[PASS][100/100] DemoMutateValue\n[PASS][100/100] DemoMutateOther\n"
-            return subprocess.CompletedProcess(cmd, 0, output, "")
+        def run(command: list[str], *, title: str) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(command, 0, output, "")
+            error.unlink()
+            return subprocess.CompletedProcess(command, 0, self.passed_report(), "")
 
-        with self.patched(), \
-            patch(f"{_TARGET}.packet_for_class", return_value=self.packet), \
-            patch(f"{_TARGET}.UI.run_with_live_output", side_effect=run), \
+        with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output", side_effect=run), \
             patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
             self.pipeline.step_5_mutator_validation_and_fix()
-        with self.patched(), \
-            patch(f"{_TARGET}.ask_skip_verification", return_value=True), \
-            patch(f"{_TARGET}.UI.run_with_live_output") as process:
+        self.assertEqual(len(self.pipeline.prompts), 1)
+        self.assertIn("overflow", self.pipeline.prompts[0])
+        self.assertIn("unchanged evidence", self.pipeline.prompts[0])
+        self.assertIn("SetValue(rawValue)", self.pipeline.prompts[0])
+        self.assertEqual(calls[1][-1], "DemoMutateOther,DemoMutateValue")
+
+    def test_zero_pass_repairs_receive_fail_and_unchanged_logs(self) -> None:
+        self.issue_log("fail", text="fail evidence")
+        self.issue_log("unchanged", text="unchanged evidence")
+        self.issue_log("fail", "DemoMutateOther", "accepted class evidence")
+        output = self.issue_report().replace("FAIL=0 ERROR=0 UNCHANGED=100", "FAIL=50 ERROR=0 UNCHANGED=50")
+        with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output", side_effect=[
+            subprocess.CompletedProcess([], 0, output, ""), subprocess.CompletedProcess([], 0, self.passed_report(), ""),
+        ]), patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            self.pipeline.step_5_mutator_validation_and_fix()
+        self.assertIn("fail evidence", self.pipeline.prompts[0])
+        self.assertIn("unchanged evidence", self.pipeline.prompts[0])
+        self.assertNotIn("accepted class evidence", self.pipeline.prompts[0])
+
+    def test_disable_persists_and_rebuilds_only_affected_packet(self) -> None:
+        def disable(plan: MutatorPlan, names: list[str]) -> MutatorPlan:
+            cast(SimpleNamespace, self.packet.mutators[0]).enabled = False
+            return plan
+
+        output = self.issue_report()
+        retest = output.replace("[N] DemoMutateValue TOTAL=100 PASS=0 FAIL=0 ERROR=0 UNCHANGED=100", "[-] DemoMutateValue")
+        with self.patched(), patch(f"{_TARGET}.ask_mutator_failure_action", return_value="disable"), \
+            patch(f"{_TARGET}.disable_mutators", side_effect=disable) as disabled, \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")) as build, \
+            patch(f"{_TARGET}.UI.run_with_live_output", side_effect=[
+                subprocess.CompletedProcess([], 0, output, ""), subprocess.CompletedProcess([], 0, retest, ""),
+            ]):
+            self.pipeline.step_5_mutator_validation_and_fix()
+        disabled.assert_called_once_with(self.plan, ["DemoMutateValue"])
+        build.assert_called_once_with(self.plan, self.packet)
+        self.assertTrue(self.packet.mutators[1].enabled)
+        self.assertFalse(self.pipeline.prompts)
+
+    def test_generated_and_structural_errors_are_not_sent_to_semantic_agent(self) -> None:
+        for structural in (False, True):
+            with self.subTest(structural=structural):
+                if structural:
+                    cast(SimpleNamespace, self.packet.mutators[0]).hooks = ()
+                self.issue_log("error", text="at DemoMutateValue..ctor (DataElement obj): failure")
+                with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, self.issue_report(errors=100), "")):
+                    with self.assertRaisesRegex(RuntimeError, "generator/SDK"):
+                        self.pipeline.step_5_mutator_validation_and_fix()
+                self.assertFalse(self.pipeline.prompts)
+
+    def test_saved_reports_and_standalone_summary_can_be_reused(self) -> None:
+        directory = self.root / "mutator_test_logs"
+        directory.mkdir()
+        for filename in ("summary.log", "results.txt"):
+            with self.subTest(filename=filename):
+                path = directory / filename
+                path.write_text(self.passed_report(), encoding="utf-8")
+                with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True), \
+                    patch(f"{_TARGET}.UI.run_with_live_output") as run:
+                    self.pipeline.step_5_mutator_validation_and_fix()
+                    run.assert_not_called()
+                path.unlink()
+
+    def test_missing_saved_report_requires_verification(self) -> None:
+        with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "No saved mutator verification report"):
+                self.pipeline.step_5_mutator_validation_and_fix()
+
+    def test_saved_filtered_report_cannot_replace_full_report(self) -> None:
+        other = self.make_packet("response", ("DemoMutateResponse",))
+        self.plan = cast(MutatorPlan, SimpleNamespace(**{**vars(self.plan), "packets": (self.packet, other)}))
+        self.pipeline = _Harness(self.plan)
+        first = self.issue_report() + "[P] DemoMutateResponse TOTAL=100 PASS=100 FAIL=0 ERROR=0 UNCHANGED=0\n"
+        with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output", side_effect=[
+            subprocess.CompletedProcess([], 0, first, ""), subprocess.CompletedProcess([], 0, self.passed_report(), ""),
+        ]) as run, patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            self.pipeline.step_5_mutator_validation_and_fix()
+            self.assertEqual(run.call_args.args[0][-1], "DemoMutateOther,DemoMutateValue")
+        with self.patched(), patch(f"{_TARGET}.ask_skip_verification", return_value=True):
             with self.assertRaisesRegex(RuntimeError, "omitted planned classes: DemoMutateResponse"):
                 self.pipeline.step_5_mutator_validation_and_fix()
-        process.assert_not_called()
+
+    def test_all_fields_filtered_out_skips_validator(self) -> None:
+        cast(SimpleNamespace, self.packet).mutators = ()
+        with self.patched(), patch(f"{_TARGET}.UI.run_with_live_output") as run, \
+            patch(f"{_TARGET}.ask_skip_verification") as choose:
+            self.pipeline.step_5_mutator_validation_and_fix()
+            run.assert_not_called()
+            choose.assert_not_called()
+
+    def test_all_skipped_rows_are_accepted_without_treating_them_as_n(self) -> None:
+        output = self.report("[-] DemoMutateValue", "[-] DemoMutateOther")
+        with self.patched(), patch(f"{_TARGET}.ask_mutator_failure_action") as choose, \
+            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, output, "")):
+            self.pipeline.step_5_mutator_validation_and_fix()
+            choose.assert_not_called()
+
+    def test_repair_that_still_returns_n_requires_another_action(self) -> None:
+        with self.patched(), patch(f"{_TARGET}.ask_mutator_failure_action", side_effect=["repair", "exit"]) as choose, \
+            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, self.issue_report(), "")) as run, \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            with self.assertRaisesRegex(RuntimeError, r"\[N\] mutators"):
+                self.pipeline.step_5_mutator_validation_and_fix()
+        self.assertEqual(choose.call_count, 2)
+        self.assertEqual(run.call_count, 2)
+
+    def test_disable_build_failure_stops_before_retest(self) -> None:
+        with self.patched(), patch(f"{_TARGET}.ask_mutator_failure_action", return_value="disable"), \
+            patch(f"{_TARGET}.disable_mutators", return_value=self.plan), \
+            patch(f"{_TARGET}.compile_packet", return_value=subprocess.CompletedProcess([], 1, "build failed", "")), \
+            patch(f"{_TARGET}.UI.run_with_live_output", return_value=subprocess.CompletedProcess([], 0, self.issue_report(), "")) as run:
+            with self.assertRaisesRegex(RuntimeError, "Compilation failed"):
+                self.pipeline.step_5_mutator_validation_and_fix()
+        run.assert_called_once()
+
+    def test_action_menu_supports_choices_and_cancellation(self) -> None:
+        from core.ui import ask_mutator_failure_action
+        for response, expected in (("repair", "repair"), ("disable", "disable"), (None, "exit")):
+            with self.subTest(response=response), patch("core.ui.questionary.select") as select:
+                select.return_value.ask.return_value = response
+                self.assertEqual(ask_mutator_failure_action(), expected)
 
     def test_scoped_build_tool_has_no_path_parameters_or_generic_compiler(self) -> None:
         result = tool_success("compiled", "compiled", DotNetBuildData(

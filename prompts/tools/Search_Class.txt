@@ -1,0 +1,7 @@
+Search for a class and its members in the loaded assemblies.
+
+Args:
+    query (str): A partial or full class name to search for.
+
+Returns:
+    A structured result containing class details and member signatures.

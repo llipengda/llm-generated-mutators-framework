@@ -1,0 +1,1 @@
+Search allowed files and directories, returning line-numbered matches.

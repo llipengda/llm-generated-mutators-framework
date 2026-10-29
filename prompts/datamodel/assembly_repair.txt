@@ -1,0 +1,27 @@
+Repair the split {{protocol_name}} Peach DSL after this integration
+compiler error:
+{{error}}
+
+Read "./docs/peach-dsl.md", "{{manifest_path}}", "{{root_path}}", and:
+{{module_paths}}
+
+Preserve every packet assignment and RFC wire semantic. Change only
+schema_manifest.json, shared_model.py, and family modules; root.py and
+datamodel.xml are derived and must not be edited. Shared structures
+used by multiple families belong in shared_model.py. Keep DSL symbols
+globally unique. Make the smallest correction with Apply_Patch when
+editing an existing file, then call
+Validate_Peach_DSL_Module on each changed module. Never write XML.
+
+DSL source style rules:
+- Keep generated DSL modules compact and code-focused. Do not write module,
+  class, or helper-function docstrings; section banners; separator lines; RFC
+  summaries; or multi-line explanatory comment blocks.
+- Omit comments for declarations whose meaning is already clear from the symbol,
+  field name, DSL type, or fixed value.
+- When a non-obvious field needs clarification, add at most one short end-of-line
+  comment directly after that field declaration, using `field = DSL(...)  # ...`.
+  Keep the comment on the same physical line as the field and state only the
+  essential wire-format fact.
+- Do not place standalone comments before or after fields. Prefer clear names and
+  concise DSL declarations over prose.

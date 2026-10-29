@@ -1,0 +1,6 @@
+Replace exactly one old_text occurrence in an existing Peach output file.
+
+Copy old_text exactly from Read_File without the displayed line-number
+prefixes. Include enough surrounding context to make the match unique. If
+expected_sha256 is supplied, the patch is rejected when the file has changed
+since that hash was calculated.

@@ -30,14 +30,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config_module.get_seed_dir(), "seeds/mqtt")
         self.assertEqual(config_module.get_rfc_paths(), ["rfc/one.pdf", "rfc/two.pdf"])
         self.assertTrue(config_module.get_fixer_enabled())
+        self.assertEqual(config_module.get_language(), "en")
         self.assertEqual(set(config_module.config or {}), {
-            "protocol_name", "seed_dir", "rfc_paths", "fixer",
+            "protocol_name", "seed_dir", "rfc_paths", "fixer", "language",
         })
 
     def test_config_getters_require_initialization(self) -> None:
         for getter in (
             config_module.get_protocol_name, config_module.get_seed_dir,
             config_module.get_rfc_paths, config_module.get_fixer_enabled,
+            config_module.get_language,
         ):
             with self.subTest(getter=getter.__name__):
                 with self.assertRaisesRegex(ValueError, "Config not built"):
@@ -53,12 +55,32 @@ class ConfigTests(unittest.TestCase):
             result = CliRunner().invoke(main, [
                 "--protocol", "mqtt", "--seed-dir", "seeds/mqtt",
                 "--rfc-path", "rfc/one.pdf", "--rfc-path", "rfc/two.pdf", "--fixer",
+                "--language", "zh-CN",
             ])
         self.assertEqual(result.exit_code, 0, result.output)
         pipeline_factory.assert_called_once_with()
         pipeline.assert_called_once_with()
         self.assertEqual(config_module.get_rfc_paths(), ["rfc/one.pdf", "rfc/two.pdf"])
         self.assertTrue(config_module.get_fixer_enabled())
+        self.assertEqual(config_module.get_language(), "zh-CN")
+
+    def test_language_accepts_names_and_rejects_empty_values(self) -> None:
+        config_module.build_config_from_args(
+            "mqtt", "seeds/mqtt", ["rfc/one.pdf"], language=" Japanese ",
+        )
+        self.assertEqual(config_module.get_language(), "Japanese")
+        with self.assertRaisesRegex(ValueError, "Language must not be empty"):
+            config_module.build_config_from_args(
+                "mqtt", "seeds/mqtt", ["rfc/one.pdf"], language="  ",
+            )
+        with patch("main.load_env") as load_env:
+            result = CliRunner().invoke(main, [
+                "--protocol", "mqtt", "--seed-dir", "seeds/mqtt",
+                "--rfc-path", "rfc/one.pdf", "--language", "  ",
+            ])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("Invalid value for '--language'", result.output)
+        load_env.assert_not_called()
 
     def test_cli_has_no_backend_option(self) -> None:
         result = CliRunner().invoke(main, ["--help"])

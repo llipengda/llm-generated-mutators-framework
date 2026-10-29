@@ -4,6 +4,7 @@ from typing import TypedDict
 import dotenv
 
 from core.log import console
+from core.language import normalize_language
 
 
 class Config(TypedDict):
@@ -11,6 +12,7 @@ class Config(TypedDict):
     seed_dir: str
     rfc_paths: list[str]
     fixer: bool
+    language: str
 
 
 config: Config | None = None
@@ -21,6 +23,7 @@ def build_config_from_args(
     seed_dir: str,
     rfc_paths: list[str],
     fixer: bool = False,
+    language: str = "en",
 ) -> None:
     global config
     config = Config(
@@ -28,6 +31,7 @@ def build_config_from_args(
         seed_dir=seed_dir,
         rfc_paths=rfc_paths,
         fixer=fixer,
+        language=normalize_language(language),
     )
 
 
@@ -57,6 +61,12 @@ def get_fixer_enabled() -> bool:
     if config is None:
         raise ValueError("Config not built yet.")
     return config["fixer"]
+
+
+def get_language() -> str:
+    if config is None:
+        raise ValueError("Config not built yet.")
+    return config["language"]
 
 
 def warn_if_rfc_missing(rfc_paths: list[str]) -> None:

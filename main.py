@@ -1,17 +1,21 @@
 import click
 from core.config import build_config_from_args, load_env
 from core.log import log_session
+from core.language import normalize_language
 
 @click.command()
 @click.option("--protocol", required=True)
 @click.option("--seed-dir", required=True)
 @click.option("--rfc-path", "rfc_paths", required=True, multiple=True, help="Path(s) to RFC document(s). Can be specified multiple times for multiple RFCs.")
 @click.option("--fixer", is_flag=True, default=False, help="Enable fixer generation and validation.")
+@click.option("--language", type=normalize_language, metavar="LANGUAGE", default="en", show_default=True,
+              help="Language for model reasoning and natural-language output (e.g. zh-CN, en, Japanese).")
 def main(
     protocol: str,
     seed_dir: str,
     rfc_paths: list[str],
     fixer: bool,
+    language: str,
 ):
     with log_session(protocol):
         load_env()
@@ -20,6 +24,7 @@ def main(
             seed_dir,
             list(rfc_paths),
             fixer=fixer,
+            language=language,
         )
         from pipeline.peach import PeachPipeline
 

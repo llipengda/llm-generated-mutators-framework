@@ -2,11 +2,11 @@ import json
 from pathlib import Path
 from typing import Any, TypeGuard, cast
 
+from core.prompts import render_prompt
 from core.agent import build_agent_graph
 from core.datamodel_dsl import normalize_symbol
 from core.peach_sdk import (
     compile_csharp,
-    csharp_language_guidance,
     peach_sdk_dir,
 )
 from pipeline.peach_steps.common import PeachStepMixin
@@ -41,17 +41,7 @@ class ProtocolDiscoverySteps(PeachStepMixin):
     def step_1_packet_types_extraction(self) -> None:
         UI.title("Step 1: Packet Types Extraction")
 
-        step1_prompt = f"""
-        For {self.protocol_name} protocol, list ALL the packet types according to the RFC document.
-
-        Use the "RFC_Search" tool to look up the relevant sections in the RFC.
-        Return the list as a comma-separated string.
-        ONLY output the types without any additional explanation or formatting. For example: "CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, AUTH, PUBACK, PUBREC, PUBREL, PUBCOMP, PINGREQ, DISCONNECT".
-
-        When using the "RFC_Search" tool, **ASK questions instead of assuming knowledge**.
-        For example:
-        - "MQTT packet types"
-        """
+        step1_prompt = render_prompt("discovery/packet_types.txt", protocol_name=self.protocol_name)
 
         response = self.call_agent(step1_prompt, "Step 1: Packet Types Extraction")
 
@@ -315,48 +305,16 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             if element_manifest_path.is_file()
             else None
         )
-        generation_prompt = f"""
-        Generate runtime implementations for the DSL ExtendedType declarations
-        required by the confirmed unsupported types in "{report_path}": {names}.
-        Exact custom type contracts:
-        {json.dumps(custom_contracts, ensure_ascii=False, indent=2)}
-
-        Every generated custom type name must start with the protocol prefix
-        "{custom_prefix}". This applies to the DSL ExtendedType element_name,
-        the [DataElement]/[PitParsable] name, and the C# class name. For example,
-        use "{custom_prefix}VarInt", never the unprefixed "VarInt".
-
-        Before writing code, read
-        "./examples/ExampleEscapedUInt.cs" completely. It is the only
-        custom DataElement source-code reference you may use. It is a verified,
-        demonstration-only encoding: reuse its Peach plugin API patterns, strict
-        error handling, Pit parsing, and serialization structure, but do NOT copy
-        its invented wire encoding into a real protocol type. Do not read or rely
-        on source files from the sibling llm-peach project.
-
-        {csharp_language_guidance()}
-        Use the namespace Peach.LLM.Generated.Dom.{self.protocol_upper}.
-        Implement complete, strict, symmetric cracking and serialization for every
-        valid encoding in the report, including malformed/truncated input handling,
-        bounds, Sanitize, framework clone compatibility, PitParser, WritePit,
-        common attributes/children/value,
-        and Relation behavior when applicable. Use unique [DataElement] and
-        [PitParsable] names. Do not use placeholders, TODOs, seed-specific logic,
-        silent clamping, or a Blob fallback.
-
-        Put the classes in "{source_dir}". Put `[assembly: PluginAssembly]` exactly
-        once in "{source_dir / 'AssemblyInfo.cs'}" (and never in each class).
-        Write "{source_dir / 'manifest.json'}" as a JSON array with exactly one
-        object per generated type: {{"wire_type": "...", "element_name":
-        "exact type name to pass to DSL ExtendedType", "class_name":
-        "fully qualified C# class"}}.
-        Use the "Build_DotNet_DLL" tool to compile all generated sources in
-        "{source_dir}" to "{dll_path}". If it reports errors or warnings, read the
-        diagnostics, fix the sources, and invoke the tool again. Continue until it
-        reports success. Avoid ambiguous Peach/System type names: fully qualify
-        framework types such as System.Text.Encoding when both namespaces expose
-        the same short name. Write no files outside "{source_dir}".
-        """
+        generation_prompt = render_prompt(
+            "discovery/custom_scalar_generation.txt",
+            report_path=report_path,
+            names=names,
+            custom_contracts_json=json.dumps(custom_contracts, ensure_ascii=False, indent=2),
+            custom_prefix=custom_prefix,
+            protocol_upper=self.protocol_upper,
+            source_dir=source_dir,
+            dll_path=dll_path,
+        )
         generation_agent = build_agent_graph(
             retriever=self.retriever,
             config=self.agent_config,
@@ -457,16 +415,11 @@ class ProtocolDiscoverySteps(PeachStepMixin):
         unsupported = report.get("unsupported_types", [])
         if unsupported and report.get("generation_status") == "declined":
             contracts = [item["custom_type"] for item in unsupported]
-            return f"""
-        Custom DSL scalar generation was skipped by the user.
-        - Read "{report_path}" for the exact ExtendedType contracts.
-        - Declare the protocol-prefixed ExtendedType symbols required by shared_refs
-          exactly as planned: {json.dumps(contracts, ensure_ascii=False)}.
-        - Do not invent a built-in replacement or change the wire encoding to hide
-          the missing runtime implementation.
-        - Continue generating the DSL. Later compilation or runtime validation may
-          report that the skipped custom implementation is required.
-        """
+            return render_prompt(
+                "shared/custom_scalar_skipped.txt",
+                report_path=report_path,
+                contracts_json=json.dumps(contracts, ensure_ascii=False),
+            )
         if unsupported and (
             report.get("generation_status")
             not in {"approved_and_compiled", "reused_existing"}
@@ -478,11 +431,4 @@ class ProtocolDiscoverySteps(PeachStepMixin):
             )
         if not unsupported:
             return ""
-        return f"""
-        Custom DSL scalar contract:
-        - Read "{report_path}" before generating any DSL module.
-        - Declare each confirmed custom scalar with ExtendedType exactly as described
-          by that analysis. Its runtime behavior is supplied by "{dll_path}".
-        - "docs/peach-dsl.md" is authoritative for every other declaration. Never
-          invent another custom type.
-        """
+        return render_prompt("shared/custom_scalar_contract.txt", report_path=report_path, dll_path=dll_path)

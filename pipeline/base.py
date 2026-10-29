@@ -18,7 +18,7 @@ from core.config import (
     warn_if_rfc_missing,
 )
 from core.rag import build_retriever
-from core.ui import ask_after_fix_failure, ask_before_step, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
+from core.ui import ask_after_fix_failure, ask_before_step, ask_completed_pipeline, ask_for_hint, ask_resume_state, ask_wait_for_fix, run_agent_step, UI
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -110,7 +110,12 @@ class BasePipeline:
                 style="bold green",
             )
             self.print_token_usage_summary()
-            return
+            selected = ask_completed_pipeline([title for title, _ in steps])
+            if selected is None:
+                return
+            i = selected
+            self.state["current_step_index"] = i
+            self.save_state()
         if i > 0:
             UI.warning_rule(f"Resuming from step {i + 1}: {steps[i][0]}")
         while i < len(steps):

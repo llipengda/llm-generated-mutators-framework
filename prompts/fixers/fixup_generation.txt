@@ -1,0 +1,65 @@
+Now that we have generated the individual fixer functions in partial classes, we need to generate the main Fixup class that calls them.
+
+Write the main Fixup class in C#.
+Use C# 12.0 features supported by the .NET SDK compiler. Use only APIs available in .NET 8 and the referenced Peach SDK assemblies.
+File: ./llm/peach/{{protocol_lower}}/Fixers/{{protocol_upper}}Fixup.cs
+```csharp
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using NLog;
+using Peach.Core;
+using Peach.Core.Dom;
+using Peach.LLM.Core;
+using Peach.LLM.Core.Fixups;
+
+namespace Peach.LLM.Generated.Fixups.{{protocol_upper}}
+{
+    [Description("{{protocol_upper}} Fixup.")]
+    [Fixup("{{protocol_upper}}Fixup", true)]
+    [Parameter("ref", typeof(DataElement), "Reference to data element")]
+    [Serializable]
+    public class {{protocol_upper}}Fixup : LLMFixup
+    {
+        public DataElement _ref { get; protected set; }
+        [NonSerialized]
+        private static readonly NLog.Logger _logger = LogManager.GetCurrentClassLogger();
+        public {{protocol_upper}}Fixup(DataElement parent, Dictionary<string, Variant> args) : base(parent, args, "ref") { ParameterParser.Parse(this, args); }
+
+        protected override Variant fixupImpl()
+        {
+            if (!ShouldFixup)
+                return elements["ref"].InternalValue;
+            var elem = elements["ref"].Clone();
+            var packets = elem.find("packets") as Peach.Core.Dom.Array;
+            var before = elem.Bytes();
+            try
+            {
+                for (int i = 0; i < packets.Count; i++)
+                {
+                    var p = (packets[i].find("packet_union") as Choice).SelectedElement;
+                    // For each constraint, call the corresponding fixer function on the packet.
+                    // You can identify the packet type by checking which field in the choice is populated. For example, if p.Name == "connect", then it's a <proto>_connect_packet_t.
+                }
+            }
+            catch (NullReferenceException ex)
+            {
+                _logger.Error(ex, "{{protocol_upper}} Fixup failed due to missing expected elements. Skipping fixup.");
+                return new Variant(before);
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "{{protocol_upper}} Fixup failed. Skipping fixup.");
+                return new Variant(before);
+            }
+            return elem.InternalValue;
+        }
+    }
+}
+
+YOU MUST ensure there are NO syntax errors and the code compiles successfully. Fix syntax errors by reading the error messages, fixing the code, and rebuilding until there are no syntax errors.
+This class should call ALL the fixer functions generated.
+
+Use the "Read_File" tool to read the generated partial classes in "./llm/peach/{{protocol_lower}}/Fixers/" to see the exact names of the static Fix methods to call.
+Use the "Write_File" tool to save the generated fixer code to "./llm/peach/{{protocol_lower}}/Fixers/{{protocol_upper}}Fixup.cs".
+Use the "Build_DotNet_DLL" tool to compile ALL the generated fixers (.cs files in "./llm/peach/{{protocol_lower}}/Fixers/") into a DLL "./llm/peach/{{protocol_lower}}/Fixers/out/{{protocol_upper}}Fixers.dll" and verify there are no syntax errors.

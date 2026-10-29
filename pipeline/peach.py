@@ -1,8 +1,9 @@
 import os
 from typing import override
 
+from core.prompts import render_prompt
 from core.agent import AgentConfig, build_agent_graph
-from core.config import get_fixer_enabled
+from core.config import get_fixer_enabled, get_language
 from pipeline.base import BasePipeline
 from pipeline.peach_steps import (
     CompilationStep,
@@ -51,44 +52,25 @@ class PeachPipeline(
             self.save_state()
         peach_model = os.environ.get("LLM_PEACH_MODEL") or os.environ.get("LLM_MODEL") or "gpt-5.4"
         self.agent_config = AgentConfig(
+            language=get_language(),
             temperature=env_float("LLM_PEACH_TEMPERATURE", env_float("LLM_TEMPERATURE", 0.7)),
             model=peach_model,
-            system_prompt="You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.",
+            system_prompt=render_prompt("system/peach.txt"),
         )
         self.agent_graph = build_agent_graph(
             retriever=self.retriever, config=self.agent_config
         )
         self.diagnosis_agent_config = AgentConfig(
+            language=get_language(),
             temperature=0.0,
             model=os.environ.get("LLM_DIAGNOSER_MODEL") or peach_model,
-            system_prompt=(
-                "You are an expert in binary protocol parsing and Peach Pit "
-                "DataModels. Read the DataModel and validator logs, identify a "
-                "all distinct actionable root causes supported by the evidence, "
-                "and use RFC_Search only "
-                "when protocol semantics need confirmation. Treat seeds as "
-                "failure evidence, never as the protocol's complete grammar. "
-                "Write only the "
-                "requested diagnosis JSON report; never modify other files. "
-                "You may read root.py as host-generated assembly context, but "
-                "it is strictly read-only and must never be written, modified, "
-                "patched, validated, or proposed as an editable location."
-            ),
+            system_prompt=render_prompt("system/datamodel_diagnosis.txt"),
         )
         self.datamodel_autofix_agent_config = AgentConfig(
+            language=get_language(),
             temperature=self.agent_config.temperature,
             model=peach_model,
-            system_prompt=(
-                "You repair Peach DSL DataModels from a completed diagnosis "
-                "report. Use Apply_Patch for localized repairs, and when the "
-                "report explicitly "
-                "diagnoses a missing RFC packet type, add its manifest contract "
-                "and family DSL module. Consult the RFC only to model such a new "
-                "packet type; never inspect validator output or failure logs. "
-                "Never edit root.py because it is a derived host-generated file. "
-                "Never special-case seed values or narrow the RFC-valid input "
-                "space."
-            ),
+            system_prompt=render_prompt("system/datamodel_repair.txt"),
         )
 
     @override

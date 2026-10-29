@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from core.prompts import render_prompt
 from core.peach_sdk import compile_csharp, peach_sdk_dir
 
 # Load the .NET runtime before importing the CLR reflection surface.
@@ -191,17 +192,8 @@ tool: Any = getattr(_langchain_tools, "tool")
 _search_lock = threading.Lock()
 
 
-@tool("Search_Class")
+@tool("Search_Class", description=render_prompt("tools/Search_Class.txt"))
 def search_class(query: str) -> ToolResult[ClassSearchData]:
-    """
-    Search for a class and its members in the loaded assemblies.
-
-    Args:
-        query (str): A partial or full class name to search for.
-
-    Returns:
-        A structured result containing class details and member signatures.
-    """
     with _search_lock:
         content = inspector.fuzzy_search(query)
     response = tool_success(
@@ -212,21 +204,11 @@ def search_class(query: str) -> ToolResult[ClassSearchData]:
     return response
 
 
-@tool("Build_DotNet_DLL")
+@tool("Build_DotNet_DLL", description=render_prompt("tools/Build_DotNet_DLL.txt"))
 def build_dotnet_dll(
     source_file_or_dir: str,
     output_dll: str,
 ) -> ToolResult[DotNetBuildData]:
-    """
-    Compiles C# source file into a DLL.
-
-    Args:
-        source_file_or_dir (str): Path to a C# file or a directory containing C# source files.
-        output_dll (str): Desired path and name for the output DLL.
-
-    Returns:
-        A structured compilation result with output path or diagnostics.
-    """
     csharp_files = []
     if os.path.isfile(source_file_or_dir):
         csharp_files = (

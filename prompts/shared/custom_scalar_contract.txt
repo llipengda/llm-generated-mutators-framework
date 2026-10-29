@@ -1,0 +1,6 @@
+Custom DSL scalar contract:
+- Read "{{report_path}}" before generating any DSL module.
+- Declare each confirmed custom scalar with ExtendedType exactly as described
+  by that analysis. Its runtime behavior is supplied by "{{dll_path}}".
+- "docs/peach-dsl.md" is authoritative for every other declaration. Never
+  invent another custom type.

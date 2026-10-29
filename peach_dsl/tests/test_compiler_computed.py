@@ -514,10 +514,16 @@ class ComputedFieldTests(unittest.TestCase):
         assert callable(generated)
 
         class CLRInt64(int):
-            pass
+            def __new__(cls, value: int):
+                if not -(2**63) <= value < 2**63:
+                    raise OverflowError("Int64 conversion overflow")
+                return super().__new__(cls, value)
 
         class CLRUInt64(int):
-            pass
+            def __new__(cls, value: int):
+                if not 0 <= value < 2**64:
+                    raise OverflowError("UInt64 conversion overflow")
+                return super().__new__(cls, value)
 
         system = SimpleNamespace(Int64=CLRInt64, UInt64=CLRUInt64)
         cases = (
@@ -533,7 +539,7 @@ class ComputedFieldTests(unittest.TestCase):
                     self.assertEqual(result, value)
             for value in (-(2**63) - 1, 2**64):
                 with self.subTest(overflow=value):
-                    with self.assertRaisesRegex(OverflowError, "outside Peach 64-bit range"):
+                    with self.assertRaisesRegex(OverflowError, "conversion overflow"):
                         generated(None).fixup(SimpleNamespace(InternalValue=value))
 
     def test_computed_binary_result_is_converted_to_clr_byte_array(self) -> None:

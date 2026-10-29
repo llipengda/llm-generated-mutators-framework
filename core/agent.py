@@ -1,15 +1,18 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Collection, Mapping, Literal, cast
+from typing import Any, Awaitable, Callable, Collection, Mapping, Literal, cast
 
 import langchain.agents as _langchain_agents
+from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.retrievers import BaseRetriever
 
-from core.config import get_protocol_name
+from core.prompts import render_prompt
+from core.config import get_language, get_protocol_name
+from core.language import language_instructions
 from core.agent_types import AgentGraph
 from core.tools import get_tools, make_rfc_search
 from core.tool_result import DotNetBuildData, ToolResult
@@ -84,9 +87,46 @@ class AgentConfig:
         default_factory=lambda: _env_float("LLM_TEMPERATURE", 0.7)
     )
     reasoning_format: str | None = field(default_factory=_env_reasoning_format)
-    system_prompt: str = """
-You are a helpful assistant expert in C# programming, protocol fuzzing and Peach Fuzzer.
-"""
+    system_prompt: str = render_prompt("system/default.txt")
+    language: str = "en"
+
+
+class _LanguageMiddleware(AgentMiddleware):
+    """Reinforce language in the task sent to each model call, without changing state."""
+
+    def __init__(self, language: str) -> None:
+        self.instruction = language_instructions(language)
+
+    def _localized_request(self, request: ModelRequest) -> ModelRequest:
+        messages = list(request.messages)
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if not isinstance(message, HumanMessage):
+                continue
+            content = message.content
+            localized: str | list[str | dict[str, object]]
+            if isinstance(content, str):
+                localized = content + "\n\n" + self.instruction
+            else:
+                localized = [*content, {"type": "text", "text": self.instruction}]
+            messages[index] = message.model_copy(update={"content": localized})
+            break
+        return request.override(messages=messages)
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        return handler(self._localized_request(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        return await handler(self._localized_request(request))
+
 
 def build_agent_graph(
     *,
@@ -99,7 +139,7 @@ def build_agent_graph(
     mutator_build: Callable[[], ToolResult[DotNetBuildData]] | None = None,
 ) -> AgentGraph:
     if config is None:
-        config = AgentConfig()
+        config = AgentConfig(language=get_language())
 
     if config.reasoning_format is not None:
         # The local OpenAI-compatible endpoint expects this as a top-level
@@ -137,5 +177,6 @@ def build_agent_graph(
         model=llm,
         tools=selected_tools,
         checkpointer=memory,
-        system_prompt=config.system_prompt
+        middleware=[_LanguageMiddleware(config.language)],
+        system_prompt=f"{config.system_prompt}\n\n{language_instructions(config.language)}"
     ))

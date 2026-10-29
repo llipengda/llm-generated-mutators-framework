@@ -282,6 +282,10 @@ overlap or exceed the storage width, and their total must exactly fill it,
 including after field overrides. When a Flags declaration is compiled directly
 as the root model, the DataModel contains one packed Flags child named `value`.
 
+`Bit` members inside `@Flags` cannot use `constraint`, including in field
+overrides and subclasses. Use `fixed(...)` for a required constant bit value.
+Outside `@Flags`, `Bit[width]` supports `constraint`.
+
 ### String, DecimalString, and Blob
 
 Text defaults and fixed values are checked against the declared encoding during
@@ -416,8 +420,9 @@ class TextLengthPacket(Schema):
 `DecimalString` has logical type `int` and accepts valid base-10 integer text.
 When used as a size/count relation source, its value must fit a signed 64-bit
 integer: Peach parses the source before evaluating the relation expression.
-Known out-of-range defaults are rejected during compilation; relation writeback
-also checks this range before emitting a new value. This relation
+Known out-of-range defaults are rejected during compilation; arithmetic relation
+writeback also checks this range before emitting a new value. Direct size/count
+writeback uses Peach's already bounded integer value. This relation
 restriction does not apply to standalone decimal text or computed text results.
 Give an unsized value a boundary, such as a following fixed delimiter, or use
 `DecimalString[length]` for fixed-width text.
@@ -740,6 +745,16 @@ unattached library definitions are not separate traversal roots.
 `fixed(...)`, token fields (`token=True`), and nodes with
 `mutable=False` are `FIXED`; all others are `MUTABLE`. `fixed(...)` with
 `token=False` is forbidden.
+`DERIVED` is an independent flag on fields whose values are calculated by a
+compiled Peach `Relation` (such as size/count fields). It combines with
+`MUTABLE` or `FIXED` and does not change the DSL value, XML token/mutability,
+or relation behavior. The referenced payload/list is not marked `DERIVED`,
+and Optional condition sources are not derived merely because they control
+presence. Classification uses the effective expanded XML, including model
+references and overrides; the flag does not propagate to parents or children.
+The mutator planner skips `DERIVED` fields just as it skips `FIXED` fields.
+Container mutators should modify content/structure and let Relations update
+derived fields. This flag describes Relations, not arbitrary runtime Fixups.
 Array nodes are `REPEATABLE`, including arrays with a constant occurrence count.
 Optional wrappers are `OPTIONAL`; arrays are also optional when their count can
 be zero (unspecified/dynamic counts, zero constants, or `Occurs` with minimum 0).
@@ -783,7 +798,7 @@ for node in get_mutation_nodes(Packet, name="Root"):
         print(node.path, node.runtime_type, node.empty_branch_name, node.source_path)
 ```
 
-This API describes all declared nodes, including fixed fields and protocol
+This API describes all declared nodes, including fixed/derived fields and protocol
 containers. The caller selects mutable targets and excludes pipeline-specific
 envelopes such as the outer packet array.
 

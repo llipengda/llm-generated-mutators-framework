@@ -1,0 +1,107 @@
+Repair the current {{protocol_name}} Peach DSL from the completed
+diagnosis report. You may add a packet type only when an issue explicitly
+uses action `add_packet_type`.
+
+**FIRST ACTION**: Use "Read_File" to read
+"./docs/peach-dsl.md" completely.
+**SECOND ACTION**: Use "Read_File" to read
+"./llm/peach/{{protocol_lower}}/datamodel_diagnosis.json".
+Treat its `issues` array, in order, as the complete repair plan. For a
+`modify_existing` issue, use every entry in `locations` and its
+`dsl_file`, `dsl_line`, and `dsl_path` to find all affected declarations.
+For an `add_packet_type` issue, `locations` identifies the proposed
+declaration(s).
+
+You need to:
+1. Read the diagnosis report and apply its issues in order.
+2. Read the files needed for the diagnosed action under
+   "./llm/peach/{{protocol_lower}}/datamodel_dsl/". Always read
+   schema_manifest.json before adding a packet type.
+3. Apply the diagnosed fixes without performing another diagnosis. A
+   single issue may require edits in several files: handle every listed
+   location and save every affected editable DSL module.
+4. For `modify_existing`, save only the repaired DSL module(s). For
+   `add_packet_type`, use RFC_Search to confirm the new packet's general
+   wire format, then add
+   one packet contract to schema_manifest.json and create or update its
+   family_<id>.py module. Preserve every existing packet assignment,
+   symbol, and model. Prefer a new family with a unique lower_snake_case
+   id. Use only existing DSL constructs and already-supported custom
+   ExtendedTypes; never invent a runtime type whose implementation is
+   absent.
+5. Call Validate_Peach_DSL_Module on every changed Python module and
+   correct only reported DSL violations. root.py is a derived artifact:
+   never edit or validate it. It is regenerated and the complete DSL is
+   compiled by the host after your edits.
+
+Do NOT read validator output, failure logs, seed files, or any other
+source. RFC_Search is allowed only while implementing an explicitly
+diagnosed `add_packet_type`; it must not be used to re-diagnose or expand
+any other issue. The diagnosis report is the sole source of failure
+evidence for this repair.
+
+DataModel structural, fixed-value, and generalization rules:
+- Model RFC-defined length and count relationships whenever the documented DSL
+  can express them. Connect a length/count field to the data it governs with
+  `Blob[length]`, `String[length]`, `Block[length]`, `Array[element, count]`, or
+  a supported field expression as appropriate. Prefer these relationships over
+  an unrelated scalar plus an unbounded `Blob` or `Array`; do not leave a known
+  relationship implicit merely because the supplied seeds still crack.
+- Small, deterministic, side-effect-free helper functions may be defined at
+  module scope when they reduce repeated declarations or substantially shorten
+  the generated DSL. Do not define them as members of a `Schema` class. Give
+  their parameters and return values Pyright-compatible type annotations.
+  Helpers may construct DSL declarations, but must not perform I/O, mutate global
+  state, dynamically evaluate code, or import non-DSL modules.
+- DSL `fixed(value)` is allowed when, and only when, the RFC requires one exact
+  wire value and matching that value is needed to crack the correct model or
+  Choice branch. Typical valid cases are protocol magic/literals, packet type
+  or opcode discriminators, and reserved bits or fixed flags that the RFC says
+  MUST have one value. A fixed protocol version may be a token only when this
+  model intentionally supports exactly that version.
+- Every fixed value must be justified by RFC evidence. Put it
+  on the smallest discriminating scalar/string in the packet-specific model.
+  Do not tokenize a container or a larger byte region merely because it happens
+  to distinguish the supplied samples.
+- Do NOT use `fixed(...)` for lengths/counts, identifiers, sequence numbers,
+  timestamps, checksums, payload data, optional content, variable flags, or an
+  enum/version field with multiple valid values. If several exact alternatives
+  require distinct cracking branches, model the alternatives explicitly and
+  fix only each branch's true discriminator. A fixed value is not a substitute
+  for a length reference, Optional, repetition, or a semantic constraint.
+- The RFC defines the accepted wire-language; seeds are only examples and
+  regression inputs. The DataModel must accept valid unseen packets, including
+  other legal values, lengths, counts, option combinations, repetitions, and
+  payload sizes for every requested packet type.
+- Never copy a seed-observed value into `fixed(...)`, infer a fixed size or
+  occurrence bound from the largest sample, remove an RFC-defined optional or
+  alternate branch because no seed exercises it, or replace known structure
+  with Blob just to make current seeds crack.
+- During repair, fix the general RFC-level structural rule causing the failure
+  and preserve all valid variants. Passing the supplied seeds is necessary but
+  not sufficient; reject any repair that merely special-cases seed bytes,
+  filenames, observed lengths, or the current corpus distribution.
+
+DSL source style rules:
+- Keep generated DSL modules compact and code-focused. Do not write module,
+  class, or helper-function docstrings; section banners; separator lines; RFC
+  summaries; or multi-line explanatory comment blocks.
+- Omit comments for declarations whose meaning is already clear from the symbol,
+  field name, DSL type, or fixed value.
+- When a non-obvious field needs clarification, add at most one short end-of-line
+  comment directly after that field declaration, using `field = DSL(...)  # ...`.
+  Keep the comment on the same physical line as the field and state only the
+  essential wire-format fact.
+- Do not place standalone comments before or after fields. Prefer clear names and
+  concise DSL declarations over prose.
+
+For an existing declaration, use `fixed(...)` only when the diagnosis
+explicitly identifies the field as an exact RFC-mandated fixed value or
+branch discriminator. For an added packet, RFC_Search must directly
+confirm every fixed discriminator. Never derive a token or bound from
+example bytes in the report. If a proposed edit conflicts with these
+invariants, preserve the broader RFC-valid model and report the conflict
+instead of applying a corpus-specific workaround.
+
+Never edit datamodel.xml; it is derived from the DSL. Simplifying or
+corpus-specializing the DataModel is NOT allowed.

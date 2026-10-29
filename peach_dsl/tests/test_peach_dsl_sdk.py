@@ -2066,7 +2066,7 @@ class SDKTests(unittest.TestCase):
         relation = count.find("Relation[@type='count'][@of='values']")
         self.assertIsNotNone(relation)
         assert relation is not None
-        self.assertEqual(eval(relation.attrib["expressionGet"], {"count": 3}), 3)
+        self.assertNotIn("expressionGet", relation.attrib)
         self.assertEqual(eval(relation.attrib["expressionSet"], {"count": 3}), "3")
         optional = root.find("Optional[@name='trailer']")
         self.assertIsNotNone(optional)

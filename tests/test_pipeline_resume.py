@@ -64,14 +64,69 @@ class _ReasoningResponse:
 
 
 class PipelineResumeTests(unittest.TestCase):
+    def test_completed_resume_can_select_any_step(self) -> None:
+        for selected in (0, 1):
+            with self.subTest(selected=selected):
+                pipeline = _Pipeline()
+                pipeline.state["current_step_index"] = 2
+                with patch("pipeline.base.ask_completed_pipeline", return_value=selected) as menu, \
+                    patch("pipeline.base.ask_before_step", return_value=("continue", None)):
+                    pipeline()
+                menu.assert_called_once_with(["first", "second"])
+                self.assertEqual(pipeline.executed, ["first", "second"][selected:])
+                self.assertEqual(pipeline.saved_indexes[0], selected)
+                self.assertEqual(pipeline.state["current_step_index"], 2)
+
+    def test_completed_resume_exit_preserves_state(self) -> None:
+        pipeline = _Pipeline()
+        pipeline.state["current_step_index"] = 2
+        with patch("pipeline.base.ask_completed_pipeline", return_value=None), \
+            patch("pipeline.base.ask_before_step") as before:
+            pipeline()
+        self.assertEqual(pipeline.executed, [])
+        self.assertEqual(pipeline.saved_indexes, [])
+        self.assertEqual(pipeline.state["current_step_index"], 2)
+        before.assert_not_called()
+
+    def test_selected_step_is_persisted_even_if_user_exits_before_running(self) -> None:
+        pipeline = _Pipeline()
+        pipeline.state["current_step_index"] = 2
+        with patch("pipeline.base.ask_completed_pipeline", return_value=1), \
+            patch("pipeline.base.ask_before_step", return_value=("exit", None)):
+            pipeline()
+        self.assertEqual(pipeline.state["current_step_index"], 1)
+        self.assertEqual(pipeline.saved_indexes, [1])
+        self.assertEqual(pipeline.executed, [])
+
+    def test_completed_resume_keeps_previous_step_navigation(self) -> None:
+        pipeline = _Pipeline()
+        pipeline.state["current_step_index"] = 2
+        with patch("pipeline.base.ask_completed_pipeline", return_value=1), \
+            patch("pipeline.base.ask_before_step", side_effect=[
+                ("retry_prev", None), ("continue", None), ("skip", None),
+            ]):
+            pipeline()
+        self.assertEqual(pipeline.executed, ["first"])
+        self.assertEqual(pipeline.state["current_step_index"], 2)
+
+    def test_completed_menu_selection_and_cancellation(self) -> None:
+        from core.ui import ask_completed_pipeline
+        for response, expected in ((0, 0), (1, 1), ("exit", None), (None, None)):
+            with self.subTest(response=response), patch("core.ui.questionary.select") as select:
+                select.return_value.ask.return_value = response
+                self.assertEqual(ask_completed_pipeline(["first", "second"]), expected)
+                self.assertEqual(len(select.call_args.kwargs["choices"]), 3)
+
     def test_completed_step_persists_next_step_index(self) -> None:
         pipeline = _Pipeline()
-        with patch("pipeline.base.ask_before_step", return_value=("continue", None)):
+        with patch("pipeline.base.ask_before_step", return_value=("continue", None)), \
+            patch("pipeline.base.ask_completed_pipeline") as completed_menu:
             pipeline()
 
         self.assertEqual(pipeline.executed, ["first", "second"])
         self.assertEqual(pipeline.state["current_step_index"], 2)
         self.assertEqual(pipeline.saved_indexes, [0, 1, 1, 2])
+        completed_menu.assert_not_called()
 
     def test_checkpoint_is_saved_once(self) -> None:
         pipeline = _Pipeline()

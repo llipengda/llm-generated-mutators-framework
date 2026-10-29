@@ -1,0 +1,10 @@
+Class: {{spec_class_name}}
+Namespace: {{spec_namespace}}
+Operation: {{spec_operation}}
+Target path: {{spec_path}}
+DSL path: {{spec_dsl_path}}
+Runtime type: {{spec_runtime_type}}
+Field description: {{spec_description}}
+Presence source: {{spec_source_path}}
+Required methods (implement exactly these signatures):
+{{hooks}}

@@ -1,0 +1,8 @@
+Compiles C# source file into a DLL.
+
+Args:
+    source_file_or_dir (str): Path to a C# file or a directory containing C# source files.
+    output_dll (str): Desired path and name for the output DLL.
+
+Returns:
+    A structured compilation result with output path or diagnostics.

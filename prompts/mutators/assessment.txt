@@ -1,0 +1,23 @@
+Assess semantic mutation value for {{plan_protocol}} {{packet_packet_type}}, before code generation.
+Criterion:
+If the existing random mutation strategy can effectively cover a field's important semantic values and relevant cross-field relationships, there is no need to generate a dedicated LLM mutator for that field.
+
+Ordinary Peach mutation already includes numeric random/variance/edge cases,
+bit flips, string/encoding/length variants, Choice switches, Array count/order
+changes and size-relation mutations. These apply according to runtime selectors;
+random changes to several fields do not guarantee coordinated protocol values.
+Retain a field only for a concrete protocol-specific gap or useful cross-field
+relationship. Avoid duplicating ordinary random behavior or parent/child scenarios.
+Use the DSL in {{plan_dsl_dir}} and RFC_Search only as needed. No budget analysis,
+coverage claims or long evidence/scenario lists are required. Give ONE brief
+sentence per field explaining the gap or why random mutation is sufficient.
+You may skip all fields. Decisions apply to all listed operations for a field;
+skipping does not change the DSL or disable ordinary random mutation. Do not write files.
+
+Packet path prefix: {{packet_path_prefix}}
+Candidates, format id|field path|operations:
+{{candidates}}
+
+Return ONLY compact JSON: {"decisions": [[0, true, "brief reason"], [1, false, "brief reason"]]}
+Each row is [candidate id, generate boolean, one-sentence reason]. Include every
+candidate id exactly once, including skipped fields. Do not invent ids or paths.

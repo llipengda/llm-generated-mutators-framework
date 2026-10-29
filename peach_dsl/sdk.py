@@ -49,6 +49,7 @@ class NodeType(IntFlag):
     MUTABLE = 2
     REPEATABLE = 4
     OPTIONAL = 8
+    DERIVED = 16
 
     def __repr__(self) -> str:
         return f"NodeType({self!s})"
@@ -2430,6 +2431,10 @@ def _validate_flags_schema(schema: type[Schema], layout: FlagsLayout) -> None:
     for name, member in schema.__schema_fields__.items():
         if not isinstance(member, Field) or member.kind != "bit":
             raise TypeError(f"Flags schema {schema.__name__}.{name} must be a bit field")
+        if member.options.get("peach_constraint") is not None:
+            raise ValueError(
+                f"Flags field {schema.__name__}.{name} cannot use constraint"
+            )
 
         width = member.options.get("length")
         if isinstance(width, bool) or not isinstance(width, int) or width <= 0:
@@ -3184,6 +3189,10 @@ def _rooted_peach_nodes(
     finally:
         _NODE_SHAPES.reset(token)
     models, paths = _index_peach_xml(xml)
+    derived_origins = {
+        paths[id(node)] for node in xml.iter() if id(node) in paths
+        and any(child.tag.rsplit("}", 1)[-1] == "Relation" for child in node)
+    }
     missing = shapes.keys() - set(paths.values())
     if missing:
         raise ValueError(f"node classifications refer to absent XML paths: {sorted(missing)}")
@@ -3204,6 +3213,12 @@ def _rooted_peach_nodes(
             shape |= NodeType.OPTIONAL
         fixed_node = bool(local & NodeType.FIXED) or node.get("token", "false").lower() == "true" or node.get("mutable", "true").lower() == "false"
         kind = NodeType.FIXED if fixed_node else NodeType.MUTABLE
+        # A relation is attached to the field whose serialized value it
+        # computes, not to the payload/list referenced by its `of` attribute.
+        # Expanded nodes omit XML metadata. Inspect their definition origins
+        # so references and overrides follow the XML compiler's definitions.
+        if node.tag != "Array" and any(origin in derived_origins for origin in origins[id(node)]):
+            shape |= NodeType.DERIVED
         result[path] = kind | shape
         for child in node:
             if id(child) in paths:
@@ -4769,20 +4784,6 @@ def _collect_peach_length_relation(
         return
     if relation_type == "size" and length_type is not None and length_type.lower() == "bits":
         relation_attributes = MappingProxyType({**relation_attributes, "lengthType": "bits"})
-    maximum = (
-        2147483647 if relation_type == "count" else
-        9223372036854775807 if relation_attributes.get("lengthType") == "bits" else
-        1152921504606846975
-    )
-    forward = relation_attributes.get("expressionGet", relation_type)
-    relation_attributes = MappingProxyType({
-        **relation_attributes,
-        "expressionGet": (
-            f"(lambda length: length if 0 <= length <= {maximum} else "
-            f"(_ for _ in ()).throw(ValueError('relation {relation_type} must be between 0 and {maximum}')))"
-            f"({forward})"
-        ),
-    })
     source_path = _resolve_peach_reference(
         container_path if source_container_path is None else source_container_path,
         reference,
@@ -5097,12 +5098,16 @@ def _append_peach_field(
         width = _decimal_integer_width(field.length, attributes) if isinstance(field.length, int) else None
         suffix = " + '\\0'" if attributes.get("nullTerminated", "false").lower() == "true" else ""
         for relation in element.findall("Relation"):
-            inverse = relation.get("expressionSet", relation.attrib["type"])
-            checked = (
-                "(lambda number: str(number) if -9223372036854775808 <= number <= 9223372036854775807 "
-                "else (_ for _ in ()).throw(OverflowError('DecimalString relation source must fit signed 64-bit')))"
-                f"(int({inverse}))"
-            )
+            inverse = relation.get("expressionSet")
+            if inverse is None:
+                # Peach's native size/count already fits a signed 64-bit integer.
+                checked = f"str({relation.attrib['type']})"
+            else:
+                checked = (
+                    "(lambda number: str(number) if -9223372036854775808 <= number <= 9223372036854775807 "
+                    "else (_ for _ in ()).throw(OverflowError('DecimalString relation source must fit signed 64-bit')))"
+                    f"(int({inverse}))"
+                )
             # Peach formats numeric relation results using the entire width,
             # leaving no room for a terminator. Return checked decimal text.
             if width is not None:
@@ -5625,8 +5630,6 @@ def _render_python_fixups(
             lines.append("            from System import Array, Byte")
             lines.append("            return Array[Byte](value)")
             lines.append("        if isinstance(value, int):")
-            lines.append("            if value < -9223372036854775808 or value > 18446744073709551615:")
-            lines.append("                raise OverflowError('computed integer result is outside Peach 64-bit range')")
             lines.append("            if -2147483648 <= value <= 2147483647:")
             lines.append("                return int(value)")
             lines.append("            from System import Int64, UInt64")
@@ -6429,6 +6432,10 @@ def _evaluate_concrete_schema(
                 or not isinstance(member.length, int)
             ):
                 raise TypeError(f"Flags member {schema.__name__}.{name} is not a fixed-width bit field")
+            if "constraint" in member.peach_attributes:
+                raise ValueError(
+                    f"Flags field {schema.__name__}.{name} cannot use constraint"
+                )
             if member.length <= 0:
                 raise ValueError(f"Flags field {schema.__name__}.{name} needs a positive width")
             if position + member.length > storage_width:

@@ -22,8 +22,11 @@ Python packages are declared in `pyproject.toml` and locked in `uv.lock`:
 - `core/` — runtime core for configuration, agents, RAG, tools, UI,
   logging, state, and typed tool results.
 - `pipeline/` — Peach pipeline orchestration and step implementations.
+- `prompts/` — editable model prompts and tool descriptions, with fixed rules
+  and output formats written directly in each task; see [the prompt index](prompts/README.md).
 - `peach_dsl/` — declarative DataModel DSL, compiler, error mapping, and tests.
 - `core/datamodel_dsl.py` and `core/datamodel_diagnoser.py` — standalone CLI entry points.
+- `experiments/mqtt/` — MQTT Random / LLM fuzzing and coverage comparison scripts.
 - `pit-visualizer/` — optional browser-based Pit Studio frontend.
 
 ## Setup
@@ -106,12 +109,29 @@ The main branch uses local .NET compilation and execution throughout.
 uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf
 ```
 
+Use `--language zh-CN` to request Chinese reasoning and natural-language output
+from every model stage, including diagnosis and repair. The default is `en`;
+language codes or names such as `English`, `中文`, and `Japanese` are accepted.
+This requirement is included in each agent's system prompt and repeated in the
+user task on every model request, including tool continuations. Chinese selections
+such as `zh-CN`, `zh`, `Chinese`, and `中文` use a native Chinese instruction.
+Code identifiers, protocol literals, JSON keys, and schema enum values retain
+their required forms.
+Reasoning language compliance depends on the model; returned reasoning content
+is covered by the same instruction. This option does not translate the CLI UI.
+
+```bash
+uv run python main.py --protocol mqtt --seed-dir seeds/mqtt --rfc-path rfc/mqtt-v5.0.pdf --language zh-CN
+```
+
 Generated protocol code uses C# 12 and targets .NET 8. Validation runs in a
 temporary local runtime directory containing the selected protocol's plugins;
 logs and replay samples remain in the protocol output directory.
 
 - The pipeline is **interactive**. Before each step it prompts: **Continue / Retry previous / Skip / Exit**.
 - If you do nothing, it auto-continues after ~60 seconds.
+- Resuming an already completed run opens a menu to return to any step or exit.
+  This menu waits for your selection; the selected step then uses the normal step prompt.
 - The RFC can be a `.pdf` or a text file.
 - The generated DataModel source uses the DSL language described in
   [`docs/peach-dsl.md`](docs/peach-dsl.md).
@@ -135,6 +155,19 @@ The command runs strict Pyright syntax/type checking, then reports invalid DSL,
 missing symbols/models, and duplicate DataModel names. Use `--dsl-dir` or
 `--output` to override paths. DSL compilation and validation execute locally.
 
+### Preview a mutator plan
+
+```bash
+uv run python -m core.mutator_codegen plan http --output tmp/http-mutator-plan/plan.yaml
+```
+
+The compact YAML previews DSL candidates before semantic-value assessment. It
+groups packets with identical target operations and uses
+packet-relative field paths. Conditional Optional source fields appear under
+`presence_sources`. Class names, signatures and field details are derived from
+the DSL and SDK. This command only exports a review plan; omit `--output` to
+print it to stdout.
+
 ## Pipeline steps
 
 | Step | Description |
@@ -142,12 +175,13 @@ missing symbols/models, and duplicate DataModel names. Use `--dsl-dir` or
 | 1. Packet Types Extraction | Extracts all packet types from the RFC via RAG search. |
 | 2. Datamodel Planning & Generation | One planning call reports only concrete protocol-field encodings that require custom scalar support and produces the split DataModel manifest from the same RFC evidence. Unsupported scalars require explicit approval and receive protocol-prefixed `ExtendedType` names. `shared_model.py` is generated and Pyright-checked first; family modules are then generated in parallel and Pyright-checked before one integrated compilation. |
 | 3. Datamodel Validation & Fix | Parses seeds through the compiled Pit and compares re-serialized bytes. The test script immediately converts every Peach report node to compact DSL-path text in `datamodel_error_report.txt`; it performs no root-cause selection. A diagnosis agent analyzes that text and produces a repair plan; the auto-fix agent edits only DSL and recompiles. Up to 3 auto-retries, then interactive fallback. |
-| 4. Mutator Generation | Plans field operations from validated DSL. The host writes `.g.cs` partial classes, using SDK Add/Remove/Repeat bases; the LLM implements `MutateCore` in `.semantic.cs`. Each packet compiles independently with 4 workers. |
-| 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Runtime ERRORs are grouped and repaired per packet's semantic file; re-parse FAILs are reported. Compiler, SDK and incomplete-validation errors stop the pipeline. |
-| Final Compilation | Compiles active manifest mutator sources and fixer sources into `{PROTO}.dll`. |
+| 4. Mutator Generation | Dispatches packet workers first. Each packet agent assesses all candidate fields against ordinary random mutation, returning only keep/skip and a short reason. The host saves `.assessment.json` and generates `.g.cs` only for retained fields; the LLM implements `.semantic.cs`, then the packet compiles. Up to 4 packets run in parallel. |
+| 5. Mutator Validation & Fix | Runs 100 mutation iterations per mutator × seed × element. Reports ERROR if any iteration throws; otherwise summarizes total, PASS, FAIL and UNCHANGED counts. Mutators with ERRORs or PASS=0 must be repaired or disabled. Repairs are grouped by packet's semantic file. Disabling persists per class in the manifest and generates selectors that always return false. Both choices rebuild and retest affected packets; unresolved issues prompt again. Compiler and incomplete-validation errors stop the pipeline; generated-code/SDK failures can be disabled but cannot be repaired by semantic agents. |
+| Final Compilation | Compiles custom DataElement sources, active manifest mutator sources and fixer sources together into `{PROTO}.dll`, including the custom type definitions. |
 
-See [mutator generation](docs/mutator-generation.md) for operation mapping,
-source ownership, regeneration choices and SDK requirements.
+See [semantic-value assessment](docs/mutator-assessment.md) for selection,
+source ownership and regeneration behavior, and the [SDK reference](docs/llm-peach-sdk.md)
+for implementation APIs.
 
 ## What gets generated
 
@@ -169,14 +203,16 @@ llm/peach/<proto>/
 ├── dm_test_logs/                       # DataModel test logs (deleted on pass)
 ├── Mutators/
 │   ├── mutator_manifest.json          # Active packets, interfaces and source files
+│   ├── <Proto><PktType>Mutators.assessment.json # Per-field keep/skip reasons
 │   ├── <Proto><PktType>Mutators.g.cs   # Deterministic classes and selectors
 │   ├── <Proto><PktType>Mutators.semantic.cs # LLM-written semantic methods
 │   └── out/
 │       └── <Proto><PktType>Mutators.dll
 └── mutator_test_logs/
-    ├── results.txt                     # Saved validator output
-    ├── fail/                           # Mutation re-parse failures
-    └── error/                          # Mutation exceptions
+    ├── summary.log                     # Saved mutator summary ([P], [N], [-])
+    ├── fail/                           # Re-parse failures, including unconsumed input
+    ├── error/                          # Mutation exceptions
+    └── unchanged/                      # Serialized packet unchanged after mutation
 ```
 
 ## Running checks manually
@@ -192,6 +228,30 @@ Mutator sanity:
 ```bash
 ./tests/peach_mutator/run_peach_mutator_test.sh mqtt seeds/mqtt
 ```
+
+Mutator iterations are `PASS` only when the serialized packet changes and the
+entire input is re-parsed. Parse exceptions or remaining bytes/bits are `FAIL`;
+mutation exceptions are `ERROR`; identical serialized packets are `UNCHANGED`.
+Path selectors exclude elements beneath absent Optional ancestors. Generated
+Mutate selectors also require an Optional target itself to exist; Add can still
+select an absent Optional when its ancestors exist.
+After each mutator completes, the terminal and `summary.log` print one line
+with its iteration counts, for example:
+`[P] MyMutator TOTAL=100 PASS=60 FAIL=25 ERROR=0 UNCHANGED=15`.
+`[N]` means an ERROR occurred or no iteration passed; `[-]` means skipped.
+Step 5 accepts `[P]`, skips `[-]`, and requires repair or persistent disabling
+for every `[N]`, followed by rebuilding and retesting affected packets. Individual
+FAIL and UNCHANGED outcomes are reported without action when at least one
+iteration passes. Repairs receive the counts and available ERROR, FAIL and UNCHANGED logs for each `[N]` class.
+Each issue category has its own logs and replay sample under `mutator_test_logs/`.
+The local `mutator_test_logs/summary.log` keeps one row per mutator: `[P]` means
+at least one iteration passed without any ERROR, `[N]` means no iteration passed or mutation
+threw an error, and `[-]` means the mutator was skipped.
+
+Step 5 reads only the current compact report format, checks it against the active
+manifest, and groups repairs by packet. Skipping verification reuses `results.txt`
+(or `summary.log` from a standalone test); an incomplete report or a failed command
+cannot be reused as a successful result. Old-format reports must be regenerated.
 
 Fixer validation and direct packet parsing:
 
@@ -210,6 +270,41 @@ HOST=127.0.0.1 PORT=1883 ./llm/peach/mqtt/native/llm/run.sh
 The `native/llm/` and `native/peach/` bundles contain a local runtime, protocol
 plugins, DataModel, Pit and seeds. `SEED_DIR` and `LOG_DIR` can override the
 bundle defaults; arguments to `run.sh` are forwarded to Peach.
+
+To compare the current MQTT artifacts with the Peach installation in `~/peach`:
+
+```bash
+./experiments/mqtt/mqtt_fuzz.sh                         # Both strategies, separate coverage containers, 10 minutes
+./experiments/mqtt/mqtt_fuzz.sh random                  # Random, without generated LLM mutators
+./experiments/mqtt/mqtt_fuzz.sh llm                     # TwoPhaseRandom, with generated LLM mutators
+./experiments/mqtt/mqtt_fuzz.sh both --duration 00:30:00 --seed 123
+./experiments/mqtt/mqtt_fuzz.sh both --iterations 20    # Short smoke run
+```
+
+This launcher uses the existing compiled artifacts in `llm/peach/mqtt/`;
+recompile changed mutators before running. It creates fresh `pdli/mosquitto:latest`
+containers with automatically allocated localhost ports and isolated plugin
+directories. The Pit explicitly names its MQTT root so generated selectors
+match. Fixers are not loaded. Both strategies use the same seeds and RNG seed;
+the LLM strategy defaults to three mutations per element (`--mutations`).
+Docker, the coverage image, `uv`, and the runtime required by `~/peach` must
+already be installed.
+
+Logs, effective Pits, plugin snapshots, input hashes, final `coverage/final.info`,
+coverage summaries, and exit/mutator-call statistics are saved under
+`logs/mqtt/campaign-*`. Ctrl-C stops both fuzzers, collects coverage, and removes
+their containers. A Peach error produces a nonzero exit status and remains in
+`console.log` and `results.json`; the launcher does not retry it automatically.
+
+Use `--peach-dir /path/to/runtime`, `--seed-dir /path/to/seeds`, or
+`--prepare-only` to override the installation, select seeds, or inspect the
+generated configuration. To use existing targets without Docker or coverage
+collection:
+
+```bash
+./experiments/mqtt/mqtt_fuzz.sh llm --host 127.0.0.1 --port 1883
+./experiments/mqtt/mqtt_fuzz.sh both --host 127.0.0.1 --port 1883 --llm-port 1884
+```
 
 ## Pit visualizer
 

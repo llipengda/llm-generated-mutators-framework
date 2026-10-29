@@ -13,6 +13,7 @@ import langchain_core.tools as _langchain_tools
 from langchain_core.tools import BaseTool
 from langchain_core.retrievers import BaseRetriever
 
+from core.prompts import render_prompt
 from core.tool_result import (
     DirectoryListData,
     DslModuleValidationData,
@@ -398,9 +399,8 @@ def _apply_exact_patch(
             temporary_path.unlink(missing_ok=True)
 
 
-@tool("Validate_Peach_XML")
+@tool("Validate_Peach_XML", description=render_prompt("tools/Validate_Peach_XML.txt"))
 def validate_peach_xml(xml_path: str) -> ToolResult[XmlValidationData]:
-    """Validate a generated Peach XML document against peach/peach.xsd."""
     document = Path(xml_path).resolve()
     schema = _PROJECT_ROOT / "peach" / "peach.xsd"
     if not document.is_file():
@@ -493,9 +493,8 @@ def validate_peach_xml(xml_path: str) -> ToolResult[XmlValidationData]:
 
 
 def make_rfc_search(retriever: BaseRetriever):
-    @tool("RFC_Search")
+    @tool("RFC_Search", description=render_prompt("tools/RFC_Search.txt"))
     def rfc_search(query: str) -> ToolResult[RfcSearchData]:
-        """Search RFC documents using RAG for protocol definitions, fields, and constraints."""
         if not retriever:
             return tool_error(
                 "retriever_unavailable",
@@ -586,11 +585,10 @@ def get_tools(
             )
         return None
 
-    @tool("Read_File")
+    @tool("Read_File", description=render_prompt("tools/Read_File.txt"))
     def scoped_read_file(
         filepath: str, *, line_count: int = -1, start_line: int = 1
     ) -> ToolResult[ReadData]:
-        """Read an allowed file with stable 1-based line numbers."""
         return _scoped_read_file(
             filepath,
             line_count=line_count,
@@ -599,7 +597,7 @@ def get_tools(
             allowed_files=scoped_read_files,
         )
 
-    @tool("Search_Files")
+    @tool("Search_Files", description=render_prompt("tools/Search_Files.txt"))
     def search_files(
         query: str,
         paths: list[str],
@@ -608,7 +606,6 @@ def get_tools(
         context_lines: int = 0,
         max_results: int = 50,
     ) -> ToolResult[FileSearchData]:
-        """Search allowed files and directories, returning line-numbered matches."""
         return _scoped_search_files(
             query,
             paths,
@@ -620,9 +617,8 @@ def get_tools(
             allowed_files=scoped_read_files,
         )
 
-    @tool("Write_File")
+    @tool("Write_File", description=render_prompt("tools/Write_File.txt"))
     def write_file(filepath: str, content: str) -> ToolResult[FileWriteData]:
-        """Write a file to a path allowed for the current pipeline step."""
         try:
             destination = _resolve_tool_path(
                 filepath,
@@ -642,20 +638,13 @@ def get_tools(
             allowed_files=scoped_write_files,
         )
 
-    @tool("Apply_Patch")
+    @tool("Apply_Patch", description=render_prompt("tools/Apply_Patch.txt"))
     def apply_patch(
         filepath: str,
         old_text: str,
         new_text: str,
         expected_sha256: str = "",
     ) -> ToolResult[PatchData]:
-        """Replace exactly one old_text occurrence in an existing Peach output file.
-
-        Copy old_text exactly from Read_File without the displayed line-number
-        prefixes. Include enough surrounding context to make the match unique. If
-        expected_sha256 is supplied, the patch is rejected when the file has changed
-        since that hash was calculated.
-        """
         try:
             destination = _resolve_tool_path(
                 filepath,
@@ -677,11 +666,10 @@ def get_tools(
             expected_sha256=expected_sha256,
         )
 
-    @tool("Validate_Peach_DSL_Module")
+    @tool("Validate_Peach_DSL_Module", description=render_prompt("tools/Validate_Peach_DSL_Module.txt"))
     def validate_peach_dsl_module(
         filepath: str,
     ) -> ToolResult[DslModuleValidationData]:
-        """Type-check a Peach DSL module and evaluate every Schema it defines."""
         from peach_dsl.compiler import DSLValidationError, validate_dsl_module
 
         try:
@@ -709,9 +697,8 @@ def get_tools(
                 f"DSL module validation failed for {filepath}: {error}",
             )
 
-    @tool("Validate_Peach_DSL")
+    @tool("Validate_Peach_DSL", description=render_prompt("tools/Validate_Peach_DSL.txt"))
     def validate_peach_dsl(entry_path: str) -> ToolResult[DslValidationData]:
-        """Compile the complete generated DSL and validate its derived Pit XML."""
         from core.datamodel_dsl import compile_dsl_subprocess
 
         try:
@@ -769,13 +756,8 @@ def get_tools(
     if mutator_build is None:
         selected_tools.append(build_dotnet_dll)
     else:
-        @tool("Build_Mutator_DLL")
+        @tool("Build_Mutator_DLL", description=render_prompt("tools/Build_Mutator_DLL.txt"))
         def build_mutator_dll() -> ToolResult[DotNetBuildData]:
-            """Compile only the current packet's generated and semantic sources.
-
-            Source paths, SDK references and the output DLL are fixed by the
-            host's mutation plan. No paths or compiler options are accepted.
-            """
             return mutator_build()
 
         selected_tools.append(build_mutator_dll)

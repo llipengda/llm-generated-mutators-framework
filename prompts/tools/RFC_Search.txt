@@ -1,0 +1,1 @@
+Search RFC documents using RAG for protocol definitions, fields, and constraints.

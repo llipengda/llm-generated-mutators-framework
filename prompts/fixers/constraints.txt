@@ -1,0 +1,11 @@
+Extract all constraints related to REQUEST(client->server) message format from the {{protocol_name}} RFC.
+For example, in MQTT there are the following constraints:
+    - [MQTT-2.2.1-2] A PUBLISH packet MUST NOT contain a Packet Identifier if its QoS value is set to 0.
+
+    - [MQTT-3.1.2-11] If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00).
+
+    - ...
+Use the "RFC_Search" tool to look up the relevant sections in the RFC.
+Split the constraints into separate blocks with double newlines (\n\n) between them.
+Add a tag [<ConstraintID>] at the beginning of each constraint.
+Output the constraints ONLY, nothing else.

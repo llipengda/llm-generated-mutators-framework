@@ -1,0 +1,47 @@
+Implement the required protocol-aware mutation methods for the
+{{protocol_lower}} {{packet_packet_type}} packet in {{packet_semantic_file}}.
+
+The host has already planned every field, operation, class, exact rooted path,
+constructor and static supportedDataElement method from the validated DSL.
+Read {{packet_generated_file}} as the immutable interface contract. Write only
+{{packet_semantic_file}}, using partial classes in the exact supplied namespaces.
+Add, Remove and Repeat already inherit the SDK's structural mutator bases;
+their PerformMutation implementations are sealed. Do not redeclare their
+constructors, attributes, selectors, base classes or PerformMutation methods.
+{{assessment_guidance}}
+
+{{semantic_tasks_packet}}
+
+For each MutateCore, cover all applicable field-local semantic categories:
+A. Canonical form
+B. Boundaries
+C. Equivalence-class alternatives
+D. Allowed bitfield/enum/range
+E. Encoding-shape variant
+F. Padding/alignment
+G. prefix/suffix
+H. Random valid mix
+Use randomized shallow and deep perturbations for long-term diversity. Keep
+mutations local to the planned target. Explain in a short code comment when a
+category cannot apply to that field. Helpers belong in this semantic file.
+Do not leave required methods empty, stubbed, or throwing NotImplementedException.
+Use Next() from LLMMutator for randomness. Add classes must implement
+InitializeAddedContent to initialize newly attached content according to the DSL
+and protocol. Conditional Optional Add and Remove classes must implement the
+required partial override UpdatePresenceSource to synchronize the controlling
+field with the requested exists state. Read the DSL condition and source path;
+preserve unrelated source bits.
+
+Assign all mutation values through element.SetValue(rawValue), without wrapping
+the value in Variant. SetValue automatically enables TypeTransform for byte[]
+and BitwiseStream values and clears it for numeric or text values. Do not assign
+MutatedValue directly or manually toggle TypeTransform: the same element may
+be mutated repeatedly, switching between raw encoding and scalar branches.
+
+Use C# 12.0 features supported by the .NET SDK compiler. Use only APIs available in .NET 8 and the referenced Peach SDK assemblies.
+Read docs/llm-peach-sdk.md and the relevant shared_model.py/family modules with
+Read_File. Treat the DSL as the DataModel source of truth. Use Search_Class for
+SDK APIs and RFC_Search for protocol semantics. Write_File creates the semantic
+file; Apply_Patch makes localized repairs. Call Build_Mutator_DLL with no arguments
+until both partial source files compile together successfully. You must implement
+ALL required methods before finishing. The host independently checks compilation.

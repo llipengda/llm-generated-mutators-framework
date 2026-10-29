@@ -27,6 +27,9 @@ from typing import (
     cast,
 )
 
+from core.prompts import render_prompt
+from core.language import language_instructions, normalize_language
+
 
 TREE_RE = re.compile(
     r"^(?P<prefix>.*?)"
@@ -1005,14 +1008,7 @@ def _cross_log_summary(reports: list[SeedReport]) -> list[CrossLogSummary]:
     return repeated
 
 
-LLM_SYSTEM_PROMPT = """You are an expert in binary protocol parsing and Peach Pit
-DataModels. Diagnose failures directly from raw Peach validator logs and the Pit
-XML. No heuristic diagnosis is supplied: perform the complete root-cause analysis
-yourself. Separate root causes from cascading symptoms and normal Choice fallback
-noise. Never invent RFC facts: no RFC is available unless explicitly included. A
-seed filename is only a clue, not proof. Every conclusion must cite the supplied
-seed, raw log evidence, or XML line. Return only one valid JSON object matching
-the requested schema."""
+LLM_SYSTEM_PROMPT = render_prompt("diagnosis/system.txt")
 
 
 def add_llm_judgment(
@@ -1073,8 +1069,8 @@ def add_llm_judgment(
 
     response = llm.invoke(
         [
-            ("system", LLM_SYSTEM_PROMPT),
-            ("human", prompt),
+            ("system", f"{LLM_SYSTEM_PROMPT}\n\n{language_instructions(language)}"),
+            ("human", f"{prompt}\n\n{language_instructions(language)}"),
         ]
     )
     content = _message_text(response)
@@ -1110,60 +1106,13 @@ def _build_llm_prompt(
     xml_context = _numbered_file_context(datamodel, xml_budget)
     log_budget = max(max_input_chars - len(xml_context) - 3500, 1000)
     log_context = _raw_log_context(report, log_budget)
-    schema = {
-        "summary": "short overall conclusion",
-        "root_causes": [
-            {
-                "id": "RC1",
-                "title": "concise title",
-                "classification": (
-                    "root_cause | contributing_factor | symptom | uncertain"
-                ),
-                "category": "reference | endianness | layout | choice | cardinality | boundary | other",
-                "confidence": 0.0,
-                "affected_seeds": ["seed.raw"],
-                "xml_locations": [
-                    {"line": 1, "element": "DataModel/field name"}
-                ],
-                "reasoning": "why this is causal rather than a downstream symptom",
-                "evidence": ["specific supplied observation"],
-                "suggested_fix": "candidate change, or null when evidence is insufficient",
-                "verification": "focused test that would confirm or reject it",
-            }
-        ],
-        "causal_relationships": [
-            {
-                "cause_id": "RC1",
-                "downstream_observations": ["raw log symptom"],
-                "explanation": "causal link",
-            }
-        ],
-        "priority_order": ["RC1"],
-        "uncertainties": ["what cannot be determined from these logs alone"],
-    }
-    requested_language = "Chinese" if language == "zh-CN" else "English"
-    return f"""Diagnose this DataModel failure directly from the supplied raw inputs.
-
-Requirements:
-1. Write all explanatory strings in {requested_language}.
-2. Perform the diagnosis independently; no heuristic findings are available.
-3. Merge repeated raw-log symptoms into shared candidate root causes.
-4. A changed size/length field can be a downstream symptom of omitted body data.
-5. Treat rejected sibling Choice token mismatches as noise.
-6. Use log line ordering: an error in a later fallback branch can be only a
-   symptom of an earlier preferred branch failure. In particular, do not rank
-   an endian mismatch in a fallback branch above an earlier binding/unsized error.
-7. If logs cannot prove a semantic claim, mark it uncertain and propose a test.
-8. Suggested fixes must name supplied XML lines/elements. Do not output a full XML file.
-9. Return only JSON with this shape:
-{json.dumps(schema, ensure_ascii=False, indent=2)}
-
-RAW VALIDATOR LOGS:
-{log_context or '<no validator logs supplied>'}
-
-DATAMODEL XML:
-{xml_context or '<datamodel not supplied>'}
-"""
+    requested_language = normalize_language(language)
+    return render_prompt(
+        "diagnosis/task.txt",
+        requested_language=requested_language,
+        log_context=log_context or '<no validator logs supplied>',
+        xml_context=xml_context or '<datamodel not supplied>',
+    )
 
 
 def _report_log_paths(report: DiagnosisReport) -> list[Path]:
@@ -1580,9 +1529,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--llm-language",
-        choices=("zh-CN", "en"),
+        "--language",
+        type=normalize_language,
         default="zh-CN",
-        help="Language for LLM explanations (default: zh-CN)",
+        help="Language for LLM reasoning and explanations (default: zh-CN)",
     )
     parser.add_argument(
         "--llm-max-input-chars",

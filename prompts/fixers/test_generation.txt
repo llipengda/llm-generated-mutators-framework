@@ -1,0 +1,26 @@
+For {{protocol_lower}}, write NUnit test functions for validating EACH fixer constraint below.
+
+For EACH constraint and its corresponding fixer function:
+1. Generate a Peach DataElement that **violates** the constraint. Base its structure on the DSL modules in "./llm/peach/{{protocol_lower}}/datamodel_dsl", and make it a packet_array containing one violating packet.
+2. Apply the fixer function to the violating DataElement.
+3. Assert that after the fixer is applied, the DataElement now **complies** with the constraint.
+You should generate at least one test function per constraint, but you can generate more if there are multiple ways to violate the constraint or if the constraint has multiple components.
+
+Here is an example structure for the test in file "./tests/peach_fixer/example.cs".
+
+Use C# 12.0 features supported by the .NET SDK compiler. Use only APIs available in .NET 8 and the referenced Peach SDK assemblies.
+File: ./llm/peach/{{protocol_lower}}/Fixers/Validations/{{protocol_upper}}FixerTest_part_{{index}}.cs
+
+Constraints for this task:
+{{chunk_content}}
+
+IMPORTANT:
+1. You MUST implement one or more test function(s) for EVERY SINGLE constraint provided here.
+2. DO NOT leave placeholders.
+3. Add Part{{index}} to helper function names to avoid naming conflicts across chunks.
+4. You must ensure there are NO syntax errors and the code compiles successfully.
+5. You must NOT read the Fixer functions. You should treat the Fixers as a black box and only focus on testing the constraints.
+
+Use "Read_File" to list "./llm/peach/{{protocol_lower}}/datamodel_dsl" and read the relevant shared_model.py and family modules. Do not edit the derived datamodel.xml.
+Use the "Write_File" tool to save the generated test code to "./llm/peach/{{protocol_lower}}/Fixers/Validations/{{protocol_upper}}FixerTest_part_{{index}}.cs".
+Use the "Build_DotNet_DLL" tool to compile the test file. Ensure it compiles successfully without syntax errors. The DLL should be at "./llm/peach/{{protocol_lower}}/Fixers/Validations/out/{{protocol_upper}}FixerTest_part_{{index}}.dll".

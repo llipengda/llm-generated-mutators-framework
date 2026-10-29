@@ -1,7 +1,7 @@
 import logging
 import subprocess
 import threading
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import questionary
 from prompt_toolkit.application import Application
@@ -166,6 +166,21 @@ class UI:
             returncode=proc.returncode,
             stdout="\n".join(lines),
         )
+
+
+def ask_completed_pipeline(step_names: list[str]) -> int | None:
+    """Select a step to revisit after resuming a completed pipeline."""
+    if not step_names:
+        return None
+    choice = questionary.select(
+        "All steps are complete. Choose a step to return to, or exit:",
+        choices=[
+            questionary.Choice("Exit", value="exit"),
+            *(questionary.Choice(name, value=index) for index, name in enumerate(step_names)),
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+    return choice if type(choice) is int and 0 <= choice < len(step_names) else None
 
 
 def ask_before_step(step_name: str, *, has_previous: bool, timeout_s: float = 60.0) -> tuple[str, str | None]:
@@ -443,6 +458,23 @@ def ask_skip_verification(step_title: str) -> bool:
     if choice is None:
         return False
     return choice == "Skip verification"
+
+
+def ask_mutator_failure_action() -> Literal["repair", "disable", "exit"]:
+    """Choose how to handle unacceptable [N] results; cancellation stops."""
+    choice = questionary.select(
+        "How would you like to handle these [N] mutators?",
+        choices=[
+            questionary.Choice("Repair these mutators", value="repair"),
+            questionary.Choice("Disable these mutators", value="disable"),
+        ],
+        style=QUESTIONARY_BASE_STYLE,
+    ).ask()
+    if choice == "repair":
+        return "repair"
+    if choice == "disable":
+        return "disable"
+    return "exit"
 
 
 def ask_reuse_diagnosis(protocol_name: str) -> bool:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -16,6 +17,7 @@ from core.mutator_codegen import (
     PacketMutatorPlan,
     build_mutator_plan,
     compile_packet,
+    disable_mutators,
     load_mutator_plan,
     manifest_packet_types,
     manifest_sources,
@@ -23,6 +25,7 @@ from core.mutator_codegen import (
     packet_outputs_exist,
     prepare_packet,
     render_generated,
+    render_plan_yaml,
     render_semantic_stub,
     set_active_packets,
 )
@@ -114,6 +117,24 @@ ROOT = PacketArray
         self.assertTrue(all(".packet_union.second." in spec.path for spec in plan.packets[1].mutators))
         self.assertEqual([spec.runtime_type for spec in plan.packets[1].mutators if spec.path.endswith(".value")], ["String"])
 
+    def test_derived_fields_are_skipped_but_content_and_condition_sources_remain(self) -> None:
+        family = self.dsl / "family_packets.py"
+        family.write_text(FAMILY.replace(
+            "    flags = Int8()",
+            "    length = Int16()\n    content = Blob[length]()\n"
+            "    count = Int8()\n    counted = Array[Int8, count]()\n"
+            "    flags = Int8()",
+        ), encoding="utf-8")
+        packet = self.plan().packets[0]
+        targets = {spec.path.rsplit(".packet_union.first.", 1)[-1] for spec in packet.mutators}
+        self.assertNotIn("length", targets)
+        self.assertNotIn("count", targets)
+        self.assertTrue({"content", "counted", "counted[]", "flags", "conditional"} <= targets)
+        self.assertEqual(
+            {spec.operation for spec in packet.mutators if spec.path.endswith(".counted")},
+            {"Add", "Remove", "Repeat", "Mutate"},
+        )
+
     def test_structural_selectors_use_compiler_empty_branch_and_sdk_checks(self) -> None:
         plan = self.plan()
         packet = plan.packets[0]
@@ -127,7 +148,7 @@ ROOT = PacketArray
         self.assertIsNotNone(conditional_add.condition)
         self.assertTrue(conditional_add.source_path and conditional_add.source_path.endswith(".flags"))
         self.assertIn("LLMAddMutator.CanApply(obj)", conditional_add.expression)
-        self.assertNotIn("UpdatePresenceSource", emitted)
+        self.assertIn("protected override partial void UpdatePresenceSource", emitted)
 
     def test_emission_is_deterministic_and_requires_semantic_implementation(self) -> None:
         first = self.plan()
@@ -139,7 +160,7 @@ ROOT = PacketArray
             source = render_generated(packet)
             stub = render_semantic_stub(packet)
             self.assertIn("=> MutateCore(obj);", source)
-            self.assertNotIn("partial void", source)
+            self.assertNotIn("partial void MutateCore", source)
             self.assertIn("// REQUIRED: private void MutateCore(DataElement obj)", stub)
             self.assertNotIn("throw new NotImplementedException", stub)
             self.assertNotIn("private void MutateCore(DataElement obj) {", stub)
@@ -154,6 +175,60 @@ ROOT = PacketArray
         self.assertEqual([packet.packet_type for packet in selected.packets], ["second"])
         with self.assertRaisesRegex(ValueError, "absent"):
             build_mutator_plan("demo", dsl_dir=self.dsl, output_dir=self.output, packet_types=["missing"])
+
+    def test_plan_preview_groups_identical_relative_targets_and_keeps_presence_sources(self) -> None:
+        plan = self.plan()
+        first = plan.packets[0]
+        copied = replace(first, packet_type="copy", mutators=tuple(
+            replace(spec, path=spec.path.replace(".first.", ".copy."),
+                    source_path=spec.source_path.replace(".first.", ".copy.") if spec.source_path else None)
+            for spec in first.mutators
+        ))
+        preview = render_plan_yaml(replace(plan, packets=(first, copied, plan.packets[1])))
+        self.assertIn('packets: ["first", "copy"]', preview)
+        self.assertIn('packets: ["second"]', preview)
+        self.assertEqual(preview.count('"items": [Add, Remove, Repeat, Mutate]'), 1)
+        self.assertIn('presence_sources:\n      "conditional": "flags"', preview)
+        self.assertNotIn(str(self.root), preview)
+        self.assertNotIn("MatchesPath", preview)
+        self.assertNotIn("class_name", preview)
+        self.assertFalse(self.output.exists())
+
+    def test_readable_names_and_required_structural_hooks(self) -> None:
+        packet = self.plan().packets[0]
+        add = next(spec for spec in packet.mutators if spec.operation == "Add" and spec.path.endswith(".optional"))
+        self.assertEqual(add.class_name, "DEMOFirstAddOptional")
+        expected = {
+            "Add": ["InitializeAddedContent"],
+            "Remove": [],
+            "Repeat": [],
+            "Mutate": ["MutateCore"],
+        }
+        for spec in packet.mutators:
+            names = expected[spec.operation].copy()
+            if spec.operation in ("Add", "Remove") and spec.runtime_type == "Optional":
+                names.append("UpdatePresenceSource")
+            self.assertEqual([hook.name for hook in spec.hooks], names)
+        stub = render_semantic_stub(packet)
+        self.assertIn("// REQUIRED: protected override void InitializeAddedContent", stub)
+        self.assertIn("// REQUIRED: protected override partial void UpdatePresenceSource", stub)
+
+    def test_generated_mutate_requires_optional_target_presence(self) -> None:
+        packet = self.plan().packets[0]
+        for operation in ("Add", "Remove", "Mutate"):
+            spec = next(spec for spec in packet.mutators
+                        if spec.operation == operation and spec.path.endswith(".conditional"))
+            generated = render_generated(replace(packet, mutators=(spec,)))
+            self.assertEqual("obj is not Peach.LLM.Core.Dom.Optional optional || optional.Exists" in generated,
+                             operation == "Mutate")
+
+    def test_normalized_name_collisions_use_readable_numbers(self) -> None:
+        family = self.dsl / "family_packets.py"
+        family.write_text(FAMILY.replace("    flags = Int8()", "    flags = Int8()\n    foo_bar = Int8()\n    fooBar = Int8()\n    foobar = Int8()"), encoding="utf-8")
+        packet = self.plan().packets[0]
+        names = [spec.class_name for spec in packet.mutators if spec.path.endswith((".foo_bar", ".fooBar", ".foobar"))]
+        self.assertEqual(names, ["DEMOFirstMutateFooBar", "DEMOFirstMutateFooBar_2", "DEMOFirstMutateFoobar_3"])
+        self.assertEqual(packet, self.plan().packets[0])
 
     def test_reuse_requires_manifest_sources_and_dll_but_not_content_checks(self) -> None:
         plan = self.plan()
@@ -299,6 +374,44 @@ ROOT = PacketArray
         self.assertEqual(len(manifest_sources(self.output)), 2)
         self.assertEqual(load_mutator_plan(self.output).packets[0].packet_type, "first")
 
+    def test_disable_persists_per_class_and_preserves_other_mutators_and_semantics(self) -> None:
+        plan = self.plan()
+        for packet in plan.packets:
+            self.fake_build(plan, packet)
+        packet = plan.packets[0]
+        name = packet.mutators[0].class_name
+        semantic = packet.semantic_file.read_text(encoding="utf-8")
+        other_generated = plan.packets[1].generated_file.read_text(encoding="utf-8")
+        disabled = disable_mutators(plan, [name])
+        loaded = load_mutator_plan(self.output)
+        self.assertEqual(loaded.packets[0].mutators[0].enabled, False)
+        self.assertTrue(all(spec.enabled for spec in loaded.packets[0].mutators[1:]))
+        self.assertTrue(all(spec.enabled for spec in loaded.packets[1].mutators))
+        self.assertEqual(packet.semantic_file.read_text(encoding="utf-8"), semantic)
+        self.assertEqual(plan.packets[1].generated_file.read_text(encoding="utf-8"), other_generated)
+        self.assertIn("supportedDataElement(DataElement obj) => false;", packet.generated_file.read_text(encoding="utf-8"))
+        self.assertEqual(render_generated(disabled.packets[0]), packet.generated_file.read_text(encoding="utf-8"))
+        # Packet selection and aggregate compilation retain disabled selectors.
+        set_active_packets(loaded, [packet.packet_type])
+        self.assertFalse(load_mutator_plan(self.output).packets[0].mutators[0].enabled)
+        self.assertEqual(manifest_sources(self.output), sorted([packet.generated_file, packet.semantic_file]))
+        with patch("core.mutator_codegen.compile_csharp", return_value=subprocess.CompletedProcess([], 1, "", "build failed")) as compiler:
+            self.assertEqual(compile_packet(disabled, disabled.packets[0]).returncode, 1)
+        compiler.assert_called_once()
+
+    def test_disable_rejects_unknown_classes_and_modified_generated_sources(self) -> None:
+        plan = self.plan()
+        prepare_packet(plan, plan.packets[0])
+        before = (self.output / MANIFEST_NAME).read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "absent from plan"):
+            disable_mutators(plan, ["UnknownMutator"])
+        packet = plan.packets[0]
+        packet.generated_file.write_text("// edited contract", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "contract changed"):
+            disable_mutators(plan, [packet.mutators[0].class_name])
+        self.assertEqual((self.output / MANIFEST_NAME).read_text(encoding="utf-8"), before)
+        self.assertEqual(packet.generated_file.read_text(encoding="utf-8"), "// edited contract")
+
     def test_prepare_rejects_manifest_owned_by_other_protocol(self) -> None:
         plan = self.plan()
         prepare_packet(plan, plan.packets[0])
@@ -327,7 +440,8 @@ ROOT = PacketArray
         self.assertEqual([packet.packet_type for packet in loaded.packets], ["second", "first"])
         for packet in loaded.packets:
             self.assertEqual(render_generated(packet), packet.generated_file.read_text(encoding="utf-8"))
-            self.assertTrue(all(spec.hooks[0].name == "MutateCore" for spec in packet.mutators if spec.hooks))
+            original = next(original for original in plan.packets if original.packet_type == packet.packet_type)
+            self.assertEqual([spec.hooks for spec in packet.mutators], [spec.hooks for spec in original.mutators])
         manifest = json.loads((self.output / MANIFEST_NAME).read_text(encoding="utf-8"))
         self.assertNotIn("fingerprint", manifest)
         self.assertTrue(all("built" not in record and "plan_fingerprint" not in record for record in manifest["packets"].values()))

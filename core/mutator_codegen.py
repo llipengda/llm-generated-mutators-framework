@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import contextmanager, redirect_stdout
+from dataclasses import dataclass, replace
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,7 @@ class MutatorSpec:
     dsl_path: str | None
     condition: ExprResult | None
     source_path: str | None
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class _ClassRecord(TypedDict):
     kind: str
     dsl_path: str | None
     source_path: str | None
+    enabled: bool
 
 
 class _PacketRecord(TypedDict):
@@ -178,7 +181,7 @@ def _packet_choices(dsl_dir: Path, protocol: str) -> list[tuple[str, str, str | 
 
 
 def _operations(node: MutationNode) -> tuple[Operation, ...]:
-    if node.node_type & NodeType.FIXED or not node.node_type & NodeType.MUTABLE:
+    if node.node_type & (NodeType.FIXED | NodeType.DERIVED) or not node.node_type & NodeType.MUTABLE:
         return ()
     operations: list[Operation] = []
     if node.node_type & NodeType.OPTIONAL:
@@ -234,28 +237,91 @@ def build_mutator_plan(
         filenames.add(stem.casefold())
         namespace = f"Peach.LLM.Generated.Mutators.{protocol.upper()}.{normalize_symbol(packet)}"
         specs: list[MutatorSpec] = []
+        class_names: set[str] = set()
         for node in nodes:
             if not node.path.startswith(packet_path + "."):
                 continue
             relative = node.path[len(packet_path) + 1:]
             field_name = normalize_symbol(relative.replace("[]", "Item"))
-            path_hash = hashlib.sha256(node.path.encode()).hexdigest()[:8]
             for operation in _operations(node):
                 base = "LLMMutator" if operation == "Mutate" else f"LLM{operation}Mutator"
                 expression = supported_data_element_expression(node.path)
                 if operation != "Mutate":
                     extra = ", " + _csharp_string(node.empty_branch_name) if node.empty_branch_name and operation in ("Add", "Remove") else ""
                     expression += f" && {base}.CanApply(obj{extra})"
-                hooks = (SemanticHook("MutateCore", "private void MutateCore(DataElement obj)"),) if operation == "Mutate" else ()
+                hooks: tuple[SemanticHook, ...] = ()
+                if operation == "Mutate":
+                    hooks = (SemanticHook("MutateCore", "private void MutateCore(DataElement obj)"),)
+                elif operation in ("Add", "Remove"):
+                    if node.runtime_type == "Optional":
+                        hooks = (SemanticHook("UpdatePresenceSource", "protected override partial void UpdatePresenceSource(Peach.LLM.Core.Dom.Optional optional, bool exists)"),)
+                    if operation == "Add":
+                        hooks = (SemanticHook("InitializeAddedContent", "protected override void InitializeAddedContent(DataElement content)"), *hooks)
+                stem_name = (protocol.upper() + normalize_symbol(packet) + operation + field_name)[:180]
+                class_name = stem_name
+                suffix = 2
+                while class_name.casefold() in class_names:
+                    ending = f"_{suffix}"
+                    class_name = stem_name[:180 - len(ending)] + ending
+                    suffix += 1
+                class_names.add(class_name.casefold())
                 specs.append(MutatorSpec(
                     packet, node.path, operation,
-                    _bounded_identifier(protocol.upper() + normalize_symbol(packet) + operation + field_name) + "_" + path_hash,
+                    class_name,
                     namespace, base, expression, node.empty_branch_name,
                     node.description, hooks, node.runtime_type, node.kind, node.dsl_path,
                     node.condition, node.source_path,
                 ))
         plans.append(PacketMutatorPlan(packet, destination / (stem + ".g.cs"), destination / (stem + ".semantic.cs"), destination / "out" / (stem + ".dll"), tuple(specs)))
     return MutatorPlan(protocol, directory, destination, tuple(plans))
+
+
+def render_plan_yaml(plan: MutatorPlan) -> str:
+    """Compact review view; executable contracts are still derived from the DSL."""
+    groups: list[tuple[list[str], dict[str, list[Operation]], dict[str, str]]] = []
+    for packet in plan.packets:
+        targets: dict[str, list[Operation]] = {}
+        presence_sources: dict[str, str] = {}
+        for spec in packet.mutators:
+            # Strip the root, PacketUnion and packet alternative from each path.
+            prefix, separator, relative = spec.path.partition(".packet_union.")
+            alternative, dot, relative = relative.partition(".")
+            if not separator or not dot:
+                raise ValueError(f"Cannot locate packet-relative target: {spec.path}")
+            rooted_prefix = prefix + separator + alternative + dot
+            targets.setdefault(relative, []).append(spec.operation)
+            if any(hook.name == "UpdatePresenceSource" for hook in spec.hooks):
+                if spec.source_path is None:
+                    raise ValueError(f"Conditional target has no presence source: {spec.path}")
+                presence_sources[relative] = spec.source_path.removeprefix(rooted_prefix)
+        for packets, existing_targets, existing_sources in groups:
+            if targets == existing_targets and presence_sources == existing_sources:
+                packets.append(packet.packet_type)
+                break
+        else:
+            groups.append(([packet.packet_type], targets, presence_sources))
+
+    # JSON-quoted strings are valid YAML scalars, including paths with [] and
+    # packet names such as ON that YAML could otherwise interpret as booleans.
+    def quote(value: str) -> str:
+        return json.dumps(value, ensure_ascii=False)
+
+    lines = [
+        "# Generated review plan. Field details and method signatures come from the DSL and SDK.",
+        "# presence_sources marks targets requiring UpdatePresenceSource for Add/Remove.",
+        f"protocol: {quote(plan.protocol)}",
+        "groups:" if groups else "groups: []",
+    ]
+    for packets, targets, presence_sources in groups:
+        lines.append("  - packets: [" + ", ".join(quote(packet) for packet in packets) + "]")
+        lines.append("    targets:" if targets else "    targets: {}")
+        for path, operations in targets.items():
+            lines.append(f"      {quote(path)}: [{', '.join(operations)}]")
+        if presence_sources:
+            lines.append("    presence_sources:")
+            for path, source in presence_sources.items():
+                lines.append(f"      {quote(path)}: {quote(source)}")
+    return "\n".join(lines) + "\n"
 
 
 def _csharp_string(value: str) -> str:
@@ -269,15 +335,21 @@ def render_generated(packet: PacketMutatorPlan) -> str:
     lines.extend([f"namespace {packet.mutators[0].namespace}", "{"])
     for spec in packet.mutators:
         extra = ", " + _csharp_string(spec.empty_branch_name) if spec.empty_branch_name and spec.operation in ("Add", "Remove") else ""
+        selector = spec.expression
+        if spec.operation == "Mutate":
+            selector += " && (obj is not Peach.LLM.Core.Dom.Optional optional || optional.Exists)"
         lines.extend([
             f"    [Mutator({_csharp_string(spec.class_name)})]",
             f"    [Description({_csharp_string(spec.operation + ' ' + spec.path)})]",
             f"    public partial class {spec.class_name} : {spec.base_class}", "    {",
             f"        public {spec.class_name}(DataElement obj) : base(obj{extra}) {{ }}",
-            f"        public new static bool supportedDataElement(DataElement obj) => {spec.expression};",
+            f"        public new static bool supportedDataElement(DataElement obj) => {selector if spec.enabled else 'false'};",
         ])
         if spec.operation == "Mutate":
             lines.append("        protected override void PerformMutation(DataElement obj) => MutateCore(obj);")
+        for hook in spec.hooks:
+            if hook.name == "UpdatePresenceSource":
+                lines.append(f"        {hook.signature};")
         lines.extend(["    }", ""])
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -375,6 +447,9 @@ def _read_manifest(directory: Path) -> _Manifest | None:
             target = _string(cls.get("path"), "path")
             base = _string(cls.get("base_class"), "base_class")
             class_name = _string(cls.get("class_name"), "class_name")
+            enabled = cls.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError("mutator enabled must be a boolean")
             empty_branch = _optional_string(cls.get("empty_branch_name"), "empty_branch_name") if "empty_branch_name" in cls else _legacy_empty_branch(directory, generated, class_name)
             expression = supported_data_element_expression(target)
             if operation != "Mutate":
@@ -391,6 +466,7 @@ def _read_manifest(directory: Path) -> _Manifest | None:
                 "kind": _optional_string(cls.get("kind", ""), "kind") or "",
                 "dsl_path": _optional_string(cls.get("dsl_path"), "dsl_path"),
                 "source_path": _optional_string(cls.get("source_path"), "source_path"),
+                "enabled": enabled,
             })
         # Older v1 manifests included build fingerprints. They are ignored and
         # omitted when the host next writes the manifest.
@@ -422,6 +498,7 @@ def _record(plan: MutatorPlan, packet: PacketMutatorPlan) -> _PacketRecord:
         "empty_branch_name": spec.empty_branch_name, "description": spec.description,
         "runtime_type": spec.runtime_type, "kind": spec.kind, "dsl_path": spec.dsl_path,
         "source_path": spec.source_path,
+        "enabled": spec.enabled,
     } for spec in packet.mutators]}
 
 
@@ -526,6 +603,36 @@ def set_active_packets(plan: MutatorPlan, packet_types: Sequence[str]) -> None:
         _write_manifest(plan.output_dir, manifest)
 
 
+def disable_mutators(plan: MutatorPlan, class_names: Sequence[str]) -> MutatorPlan:
+    """Persist disabled selectors while preserving every semantic interface."""
+    names = set(class_names)
+    known = {spec.class_name for packet in plan.packets for spec in packet.mutators}
+    if names - known:
+        raise ValueError("mutator classes absent from plan: " + ", ".join(sorted(names - known)))
+    updated = replace(plan, packets=tuple(
+        replace(packet, mutators=tuple(
+            replace(spec, enabled=False) if spec.class_name in names else spec
+            for spec in packet.mutators
+        )) for packet in plan.packets
+    ))
+    with _locked(plan.output_dir):
+        manifest = _manifest_for(plan)
+        changed = [
+            (old, new) for old, new in zip(plan.packets, updated.packets)
+            if old != new
+        ]
+        # Validate all contracts before changing any generated source.
+        for old, _ in changed:
+            entry = manifest["packets"].get(old.packet_type)
+            if entry != _record(plan, old) or old.generated_file.read_text(encoding="utf-8") != render_generated(old):
+                raise ValueError("mutator contract changed; reload the active manifest before disabling")
+        for _, packet in changed:
+            _atomic_text(packet.generated_file, render_generated(packet))
+            manifest["packets"][packet.packet_type] = _record(updated, packet)
+        _write_manifest(plan.output_dir, manifest)
+    return updated
+
+
 def manifest_packet_types(output_dir: Path) -> list[str]:
     with _locked(output_dir.resolve()):
         manifest = _read_manifest(output_dir.resolve())
@@ -573,7 +680,7 @@ def load_mutator_plan(output_dir: Path) -> MutatorPlan:
                     packet_type, cls["path"], cast(Operation, cls["operation"]), cls["class_name"],
                     cls["namespace"], cls["base_class"], cls["expression"], cls["empty_branch_name"],
                     cls["description"], hooks, cls["runtime_type"], cls["kind"], cls["dsl_path"],
-                    None, cls["source_path"],
+                    None, cls["source_path"], cls["enabled"],
                 ))
             packets.append(PacketMutatorPlan(
                 packet_type, _managed_path(directory, entry["generated_file"], ".g.cs"),
@@ -584,12 +691,24 @@ def load_mutator_plan(output_dir: Path) -> MutatorPlan:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compile managed DSL mutator sources")
-    parser.add_argument("command", choices=("compile", "sources"))
+    parser = argparse.ArgumentParser(description="Preview DSL mutator plans or compile managed sources")
+    parser.add_argument("command", choices=("plan", "compile", "sources"))
     parser.add_argument("protocol")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == "plan":
+            # DSL modules may print their model tree on import; stdout must
+            # contain only the requested YAML when used in a shell pipeline.
+            with redirect_stdout(io.StringIO()):
+                plan = build_mutator_plan(args.protocol)
+            preview = render_plan_yaml(plan)
+            if args.output:
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(preview, encoding="utf-8")
+            else:
+                print(preview, end="")
+            return 0
         directory = Path("llm/peach") / normalize_identifier(args.protocol) / "Mutators"
         sources = manifest_sources(directory)
         if args.command == "sources":

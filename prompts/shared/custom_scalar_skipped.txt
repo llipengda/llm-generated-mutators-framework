@@ -1,0 +1,8 @@
+Custom DSL scalar generation was skipped by the user.
+- Read "{{report_path}}" for the exact ExtendedType contracts.
+- Declare the protocol-prefixed ExtendedType symbols required by shared_refs
+  exactly as planned: {{contracts_json}}.
+- Do not invent a built-in replacement or change the wire encoding to hide
+  the missing runtime implementation.
+- Continue generating the DSL. Later compilation or runtime validation may
+  report that the skipped custom implementation is required.

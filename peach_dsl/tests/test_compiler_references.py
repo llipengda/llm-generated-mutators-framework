@@ -295,7 +295,7 @@ class CompilerReferenceTests(unittest.TestCase):
                         relation = root.find("Number/Relation")
                         self.assertIsNotNone(relation)
                         self.assertEqual(relation.get("of"), "payload")
-                        self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)' if arithmetic else None) or "size", {'size': 3, 'count': 3}))
+                        self.assertEqual(relation.get("expressionGet"), "(size + 1)" if arithmetic else None)
 
     def test_nested_encoded_fixed_length_keeps_runtime_reference(self) -> None:
         class Header(Schema):
@@ -316,7 +316,7 @@ class CompilerReferenceTests(unittest.TestCase):
                     relation = root.find("Block/Number/Relation")
                     self.assertIsNotNone(relation)
                     self.assertEqual(relation.get("of"), "payload")
-                    self.assertEqual(eval(relation.get('expressionGet'), {'size': 3, 'count': 3}), eval(('(size + 1)' if arithmetic else None) or "size", {'size': 3, 'count': 3}))
+                    self.assertEqual(relation.get("expressionGet"), "(size + 1)" if arithmetic else None)
 
     def test_shared_model_keeps_each_parents_numeric_defaults(self) -> None:
         class Header(Schema):
